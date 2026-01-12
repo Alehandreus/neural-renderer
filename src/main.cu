@@ -1,7 +1,9 @@
 #include <cmath>
+#include <cctype>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <filesystem>
 #include <memory>
 #include <string>
 #include <vector>
@@ -61,12 +63,16 @@ int main(int argc, char** argv) {
 
     InputController input(window);
 
-    const char* kExactMeshPath = "/home/me/Downloads/chess.fbx";
-    const char* kRoughMeshPath = "/home/me/brain/mesh-mapping/models/dragon2_outer_3000.fbx";
+    // const char* kExactMeshPath = "/home/me/Downloads/chess.fbx";
+    // const char* kRoughMeshPath = "/home/me/Downloads/chess10000.fbx";
+    const char* kExactMeshPath = "/home/me/brain/mesh-mapping/models/petmonster_orig.fbx";
+    const char* kRoughMeshPath = "/home/me/brain/mesh-mapping/models/petmonster_inner_2000.fbx";
     const char* kCheckpointPath = "/home/me/brain/mesh-mapping/inner_params.bin";
     const int kBounceCount = 3;
+    const int kSamplesPerPixel = 1;
     const bool kNormalizeMeshes = true;
-    const char* kDefaultHdriPath = "/home/me/Downloads/lilienstein.jpg";
+    const bool kNearestTextureSampling = true;
+    const char* kDefaultHdriPath = "/home/me/Downloads/photo_studio_loft_hall_4k.exr";
 
     Scene scene;
     Mesh& exactMesh = scene.exactMesh();
@@ -75,7 +81,23 @@ int main(int argc, char** argv) {
     std::string roughMeshLabel = "procedural sphere";
     if (kExactMeshPath && kExactMeshPath[0] != '\0') {
         std::string loadError;
-        if (LoadMeshFromFile(kExactMeshPath, &exactMesh, &loadError, kNormalizeMeshes)) {
+        std::filesystem::path meshPath(kExactMeshPath);
+        std::string ext = meshPath.extension().string();
+        for (char& ch : ext) {
+            ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+        }
+        bool loaded = false;
+        if (ext == ".gltf" || ext == ".glb") {
+            loaded = LoadTexturedGltfFromFile(
+                    kExactMeshPath,
+                    &exactMesh,
+                    &loadError,
+                    kNormalizeMeshes,
+                    kNearestTextureSampling);
+        } else {
+            loaded = LoadMeshFromFile(kExactMeshPath, &exactMesh, &loadError, kNormalizeMeshes);
+        }
+        if (loaded) {
             exactMeshLabel = kExactMeshPath;
         } else {
             std::fprintf(stderr, "Failed to load exact mesh '%s': %s\n", kExactMeshPath, loadError.c_str());
@@ -105,6 +127,7 @@ int main(int argc, char** argv) {
     bool loaded = false;
     renderer.setUseNeuralQuery(false);
     renderer.setBounceCount(kBounceCount);
+    renderer.setSamplesPerPixel(kSamplesPerPixel);
     if (kCheckpointPath && kCheckpointPath[0] != '\0') {
         loaded = renderer.loadWeightsFromFile(kCheckpointPath);
     }
@@ -146,6 +169,7 @@ int main(int argc, char** argv) {
     bool lambertView = false;
     bool useNeuralQuery = false;
     int bounceCount = kBounceCount;
+    int samplesPerPixel = kSamplesPerPixel;
     bool uiWantsMouse = false;
 
     while (!glfwWindowShouldClose(window)) {
@@ -175,10 +199,14 @@ int main(int argc, char** argv) {
         if (bounceCount < 0) {
             bounceCount = 0;
         }
+        if (samplesPerPixel < 1) {
+            samplesPerPixel = 1;
+        }
         renderer.setLossView(showLossView);
         renderer.setLambertView(lambertView);
         renderer.setUseNeuralQuery(useNeuralQuery);
         renderer.setBounceCount(bounceCount);
+        renderer.setSamplesPerPixel(samplesPerPixel);
 
         double cycle = std::fmod(now, 5.0);
         double ramp = (cycle < 2.5) ? (cycle / 2.5) : ((5.0 - cycle) / 2.5);
@@ -261,6 +289,7 @@ int main(int argc, char** argv) {
         ImGui::Text("Avg loss: %.6f", renderer.averageLoss());
         ImGui::Text("GD steps: %d", renderer.gdSteps());
         ImGui::InputInt("Max bounces", &bounceCount);
+        ImGui::InputInt("Samples per pixel", &samplesPerPixel);
         ImGui::Text("Resolution: %d x %d", fbWidth, fbHeight);
         ImGui::Text("Active mesh: %s", useNeuralQuery ? "rough" : "exact");
         ImGui::Text("Exact mesh: %s", exactMeshLabel.c_str());

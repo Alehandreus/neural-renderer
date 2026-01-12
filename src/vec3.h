@@ -20,6 +20,30 @@ struct Vec3 {
     __host__ __device__ Vec3(float x_, float y_, float z_) : x(x_), y(y_), z(z_) {}
 };
 
+struct Vec2 {
+    float x;
+    float y;
+
+    __host__ __device__ Vec2() : x(0.0f), y(0.0f) {}
+    __host__ __device__ Vec2(float x_, float y_) : x(x_), y(y_) {}
+};
+
+__host__ __device__ inline Vec2 operator+(Vec2 a, Vec2 b) {
+    return Vec2(a.x + b.x, a.y + b.y);
+}
+
+__host__ __device__ inline Vec2 operator-(Vec2 a, Vec2 b) {
+    return Vec2(a.x - b.x, a.y - b.y);
+}
+
+__host__ __device__ inline Vec2 operator*(Vec2 a, float b) {
+    return Vec2(a.x * b, a.y * b);
+}
+
+__host__ __device__ inline Vec2 operator*(float b, Vec2 a) {
+    return a * b;
+}
+
 __host__ __device__ inline Vec3 operator+(Vec3 a, Vec3 b) {
     return Vec3(a.x + b.x, a.y + b.y, a.z + b.z);
 }

@@ -47,6 +47,85 @@ __device__ inline Vec3 mul(Vec3 a, Vec3 b) {
     return Vec3(a.x * b.x, a.y * b.y, a.z * b.z);
 }
 
+__device__ inline Vec3 srgbToLinear(Vec3 c) {
+    auto convert = [](float v) {
+        if (v <= 0.04045f) {
+            return v / 12.92f;
+        }
+        return powf((v + 0.055f) / 1.055f, 2.4f);
+    };
+    return Vec3(convert(c.x), convert(c.y), convert(c.z));
+}
+
+__device__ inline float linearToSrgb(float v) {
+    v = clampf(v, 0.0f, 1.0f);
+    return powf(v, 1.0f / 2.2f);
+}
+
+__device__ inline Vec3 encodeSrgb(Vec3 c) {
+    return Vec3(linearToSrgb(c.x), linearToSrgb(c.y), linearToSrgb(c.z));
+}
+
+__device__ inline Vec3 sampleTextureDevice(const TextureDeviceView* textures,
+                                           int textureCount,
+                                           int texId,
+                                           float u,
+                                           float v,
+                                           bool nearestFilter) {
+    if (!textures || texId < 0 || texId >= textureCount) {
+        return Vec3(1.0f, 1.0f, 1.0f);
+    }
+    TextureDeviceView tex = textures[texId];
+    if (!tex.pixels || tex.width <= 0 || tex.height <= 0 || tex.channels < 3) {
+        return Vec3(1.0f, 1.0f, 1.0f);
+    }
+
+    u = u - floorf(u);
+    v = v - floorf(v);
+    v = 1.0f - v;
+
+    auto fetch = [&](int xi, int yi) {
+        int idx = (yi * tex.width + xi) * tex.channels;
+        float r = tex.pixels[idx + 0] * (1.0f / 255.0f);
+        float g = tex.pixels[idx + 1] * (1.0f / 255.0f);
+        float b = tex.pixels[idx + 2] * (1.0f / 255.0f);
+        return srgbToLinear(Vec3(r, g, b));
+    };
+
+    if (nearestFilter) {
+        int x = static_cast<int>(u * static_cast<float>(tex.width));
+        int y = static_cast<int>(v * static_cast<float>(tex.height));
+        if (x < 0) {
+            x = 0;
+        } else if (x >= tex.width) {
+            x = tex.width - 1;
+        }
+        if (y < 0) {
+            y = 0;
+        } else if (y >= tex.height) {
+            y = tex.height - 1;
+        }
+        return fetch(x, y);
+    }
+
+    float x = u * static_cast<float>(tex.width - 1);
+    float y = v * static_cast<float>(tex.height - 1);
+    int x0 = static_cast<int>(floorf(x));
+    int y0 = static_cast<int>(floorf(y));
+    int x1 = min(x0 + 1, tex.width - 1);
+    int y1 = min(y0 + 1, tex.height - 1);
+    float tx = x - static_cast<float>(x0);
+    float ty = y - static_cast<float>(y0);
+
+    Vec3 c00 = fetch(x0, y0);
+    Vec3 c10 = fetch(x1, y0);
+    Vec3 c01 = fetch(x0, y1);
+    Vec3 c11 = fetch(x1, y1);
+    Vec3 c0 = lerp(c00, c10, tx);
+    Vec3 c1 = lerp(c01, c11, tx);
+    return lerp(c0, c1, ty);
+}
+
 __device__ inline Vec3 sampleEnvironment(EnvironmentDeviceView env, Vec3 dir) {
     if (env.pixels && env.width > 0 && env.height > 0) {
         const float kInvTwoPi = 0.15915494309189535f;
@@ -151,7 +230,7 @@ __device__ inline bool traceMesh(const Ray& ray, MeshDeviceView mesh, HitInfo* o
         return false;
     }
 
-    HitInfo bestHit{false, 0.0f, Vec3()};
+    HitInfo bestHit{false, 0.0f, Vec3(), Vec3(), Vec2(), -1};
     float closestT = 1e30f;
     Vec3 invDir(
         1.0f / ray.direction.x,
@@ -227,6 +306,16 @@ __device__ inline bool traceMesh(const Ray& ray, MeshDeviceView mesh, HitInfo* o
         }
     }
 
+    if (bestHit.hit) {
+        Vec3 texColor = sampleTextureDevice(
+            mesh.textures,
+            mesh.textureCount,
+            bestHit.texId,
+            bestHit.uv.x,
+            bestHit.uv.y,
+            mesh.textureNearest != 0);
+        bestHit.color = mul(bestHit.color, texColor);
+    }
     if (outHit) {
         *outHit = bestHit;
     }
@@ -284,6 +373,7 @@ __device__ inline float atomicMaxFloat(float* address, float value) {
 __global__ void renderNeuralKernel(float* neuralInputs,
                                    float* hitPositions,
                                    float* hitNormals,
+                                   float* hitColors,
                                    int* hitFlags,
                                    RenderParams params,
                                    MeshDeviceView mesh) {
@@ -305,7 +395,7 @@ __global__ void renderNeuralKernel(float* neuralInputs,
         uint32_t rng = initRng(idx, params.sampleOffset, s);
         Ray ray = generatePrimaryRay(x, y, params, rng);
 
-        HitInfo bestHit{false, 0.0f, Vec3()};
+        HitInfo bestHit{false, 0.0f, Vec3(), Vec3(), Vec2(), -1};
         bool hit = traceMesh(ray, mesh, &bestHit);
         if (hit) {
             Vec3 hitPos = ray.at(bestHit.distance);
@@ -324,6 +414,9 @@ __global__ void renderNeuralKernel(float* neuralInputs,
             hitNormals[base + 0] = bestHit.normal.x;
             hitNormals[base + 1] = bestHit.normal.y;
             hitNormals[base + 2] = bestHit.normal.z;
+            hitColors[base + 0] = bestHit.color.x;
+            hitColors[base + 1] = bestHit.color.y;
+            hitColors[base + 2] = bestHit.color.z;
             hitFlags[sampleIdx] = 1;
         } else {
             int base = sampleIdx * 3;
@@ -336,6 +429,9 @@ __global__ void renderNeuralKernel(float* neuralInputs,
             hitNormals[base + 0] = 0.0f;
             hitNormals[base + 1] = 0.0f;
             hitNormals[base + 2] = 0.0f;
+            hitColors[base + 0] = 0.0f;
+            hitColors[base + 1] = 0.0f;
+            hitColors[base + 2] = 0.0f;
             hitFlags[sampleIdx] = 0;
         }
     }
@@ -418,7 +514,7 @@ __global__ void renderBounceKernel(const float* hitPositions,
         bounceDirs[base + 2] = bounceDir.z;
 
         Ray bounceRay(hitPos + normal * 1e-3f, bounceDir);
-        HitInfo bounceHit{false, 0.0f, Vec3()};
+        HitInfo bounceHit{false, 0.0f, Vec3(), Vec3(), Vec2(), -1};
         bool hit = traceMesh(bounceRay, mesh, &bounceHit);
         if (hit) {
             Vec3 bouncePos = bounceRay.at(bounceHit.distance);
@@ -534,7 +630,7 @@ __global__ void renderBounceFromStateKernel(const float* inPositions,
         outDirs[base + 2] = bounceDir.z;
 
         Ray bounceRay(hitPos + normal * 1e-3f, bounceDir);
-        HitInfo bounceHit{false, 0.0f, Vec3()};
+        HitInfo bounceHit{false, 0.0f, Vec3(), Vec3(), Vec2(), -1};
         bool hit = traceMesh(bounceRay, mesh, &bounceHit);
         if (hit) {
             Vec3 bouncePos = bounceRay.at(bounceHit.distance);
@@ -667,9 +763,9 @@ __global__ void applyNetworkDeltaKernel(const float* compactedInputs,
     // hitPositions[fullBase + 0] = xWorld.x;
     // hitPositions[fullBase + 1] = xWorld.y;
     // hitPositions[fullBase + 2] = xWorld.z;
-    normals[fullBase + 0] = -deltaUnit.x;
-    normals[fullBase + 1] = -deltaUnit.y;
-    normals[fullBase + 2] = -deltaUnit.z;
+    normals[fullBase + 0] = deltaUnit.x;
+    normals[fullBase + 1] = deltaUnit.y;
+    normals[fullBase + 2] = deltaUnit.z;
 }
 
 __global__ void projectInputsToMeshKernel(float* compactedInputs,
@@ -843,6 +939,7 @@ __global__ void pathTraceKernel(uchar4* output,
                                 Vec3* accum,
                                 const float* hitPositions,
                                 const float* hitNormals,
+                                const float* hitColors,
                                 const int* hitFlags,
                                 RenderParams params,
                                 MeshDeviceView mesh,
@@ -871,7 +968,10 @@ __global__ void pathTraceKernel(uchar4* output,
         Vec3 hitPos;
         Vec3 normal;
         if (hit) {
-            throughput = params.materialColor;
+            throughput = Vec3(
+                    hitColors[sampleIdx * 3 + 0],
+                    hitColors[sampleIdx * 3 + 1],
+                    hitColors[sampleIdx * 3 + 2]);
             hitPos = Vec3(
                     hitPositions[sampleIdx * 3 + 0],
                     hitPositions[sampleIdx * 3 + 1],
@@ -917,7 +1017,7 @@ __global__ void pathTraceKernel(uchar4* output,
             }
 
             ray = Ray(hitPos + normal * 1e-3f, bounceDir);
-            HitInfo bounceHit{false, 0.0f, Vec3()};
+            HitInfo bounceHit{false, 0.0f, Vec3(), Vec3(), Vec2(), -1};
             hit = traceMesh(ray, mesh, &bounceHit);
             if (!hit) {
                 Vec3 envLight = sampleEnvironment(env, ray.direction);
@@ -928,6 +1028,7 @@ __global__ void pathTraceKernel(uchar4* output,
 
             hitPos = ray.at(bounceHit.distance);
             normal = bounceHit.normal;
+            throughput = mul(throughput, bounceHit.color);
         }
 
         sum += radiance;
@@ -939,9 +1040,7 @@ __global__ void pathTraceKernel(uchar4* output,
     float invSamples = 1.0f / static_cast<float>(params.sampleOffset + params.samplesPerPixel);
     Vec3 color = newSum * invSamples;
 
-    color.x = fminf(fmaxf(color.x, 0.0f), 1.0f);
-    color.y = fminf(fmaxf(color.y, 0.0f), 1.0f);
-    color.z = fminf(fmaxf(color.z, 0.0f), 1.0f);
+    color = encodeSrgb(color);
 
     output[pixelIdx] = make_uchar4(
             static_cast<unsigned char>(color.x * 255.0f),
@@ -952,6 +1051,7 @@ __global__ void pathTraceKernel(uchar4* output,
 
 __global__ void lambertKernel(uchar4* output,
                               const float* hitNormals,
+                              const float* hitColors,
                               const int* hitFlags,
                               RenderParams params,
                               EnvironmentDeviceView env) {
@@ -978,6 +1078,10 @@ __global__ void lambertKernel(uchar4* output,
                     hitNormals[sampleIdx * 3 + 0],
                     hitNormals[sampleIdx * 3 + 1],
                     hitNormals[sampleIdx * 3 + 2]);
+            Vec3 baseColor(
+                    hitColors[sampleIdx * 3 + 0],
+                    hitColors[sampleIdx * 3 + 1],
+                    hitColors[sampleIdx * 3 + 2]);
             float nlen = length(normal);
             if (nlen > 0.0f) {
                 normal = normal / nlen;
@@ -988,7 +1092,7 @@ __global__ void lambertKernel(uchar4* output,
                 normal = -normal;
             }
             float ndotl = fmaxf(0.0f, dot(normal, -primaryRay.direction));
-            color = params.materialColor * ndotl;
+            color = baseColor * ndotl;
         } else {
             color = sampleEnvironment(env, primaryRay.direction);
         }
@@ -997,9 +1101,7 @@ __global__ void lambertKernel(uchar4* output,
     }
 
     Vec3 color = sum * (1.0f / static_cast<float>(params.samplesPerPixel));
-    color.x = fminf(fmaxf(color.x, 0.0f), 1.0f);
-    color.y = fminf(fmaxf(color.y, 0.0f), 1.0f);
-    color.z = fminf(fmaxf(color.z, 0.0f), 1.0f);
+    color = encodeSrgb(color);
 
     output[pixelIdx] = make_uchar4(
             static_cast<unsigned char>(color.x * 255.0f),
@@ -1073,6 +1175,7 @@ __global__ void recordEnvMissesKernel(const int* missFlags,
 __global__ void pathTraceNeuralEnvKernel(uchar4* output,
                                          Vec3* accum,
                                          const int* hitFlags,
+                                         const float* hitColors,
                                          const int* envHitFlags,
                                          const float* envDirs,
                                          RenderParams params,
@@ -1096,7 +1199,11 @@ __global__ void pathTraceNeuralEnvKernel(uchar4* output,
 
         if (envHitFlags[sampleIdx]) {
             if (hitFlags[sampleIdx]) {
-                throughput = params.materialColor;
+                int base = sampleIdx * 3;
+                throughput = Vec3(
+                        hitColors[base + 0],
+                        hitColors[base + 1],
+                        hitColors[base + 2]);
             }
             int base = sampleIdx * 3;
             Vec3 envDir(
@@ -1117,9 +1224,7 @@ __global__ void pathTraceNeuralEnvKernel(uchar4* output,
     float invSamples = 1.0f / static_cast<float>(params.sampleOffset + params.samplesPerPixel);
     Vec3 color = newSum * invSamples;
 
-    color.x = fminf(fmaxf(color.x, 0.0f), 1.0f);
-    color.y = fminf(fmaxf(color.y, 0.0f), 1.0f);
-    color.z = fminf(fmaxf(color.z, 0.0f), 1.0f);
+    color = encodeSrgb(color);
 
     output[pixelIdx] = make_uchar4(
             static_cast<unsigned char>(color.x * 255.0f),
@@ -1223,7 +1328,7 @@ RendererNeural::RendererNeural(Scene& scene)
             {"otype", "HashGrid"},
             {"n_levels", 8},
             {"n_features_per_level", 8},
-            {"log2_hashmap_size", 20},
+            {"log2_hashmap_size", 10},
             {"base_resolution", 2},
             {"per_level_scale", 2.0},
             {"fixed_point_pos", false},
@@ -1402,12 +1507,13 @@ void RendererNeural::render(const Vec3& camPos, std::vector<uchar4>& hostPixels)
         }
     }
     if (cameraMoved || useNeuralQuery_ != lastUseNeuralQuery_ || lambertView_ != lastLambertView_ ||
-        maxBounces != lastBounceCount_) {
+        maxBounces != lastBounceCount_ || samplesPerPixel != lastSamplesPerPixel_) {
         resetAccum();
     }
     lastUseNeuralQuery_ = useNeuralQuery_;
     lastLambertView_ = lambertView_;
     lastBounceCount_ = maxBounces;
+    lastSamplesPerPixel_ = samplesPerPixel;
     lastCamPos_ = camPos;
     lastBasis_ = basis_;
     lastFovY_ = basis_.fovY;
@@ -1440,6 +1546,7 @@ void RendererNeural::render(const Vec3& camPos, std::vector<uchar4>& hostPixels)
             inputs_,
             hitPositions_,
             normals_,
+            hitColors_,
             hitFlags_,
             params,
             meshView);
@@ -1776,6 +1883,7 @@ void RendererNeural::render(const Vec3& camPos, std::vector<uchar4>& hostPixels)
         lambertKernel<<<grid, block>>>(
                 devicePixels_,
                 normals_,
+                hitColors_,
                 hitFlags_,
                 params,
                 envView);
@@ -1791,6 +1899,7 @@ void RendererNeural::render(const Vec3& camPos, std::vector<uchar4>& hostPixels)
                 devicePixels_,
                 accum_,
                 hitFlags_,
+                hitColors_,
                 envHitFlags_,
                 envDirs_,
                 params,
@@ -1803,6 +1912,7 @@ void RendererNeural::render(const Vec3& camPos, std::vector<uchar4>& hostPixels)
                 accum_,
                 hitPositions_,
                 normals_,
+                hitColors_,
                 hitFlags_,
                 params,
                 meshView,
@@ -1835,6 +1945,10 @@ void RendererNeural::release() {
     if (hitPositions_) {
         cudaFree(hitPositions_);
         hitPositions_ = nullptr;
+    }
+    if (hitColors_) {
+        cudaFree(hitColors_);
+        hitColors_ = nullptr;
     }
     if (compactedInputs_) {
         cudaFree(compactedInputs_);
@@ -1963,6 +2077,7 @@ bool RendererNeural::ensureNetworkBuffers(size_t elementCount) {
         return false;
     }
     if (elementCount <= bufferElements_ &&
+            hitColors_ &&
             bounceInputs_ && bouncePositions_ && bounceNormals_ && bounceDirs_ && bounceHitFlags_ &&
             bounce2Inputs_ && bounce2Positions_ && bounce2Normals_ && bounce2Dirs_ && bounce2HitFlags_ &&
             envDirs_ && envHitFlags_) {
@@ -1975,6 +2090,10 @@ bool RendererNeural::ensureNetworkBuffers(size_t elementCount) {
     if (hitPositions_) {
         cudaFree(hitPositions_);
         hitPositions_ = nullptr;
+    }
+    if (hitColors_) {
+        cudaFree(hitColors_);
+        hitColors_ = nullptr;
     }
     if (compactedInputs_) {
         cudaFree(compactedInputs_);
@@ -2080,6 +2199,7 @@ bool RendererNeural::ensureNetworkBuffers(size_t elementCount) {
     size_t inputBytes = elementCount * 3 * sizeof(float);
     checkCuda(cudaMalloc(&inputs_, inputBytes), "cudaMalloc tcnn inputs");
     checkCuda(cudaMalloc(&hitPositions_, inputBytes), "cudaMalloc hit positions");
+    checkCuda(cudaMalloc(&hitColors_, inputBytes), "cudaMalloc hit colors");
     checkCuda(cudaMalloc(&compactedInputs_, inputBytes), "cudaMalloc tcnn compacted inputs");
     checkCuda(cudaMalloc(&normals_, inputBytes), "cudaMalloc tcnn normals");
     checkCuda(cudaMalloc(&bounceInputs_, inputBytes), "cudaMalloc bounce inputs");

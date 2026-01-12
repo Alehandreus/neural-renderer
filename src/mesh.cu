@@ -30,6 +30,11 @@ void Mesh::setTriangles(std::vector<Triangle> triangles) {
     boundsDirty_ = true;
 }
 
+void Mesh::setTextures(std::vector<MeshTexture> textures) {
+    textures_ = std::move(textures);
+    texturesDirty_ = true;
+}
+
 bool Mesh::uploadToDevice() {
     if (bvhDirty_) {
         buildBvh();
@@ -81,6 +86,57 @@ bool Mesh::uploadToDevice() {
         deviceNodesDirty_ = false;
     }
 
+    if (texturesDirty_ || deviceTextureCount_ != static_cast<int>(textures_.size())) {
+        if (deviceTextures_) {
+            cudaFree(deviceTextures_);
+            deviceTextures_ = nullptr;
+        }
+        for (unsigned char* ptr : deviceTexturePixels_) {
+            if (ptr) {
+                cudaFree(ptr);
+            }
+        }
+        deviceTexturePixels_.clear();
+        deviceTextureCount_ = 0;
+
+        if (!textures_.empty()) {
+            deviceTexturePixels_.resize(textures_.size(), nullptr);
+            std::vector<TextureDeviceView> hostViews;
+            hostViews.reserve(textures_.size());
+            for (size_t i = 0; i < textures_.size(); ++i) {
+                const MeshTexture& tex = textures_[i];
+                size_t byteCount = static_cast<size_t>(tex.width) * static_cast<size_t>(tex.height) *
+                        static_cast<size_t>(tex.channels);
+                unsigned char* devicePixels = nullptr;
+                if (byteCount > 0 && !tex.pixels.empty()) {
+                    checkCuda(cudaMalloc(&devicePixels, byteCount), "cudaMalloc texture pixels");
+                    checkCuda(cudaMemcpy(
+                        devicePixels,
+                        tex.pixels.data(),
+                        byteCount,
+                        cudaMemcpyHostToDevice),
+                        "cudaMemcpy texture pixels");
+                }
+                deviceTexturePixels_[i] = devicePixels;
+                hostViews.push_back(TextureDeviceView{devicePixels, tex.width, tex.height, tex.channels});
+            }
+            if (!hostViews.empty()) {
+                checkCuda(cudaMalloc(
+                    &deviceTextures_,
+                    hostViews.size() * sizeof(TextureDeviceView)),
+                    "cudaMalloc texture views");
+                checkCuda(cudaMemcpy(
+                    deviceTextures_,
+                    hostViews.data(),
+                    hostViews.size() * sizeof(TextureDeviceView),
+                    cudaMemcpyHostToDevice),
+                    "cudaMemcpy texture views");
+                deviceTextureCount_ = static_cast<int>(hostViews.size());
+            }
+        }
+        texturesDirty_ = false;
+    }
+
     return true;
 }
 
@@ -95,4 +151,15 @@ void Mesh::releaseDevice() {
         deviceNodes_ = nullptr;
     }
     deviceNodeCount_ = 0;
+    if (deviceTextures_) {
+        cudaFree(deviceTextures_);
+        deviceTextures_ = nullptr;
+    }
+    for (unsigned char* ptr : deviceTexturePixels_) {
+        if (ptr) {
+            cudaFree(ptr);
+        }
+    }
+    deviceTexturePixels_.clear();
+    deviceTextureCount_ = 0;
 }
