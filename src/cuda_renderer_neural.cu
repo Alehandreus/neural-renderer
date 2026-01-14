@@ -444,6 +444,7 @@ __global__ void renderNeuralKernel(float* neuralInputs,
 __global__ void renderBounceKernel(const float* hitPositions,
                                    const float* hitNormals,
                                    const int* hitFlags,
+                                   int* pathActive,
                                    RenderParams params,
                                    MeshDeviceView mesh,
                                    float* bounceInputs,
@@ -506,7 +507,26 @@ __global__ void renderBounceKernel(const float* hitPositions,
             normal = Vec3(0.0f, 1.0f, 0.0f);
         }
         if (dot(normal, primaryRay.direction) > 0.0f) {
-            normal = -normal;
+            if (pathActive) {
+                pathActive[sampleIdx] = 0;
+            }
+            bounceInputs[base + 0] = 0.0f;
+            bounceInputs[base + 1] = 0.0f;
+            bounceInputs[base + 2] = 0.0f;
+            bouncePositions[base + 0] = 0.0f;
+            bouncePositions[base + 1] = 0.0f;
+            bouncePositions[base + 2] = 0.0f;
+            bounceNormals[base + 0] = 0.0f;
+            bounceNormals[base + 1] = 0.0f;
+            bounceNormals[base + 2] = 0.0f;
+            bounceColors[base + 0] = 0.0f;
+            bounceColors[base + 1] = 0.0f;
+            bounceColors[base + 2] = 0.0f;
+            bounceDirs[base + 0] = 0.0f;
+            bounceDirs[base + 1] = 0.0f;
+            bounceDirs[base + 2] = 0.0f;
+            bounceFlags[sampleIdx] = 0;
+            continue;
         }
 
         Vec3 bounceDir;
@@ -566,6 +586,7 @@ __global__ void renderBounceFromStateKernel(const float* inPositions,
                                             const float* inNormals,
                                             const int* inFlags,
                                             const float* inDirs,
+                                            int* pathActive,
                                             uint32_t bounceIndex,
                                             RenderParams params,
                                             MeshDeviceView mesh,
@@ -632,7 +653,26 @@ __global__ void renderBounceFromStateKernel(const float* inPositions,
             normal = Vec3(0.0f, 1.0f, 0.0f);
         }
         if (dot(normal, incoming) > 0.0f) {
-            normal = -normal;
+            if (pathActive) {
+                pathActive[sampleIdx] = 0;
+            }
+            outInputs[base + 0] = 0.0f;
+            outInputs[base + 1] = 0.0f;
+            outInputs[base + 2] = 0.0f;
+            outPositions[base + 0] = 0.0f;
+            outPositions[base + 1] = 0.0f;
+            outPositions[base + 2] = 0.0f;
+            outNormals[base + 0] = 0.0f;
+            outNormals[base + 1] = 0.0f;
+            outNormals[base + 2] = 0.0f;
+            outColors[base + 0] = 0.0f;
+            outColors[base + 1] = 0.0f;
+            outColors[base + 2] = 0.0f;
+            outDirs[base + 0] = 0.0f;
+            outDirs[base + 1] = 0.0f;
+            outDirs[base + 2] = 0.0f;
+            outFlags[sampleIdx] = 0;
+            continue;
         }
 
         Vec3 bounceDir;
@@ -752,9 +792,12 @@ __global__ void applyNetworkDeltaKernel(const float* compactedInputs,
                                         const __half* outputs,
                                         const int* hitIndices,
                                         int hitCount,
+                                        RenderParams params,
                                         Vec3 meshMin,
                                         Vec3 meshExtent,
                                         int outputStride,
+                                        float lossThreshold,
+                                        int* hitFlags,
                                         float* hitPositions,
                                         float* normals) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
@@ -782,8 +825,32 @@ __global__ void applyNetworkDeltaKernel(const float* compactedInputs,
             xUpdated.y * meshExtent.y + meshMin.y,
             xUpdated.z * meshExtent.z + meshMin.z);
 
-    int pixelIdx = hitIndices[idx];
-    int fullBase = pixelIdx * 3;
+    int sampleIdx = hitIndices[idx];
+    int fullBase = sampleIdx * 3;
+    if (lossThreshold > 0.0f) {
+        int pixelIdx = params.pixelCount > 0 ? (sampleIdx % params.pixelCount) : sampleIdx;
+        int sampleInPixel = params.pixelCount > 0 ? (sampleIdx / params.pixelCount) : 0;
+        int px = pixelIdx - (pixelIdx / params.width) * params.width;
+        int py = pixelIdx / params.width;
+
+        uint32_t rng = initRng(pixelIdx, params.sampleOffset, sampleInPixel);
+        Ray primaryRay = generatePrimaryRay(px, py, params, rng);
+        Vec3 toPoint = xWorld - params.camPos;
+        float t = dot(toPoint, primaryRay.direction);
+        Vec3 closest = params.camPos + primaryRay.direction * t;
+        Vec3 residual = xWorld - closest;
+        float loss = length(residual);
+        if (loss > lossThreshold) {
+            hitFlags[sampleIdx] = 0;
+            hitPositions[fullBase + 0] = 0.0f;
+            hitPositions[fullBase + 1] = 0.0f;
+            hitPositions[fullBase + 2] = 0.0f;
+            normals[fullBase + 0] = 0.0f;
+            normals[fullBase + 1] = 0.0f;
+            normals[fullBase + 2] = 0.0f;
+            return;
+        }
+    }
     hitPositions[fullBase + 0] = xWorld.x;
     hitPositions[fullBase + 1] = xWorld.y;
     hitPositions[fullBase + 2] = xWorld.z;
@@ -827,6 +894,7 @@ __global__ void computeLossGradKernel(const float* compactedInputs,
                                       const __half* outputs,
                                       const int* hitIndices,
                                       int hitCount,
+                                      float invHitCount,
                                       RenderParams params,
                                       Vec3 meshMin,
                                       Vec3 meshExtent,
@@ -879,6 +947,7 @@ __global__ void computeLossGradKernel(const float* compactedInputs,
             grad.x * meshExtent.x,
             grad.y * meshExtent.y,
             grad.z * meshExtent.z);
+    gradDelta = gradDelta * invHitCount;
 
     dL_doutput[outputBase + 0] = __float2half(gradDelta.x);
     dL_doutput[outputBase + 1] = __float2half(gradDelta.y);
@@ -889,6 +958,7 @@ __global__ void addDirectGradKernel(const float* compactedInputs,
                                     const __half* outputs,
                                     const int* hitIndices,
                                     int hitCount,
+                                    float invHitCount,
                                     RenderParams params,
                                     Vec3 meshMin,
                                     Vec3 meshExtent,
@@ -941,6 +1011,7 @@ __global__ void addDirectGradKernel(const float* compactedInputs,
             grad.x * meshExtent.x,
             grad.y * meshExtent.y,
             grad.z * meshExtent.z);
+    gradDelta = gradDelta * invHitCount;
 
     dL_dinput[inputBase + 0] += gradDelta.x;
     dL_dinput[inputBase + 1] += gradDelta.y;
@@ -1029,7 +1100,8 @@ __global__ void pathTraceKernel(uchar4* output,
                 normal = Vec3(0.0f, 1.0f, 0.0f);
             }
             if (dot(normal, ray.direction) > 0.0f) {
-                normal = -normal;
+                radiance = Vec3(0.0f, 0.0f, 0.0f);
+                break;
             }
 
             Vec3 bounceDir;
@@ -1113,10 +1185,11 @@ __global__ void lambertKernel(uchar4* output,
                 normal = Vec3(0.0f, 1.0f, 0.0f);
             }
             if (dot(normal, primaryRay.direction) > 0.0f) {
-                normal = -normal;
+                color = Vec3(0.0f, 0.0f, 0.0f);
+            } else {
+                float ndotl = fmaxf(0.0f, dot(normal, -primaryRay.direction));
+                color = baseColor * ndotl;
             }
-            float ndotl = fmaxf(0.0f, dot(normal, -primaryRay.direction));
-            color = baseColor * ndotl;
             // color = {
             //     // ndotl < 0, ndotl < 0, ndotl < 0
             //     ndotl > 0, ndotl > 0, ndotl > 0
@@ -1265,6 +1338,7 @@ __global__ void initNeuralPathKernel(Vec3* throughput,
                                      Vec3* radiance,
                                      int* active,
                                      const int* hitFlags,
+                                     const float* hitNormals,
                                      const float* hitColors,
                                      RenderParams params,
                                      EnvironmentDeviceView env) {
@@ -1290,6 +1364,22 @@ __global__ void initNeuralPathKernel(Vec3* throughput,
 
         if (hitFlags[sampleIdx]) {
             int base = sampleIdx * 3;
+            Vec3 normal(
+                    hitNormals[base + 0],
+                    hitNormals[base + 1],
+                    hitNormals[base + 2]);
+            float nlen = length(normal);
+            if (nlen > 0.0f) {
+                normal = normal / nlen;
+            } else {
+                normal = Vec3(0.0f, 1.0f, 0.0f);
+            }
+            if (dot(normal, primaryRay.direction) > 0.0f) {
+                throughput[sampleIdx] = Vec3(0.0f, 0.0f, 0.0f);
+                radiance[sampleIdx] = Vec3(0.0f, 0.0f, 0.0f);
+                active[sampleIdx] = 0;
+                continue;
+            }
             sampleThroughput = Vec3(
                     hitColors[base + 0],
                     hitColors[base + 1],
@@ -1491,7 +1581,7 @@ RendererNeural::RendererNeural(Scene& scene)
             {"otype", "HashGrid"},
             {"n_levels", 8},
             {"n_features_per_level", 8},
-            {"log2_hashmap_size", 13},
+            {"log2_hashmap_size", 10},
             {"base_resolution", 2},
             {"per_level_scale", 2.0},
             {"fixed_point_pos", false},
@@ -1649,8 +1739,8 @@ void RendererNeural::render(const Vec3& camPos, std::vector<uchar4>& hostPixels)
             meshExtent.z != 0.0f ? 1.0f / meshExtent.z : 0.0f);
 
     bool cameraMoved = !hasLastCamera_;
+    const float kEps = 1e-4f;
     if (!cameraMoved) {
-        const float kEps = 1e-4f;
         if (fabsf(camPos.x - lastCamPos_.x) > kEps ||
             fabsf(camPos.y - lastCamPos_.y) > kEps ||
             fabsf(camPos.z - lastCamPos_.z) > kEps) {
@@ -1669,14 +1759,17 @@ void RendererNeural::render(const Vec3& camPos, std::vector<uchar4>& hostPixels)
             cameraMoved = true;
         }
     }
+    bool lossThresholdChanged = fabsf(lossThreshold_ - lastLossThreshold_) > kEps;
     if (cameraMoved || useNeuralQuery_ != lastUseNeuralQuery_ || lambertView_ != lastLambertView_ ||
-        maxBounces != lastBounceCount_ || samplesPerPixel != lastSamplesPerPixel_) {
+        maxBounces != lastBounceCount_ || samplesPerPixel != lastSamplesPerPixel_ ||
+        lossThresholdChanged) {
         resetAccum();
     }
     lastUseNeuralQuery_ = useNeuralQuery_;
     lastLambertView_ = lambertView_;
     lastBounceCount_ = maxBounces;
     lastSamplesPerPixel_ = samplesPerPixel;
+    lastLossThreshold_ = lossThreshold_;
     lastCamPos_ = camPos;
     lastBasis_ = basis_;
     lastFovY_ = basis_.fovY;
@@ -1767,6 +1860,7 @@ void RendererNeural::render(const Vec3& camPos, std::vector<uchar4>& hostPixels)
                 const int blockSize = 256;
                 int gradGrid = static_cast<int>((hitCount + blockSize - 1) / blockSize);
                 int inputGrid = static_cast<int>(((hitCount * 3) + blockSize - 1) / blockSize);
+                float invHitCount = 1.0f / static_cast<float>(hitCount);
                 int steps = gdSteps_;
                 if (steps < 0) {
                     steps = 0;
@@ -1774,7 +1868,10 @@ void RendererNeural::render(const Vec3& camPos, std::vector<uchar4>& hostPixels)
                 // if (steps > 10) {
                 //     steps = 10;
                 // }
-                constexpr float kLearningRate = 0.0003f;
+                float learningRate = gdLearningRate_;
+                if (learningRate < 0.0f) {
+                    learningRate = 0.0f;
+                }
 
                 for (int step = 0; step < steps; ++step) {
                     tcnn::cpp::Context ctx = network_->forward(
@@ -1793,6 +1890,7 @@ void RendererNeural::render(const Vec3& camPos, std::vector<uchar4>& hostPixels)
                             static_cast<const __half*>(outputs_),
                             hitIndices_,
                             hitCount,
+                            invHitCount,
                             params,
                             meshMin,
                             meshExtent,
@@ -1816,6 +1914,7 @@ void RendererNeural::render(const Vec3& camPos, std::vector<uchar4>& hostPixels)
                             static_cast<const __half*>(outputs_),
                             hitIndices_,
                             hitCount,
+                            invHitCount,
                             params,
                             meshMin,
                             meshExtent,
@@ -1827,7 +1926,7 @@ void RendererNeural::render(const Vec3& camPos, std::vector<uchar4>& hostPixels)
                             compactedInputs_,
                             compactedDLDInput_,
                             hitCount,
-                            kLearningRate);
+                            learningRate);
                     checkCuda(cudaGetLastError(), "sgdInputsKernel launch");
 
                     projectInputsToMeshKernel<<<gradGrid, blockSize>>>(
@@ -1858,9 +1957,12 @@ void RendererNeural::render(const Vec3& camPos, std::vector<uchar4>& hostPixels)
                         static_cast<const __half*>(outputs_),
                         hitIndices_,
                         hitCount,
+                        params,
                         meshMin,
                         meshExtent,
                         static_cast<int>(outputDims_),
+                        lossThreshold_,
+                        hitFlags_,
                         hitPositions_,
                         normals_);
                 checkCuda(cudaGetLastError(), "applyNetworkDeltaKernel launch");
@@ -1936,9 +2038,12 @@ void RendererNeural::render(const Vec3& camPos, std::vector<uchar4>& hostPixels)
                     static_cast<const __half*>(outputs_),
                     hitIndices_,
                     hitCount,
+                    params,
                     meshMin,
                     meshExtent,
                     static_cast<int>(outputDims_),
+                    -1.0f,
+                    flags,
                     positions,
                     normalsOut);
             checkCuda(cudaGetLastError(), "applyNetworkDeltaKernel forward launch");
@@ -1952,6 +2057,7 @@ void RendererNeural::render(const Vec3& camPos, std::vector<uchar4>& hostPixels)
                 pathRadiance_,
                 pathActive_,
                 hitFlags_,
+                normals_,
                 hitColors_,
                 params,
                 envView);
@@ -1962,6 +2068,7 @@ void RendererNeural::render(const Vec3& camPos, std::vector<uchar4>& hostPixels)
                     hitPositions_,
                     normals_,
                     hitFlags_,
+                    pathActive_,
                     params,
                     meshView,
                     bounceInputs_,
@@ -2005,6 +2112,7 @@ void RendererNeural::render(const Vec3& camPos, std::vector<uchar4>& hostPixels)
                         inNormals,
                         inFlags,
                         inDirs,
+                        pathActive_,
                         static_cast<uint32_t>(bounce),
                         params,
                         meshView,

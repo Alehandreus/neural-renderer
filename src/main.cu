@@ -63,11 +63,16 @@ int main(int argc, char** argv) {
 
     InputController input(window);
 
-    const char* kExactMeshPath = "/home/me/Downloads/chess_orig.fbx";
+    // const char* kExactMeshPath = "/home/me/Downloads/chess_orig.fbx";
     // const char* kExactMeshPath = "/home/me/Downloads/chess_outer_10000.fbx";
-    const char* kRoughMeshPath = "/home/me/Downloads/chess_outer_10000.fbx";
+    // const char* kRoughMeshPath = "/home/me/Downloads/chess_outer_10000.fbx";
+
     // const char* kExactMeshPath = "/home/me/brain/mesh-mapping/models/dragon_outer_3000.fbx";
     // const char* kRoughMeshPath = "/home/me/brain/mesh-mapping/models/dragon_outer_3000.fbx";
+
+    const char* kExactMeshPath = "/home/me/Downloads/sphere.fbx";
+    const char* kRoughMeshPath = "/home/me/Downloads/cube.fbx";
+    
     const char* kCheckpointPath = "/home/me/brain/mesh-mapping/checkpoints/outer_params.bin";
     const int kBounceCount = 3;
     const int kSamplesPerPixel = 1;
@@ -172,6 +177,9 @@ int main(int argc, char** argv) {
     bool useNeuralQuery = true;
     int bounceCount = kBounceCount;
     int samplesPerPixel = kSamplesPerPixel;
+    int gdSteps = 0;
+    float gdLearningRate = 10.0f;
+    float lossThreshold = 0.0f;
     bool uiWantsMouse = false;
 
     while (!glfwWindowShouldClose(window)) {
@@ -204,17 +212,27 @@ int main(int argc, char** argv) {
         if (samplesPerPixel < 1) {
             samplesPerPixel = 1;
         }
+        if (gdSteps < 0) {
+            gdSteps = 0;
+        }
+        if (gdLearningRate < 0.0f) {
+            gdLearningRate = 0.0f;
+        }
+        if (lossThreshold < 0.0f) {
+            lossThreshold = 0.0f;
+        }
+        if (!useNeuralQuery) {
+            showLossView = false;
+        }
         renderer.setLossView(showLossView);
         renderer.setLambertView(lambertView);
         renderer.setUseNeuralQuery(useNeuralQuery);
-        renderer.setBounceCount(bounceCount);
+        int effectiveBounces = showLossView ? 0 : bounceCount;
+        renderer.setBounceCount(effectiveBounces);
         renderer.setSamplesPerPixel(samplesPerPixel);
-
-        double cycle = std::fmod(now, 5.0);
-        double ramp = (cycle < 2.5) ? (cycle / 2.5) : ((5.0 - cycle) / 2.5);
-        int steps = static_cast<int>(std::round(ramp * 10.0));
-        // renderer.setGdSteps(steps);
-        renderer.setGdSteps(0);
+        renderer.setGdSteps(useNeuralQuery ? gdSteps : 0);
+        renderer.setGdLearningRate(gdLearningRate);
+        renderer.setLossThreshold(useNeuralQuery ? lossThreshold : 0.0f);
 
         glfwGetFramebufferSize(window, &fbWidth, &fbHeight);
         if (fbWidth != renderer.width() || fbHeight != renderer.height()) {
@@ -286,10 +304,14 @@ int main(int argc, char** argv) {
         ImGui::Text("WASD move, Q/E up/down, mouse look.");
         ImGui::Text("ESC releases mouse, click to recapture.");
         ImGui::Checkbox("Neural query", &useNeuralQuery);
-        ImGui::Checkbox("Loss view", &showLossView);
+        if (useNeuralQuery) {
+            ImGui::Checkbox("Loss (first segment)", &showLossView);
+            ImGui::InputInt("GD steps", &gdSteps);
+            ImGui::InputFloat("GD learning rate", &gdLearningRate, 0.1f, 1.0f, "%.3f");
+            ImGui::InputFloat("Loss threshold", &lossThreshold, 0.01f, 0.1f, "%.4f");
+        }
         ImGui::Checkbox("Lambert (no bounces)", &lambertView);
         ImGui::Text("Avg loss: %.6f", renderer.averageLoss());
-        ImGui::Text("GD steps: %d", renderer.gdSteps());
         ImGui::InputInt("Max bounces", &bounceCount);
         ImGui::InputInt("Samples per pixel", &samplesPerPixel);
         ImGui::Text("Resolution: %d x %d", fbWidth, fbHeight);

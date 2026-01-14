@@ -37,12 +37,16 @@ class RendererNeural final {
     bool useNeuralQuery() const { return useNeuralQuery_; }
     bool loadWeightsFromFile(const std::string& path);
     void setLossView(bool enabled) { lossView_ = enabled; }
+    void setLossThreshold(float threshold) { lossThreshold_ = threshold; }
     void setGdSteps(int steps) { gdSteps_ = steps; }
+    void setGdLearningRate(float rate) { gdLearningRate_ = rate; }
     void setSamplesPerPixel(int samples) { samplesPerPixel_ = samples; }
     void setBounceCount(int count) { bounceCount_ = count; }
     void setLambertView(bool enabled) { lambertView_ = enabled; }
     float averageLoss() const { return lastAvgLoss_; }
+    float lossThreshold() const { return lossThreshold_; }
     int gdSteps() const { return gdSteps_; }
+    float gdLearningRate() const { return gdLearningRate_; }
     int samplesPerPixel() const { return samplesPerPixel_; }
     int bounceCount() const { return bounceCount_; }
     size_t paramsBytes() const { return paramsBytes_; }
@@ -107,7 +111,9 @@ class RendererNeural final {
     Vec3* accum_ = nullptr;
     bool lossView_ = false;
     bool lambertView_ = false;
+    float lossThreshold_ = 0.0f;
     int gdSteps_ = 0;
+    float gdLearningRate_ = 10.0f;
     int samplesPerPixel_ = 1;
     int bounceCount_ = 0;
     uint32_t accumSampleCount_ = 0;
@@ -118,6 +124,7 @@ class RendererNeural final {
     bool lastLambertView_ = false;
     int lastBounceCount_ = -1;
     int lastSamplesPerPixel_ = -1;
+    float lastLossThreshold_ = 0.0f;
     bool hasLastCamera_ = false;
     Vec3 lastCamPos_{};
     RenderBasis lastBasis_{};
