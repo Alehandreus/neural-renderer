@@ -259,7 +259,11 @@ __device__ inline bool traceMesh(const Ray& ray, MeshDeviceView mesh, HitInfo* o
             int start = node.first;
             int end = start + node.count;
             for (int i = start; i < end; ++i) {
-                HitInfo hit = intersectTriangle(ray, mesh.triangles[i]);
+                const Triangle& tri = mesh.triangles[i];
+                if (dot(tri.normal, ray.direction) >= 0.0f) {
+                    continue;
+                }
+                HitInfo hit = intersectTriangle(ray, tri);
                 if (hit.hit && hit.distance < closestT) {
                     closestT = hit.distance;
                     bestHit = hit;
@@ -445,6 +449,7 @@ __global__ void renderBounceKernel(const float* hitPositions,
                                    float* bounceInputs,
                                    float* bouncePositions,
                                    float* bounceNormals,
+                                   float* bounceColors,
                                    int* bounceFlags,
                                    float* bounceDirs) {
     int x = blockIdx.x * blockDim.x + threadIdx.x;
@@ -472,6 +477,9 @@ __global__ void renderBounceKernel(const float* hitPositions,
             bounceNormals[base + 0] = 0.0f;
             bounceNormals[base + 1] = 0.0f;
             bounceNormals[base + 2] = 0.0f;
+            bounceColors[base + 0] = 0.0f;
+            bounceColors[base + 1] = 0.0f;
+            bounceColors[base + 2] = 0.0f;
             bounceDirs[base + 0] = 0.0f;
             bounceDirs[base + 1] = 0.0f;
             bounceDirs[base + 2] = 0.0f;
@@ -532,6 +540,9 @@ __global__ void renderBounceKernel(const float* hitPositions,
             bounceNormals[base + 0] = bounceHit.normal.x;
             bounceNormals[base + 1] = bounceHit.normal.y;
             bounceNormals[base + 2] = bounceHit.normal.z;
+            bounceColors[base + 0] = bounceHit.color.x;
+            bounceColors[base + 1] = bounceHit.color.y;
+            bounceColors[base + 2] = bounceHit.color.z;
             bounceFlags[sampleIdx] = 1;
         } else {
             bounceInputs[base + 0] = 0.0f;
@@ -543,6 +554,9 @@ __global__ void renderBounceKernel(const float* hitPositions,
             bounceNormals[base + 0] = 0.0f;
             bounceNormals[base + 1] = 0.0f;
             bounceNormals[base + 2] = 0.0f;
+            bounceColors[base + 0] = 0.0f;
+            bounceColors[base + 1] = 0.0f;
+            bounceColors[base + 2] = 0.0f;
             bounceFlags[sampleIdx] = 0;
         }
     }
@@ -558,6 +572,7 @@ __global__ void renderBounceFromStateKernel(const float* inPositions,
                                             float* outInputs,
                                             float* outPositions,
                                             float* outNormals,
+                                            float* outColors,
                                             int* outFlags,
                                             float* outDirs) {
     int x = blockIdx.x * blockDim.x + threadIdx.x;
@@ -585,6 +600,9 @@ __global__ void renderBounceFromStateKernel(const float* inPositions,
             outNormals[base + 0] = 0.0f;
             outNormals[base + 1] = 0.0f;
             outNormals[base + 2] = 0.0f;
+            outColors[base + 0] = 0.0f;
+            outColors[base + 1] = 0.0f;
+            outColors[base + 2] = 0.0f;
             outDirs[base + 0] = 0.0f;
             outDirs[base + 1] = 0.0f;
             outDirs[base + 2] = 0.0f;
@@ -648,6 +666,9 @@ __global__ void renderBounceFromStateKernel(const float* inPositions,
             outNormals[base + 0] = bounceHit.normal.x;
             outNormals[base + 1] = bounceHit.normal.y;
             outNormals[base + 2] = bounceHit.normal.z;
+            outColors[base + 0] = bounceHit.color.x;
+            outColors[base + 1] = bounceHit.color.y;
+            outColors[base + 2] = bounceHit.color.z;
             outFlags[sampleIdx] = 1;
         } else {
             outInputs[base + 0] = 0.0f;
@@ -659,6 +680,9 @@ __global__ void renderBounceFromStateKernel(const float* inPositions,
             outNormals[base + 0] = 0.0f;
             outNormals[base + 1] = 0.0f;
             outNormals[base + 2] = 0.0f;
+            outColors[base + 0] = 0.0f;
+            outColors[base + 1] = 0.0f;
+            outColors[base + 2] = 0.0f;
             outFlags[sampleIdx] = 0;
         }
     }
@@ -760,12 +784,12 @@ __global__ void applyNetworkDeltaKernel(const float* compactedInputs,
 
     int pixelIdx = hitIndices[idx];
     int fullBase = pixelIdx * 3;
-    // hitPositions[fullBase + 0] = xWorld.x;
-    // hitPositions[fullBase + 1] = xWorld.y;
-    // hitPositions[fullBase + 2] = xWorld.z;
-    normals[fullBase + 0] = deltaUnit.x;
-    normals[fullBase + 1] = deltaUnit.y;
-    normals[fullBase + 2] = deltaUnit.z;
+    hitPositions[fullBase + 0] = xWorld.x;
+    hitPositions[fullBase + 1] = xWorld.y;
+    hitPositions[fullBase + 2] = xWorld.z;
+    normals[fullBase + 0] = -deltaUnit.x;
+    normals[fullBase + 1] = -deltaUnit.y;
+    normals[fullBase + 2] = -deltaUnit.z;
 }
 
 __global__ void projectInputsToMeshKernel(float* compactedInputs,
@@ -1093,6 +1117,10 @@ __global__ void lambertKernel(uchar4* output,
             }
             float ndotl = fmaxf(0.0f, dot(normal, -primaryRay.direction));
             color = baseColor * ndotl;
+            // color = {
+            //     // ndotl < 0, ndotl < 0, ndotl < 0
+            //     ndotl > 0, ndotl > 0, ndotl > 0
+            // };
         } else {
             color = sampleEnvironment(env, primaryRay.direction);
         }
@@ -1233,6 +1261,141 @@ __global__ void pathTraceNeuralEnvKernel(uchar4* output,
             255);
 }
 
+__global__ void initNeuralPathKernel(Vec3* throughput,
+                                     Vec3* radiance,
+                                     int* active,
+                                     const int* hitFlags,
+                                     const float* hitColors,
+                                     RenderParams params,
+                                     EnvironmentDeviceView env) {
+    int x = blockIdx.x * blockDim.x + threadIdx.x;
+    int y = blockIdx.y * blockDim.y + threadIdx.y;
+    if (x >= params.width || y >= params.height) {
+        return;
+    }
+
+    int pixelIdx = y * params.width + x;
+    if (params.samplesPerPixel <= 0 || params.pixelCount <= 0) {
+        return;
+    }
+
+    for (int s = 0; s < params.samplesPerPixel; ++s) {
+        int sampleIdx = pixelIdx + s * params.pixelCount;
+        uint32_t rng = initRng(pixelIdx, params.sampleOffset, s);
+        Ray primaryRay = generatePrimaryRay(x, y, params, rng);
+
+        Vec3 sampleRadiance(0.0f, 0.0f, 0.0f);
+        Vec3 sampleThroughput(1.0f, 1.0f, 1.0f);
+        int isActive = 0;
+
+        if (hitFlags[sampleIdx]) {
+            int base = sampleIdx * 3;
+            sampleThroughput = Vec3(
+                    hitColors[base + 0],
+                    hitColors[base + 1],
+                    hitColors[base + 2]);
+            isActive = 1;
+        } else {
+            Vec3 envLight = sampleEnvironment(env, primaryRay.direction);
+            envLight = clampRadiance(envLight, params.maxRadiance);
+            sampleRadiance = envLight;
+        }
+
+        throughput[sampleIdx] = sampleThroughput;
+        radiance[sampleIdx] = sampleRadiance;
+        active[sampleIdx] = isActive;
+    }
+}
+
+__global__ void integrateNeuralBounceKernel(Vec3* throughput,
+                                            Vec3* radiance,
+                                            int* active,
+                                            const int* bounceHitFlags,
+                                            const float* bounceColors,
+                                            const float* bounceDirs,
+                                            int bounceIndex,
+                                            RenderParams params,
+                                            EnvironmentDeviceView env) {
+    int x = blockIdx.x * blockDim.x + threadIdx.x;
+    int y = blockIdx.y * blockDim.y + threadIdx.y;
+    if (x >= params.width || y >= params.height) {
+        return;
+    }
+
+    int pixelIdx = y * params.width + x;
+    if (params.samplesPerPixel <= 0 || params.pixelCount <= 0) {
+        return;
+    }
+
+    for (int s = 0; s < params.samplesPerPixel; ++s) {
+        int sampleIdx = pixelIdx + s * params.pixelCount;
+        if (!active[sampleIdx]) {
+            continue;
+        }
+
+        if (!bounceHitFlags[sampleIdx]) {
+            int base = sampleIdx * 3;
+            Vec3 envDir(
+                    bounceDirs[base + 0],
+                    bounceDirs[base + 1],
+                    bounceDirs[base + 2]);
+            Vec3 envLight = sampleEnvironment(env, envDir);
+            envLight = clampRadiance(envLight, params.maxRadiance);
+            radiance[sampleIdx] = radiance[sampleIdx] + mul(throughput[sampleIdx], envLight);
+            active[sampleIdx] = 0;
+            continue;
+        }
+
+        if (bounceIndex >= params.maxBounces) {
+            active[sampleIdx] = 0;
+            continue;
+        }
+
+        int base = sampleIdx * 3;
+        Vec3 color(
+                bounceColors[base + 0],
+                bounceColors[base + 1],
+                bounceColors[base + 2]);
+        throughput[sampleIdx] = mul(throughput[sampleIdx], color);
+    }
+}
+
+__global__ void finalizeNeuralPathKernel(uchar4* output,
+                                         Vec3* accum,
+                                         const Vec3* radiance,
+                                         RenderParams params) {
+    int x = blockIdx.x * blockDim.x + threadIdx.x;
+    int y = blockIdx.y * blockDim.y + threadIdx.y;
+    if (x >= params.width || y >= params.height) {
+        return;
+    }
+
+    int pixelIdx = y * params.width + x;
+    Vec3 sum(0.0f, 0.0f, 0.0f);
+    if (params.samplesPerPixel <= 0 || params.pixelCount <= 0) {
+        return;
+    }
+
+    for (int s = 0; s < params.samplesPerPixel; ++s) {
+        int sampleIdx = pixelIdx + s * params.pixelCount;
+        sum += radiance[sampleIdx];
+    }
+
+    Vec3 prev = accum[pixelIdx];
+    Vec3 newSum = prev + sum;
+    accum[pixelIdx] = newSum;
+    float invSamples = 1.0f / static_cast<float>(params.sampleOffset + params.samplesPerPixel);
+    Vec3 color = newSum * invSamples;
+
+    color = encodeSrgb(color);
+
+    output[pixelIdx] = make_uchar4(
+            static_cast<unsigned char>(color.x * 255.0f),
+            static_cast<unsigned char>(color.y * 255.0f),
+            static_cast<unsigned char>(color.z * 255.0f),
+            255);
+}
+
 __global__ void lossNeuralKernel(float* lossValues,
                                  const float* hitPositions,
                                  const int* hitFlags,
@@ -1328,7 +1491,7 @@ RendererNeural::RendererNeural(Scene& scene)
             {"otype", "HashGrid"},
             {"n_levels", 8},
             {"n_features_per_level", 8},
-            {"log2_hashmap_size", 10},
+            {"log2_hashmap_size", 13},
             {"base_resolution", 2},
             {"per_level_scale", 2.0},
             {"fixed_point_pos", false},
@@ -1558,7 +1721,7 @@ void RendererNeural::render(const Vec3& camPos, std::vector<uchar4>& hostPixels)
     int elementCountInt = static_cast<int>(elementCount);
 
     bool neuralActive = false;
-    if (useNeuralQuery_ && network_ && !lambertView_) {
+    if (useNeuralQuery_ && network_) {
         bool needInput = true;
         bool needWeights = false;
         if (inputs_ && hitPositions_ && normals_ && compactedInputs_ &&
@@ -1783,9 +1946,16 @@ void RendererNeural::render(const Vec3& camPos, std::vector<uchar4>& hostPixels)
         return hitCount;
     };
 
-    if (neuralActive && !lossView_) {
-        initEnvMissesKernel<<<grid, block>>>(hitFlags_, params, envDirs_, envHitFlags_);
-        checkCuda(cudaGetLastError(), "initEnvMissesKernel launch");
+    if (neuralActive && !lossView_ && !lambertView_) {
+        initNeuralPathKernel<<<grid, block>>>(
+                pathThroughput_,
+                pathRadiance_,
+                pathActive_,
+                hitFlags_,
+                hitColors_,
+                params,
+                envView);
+        checkCuda(cudaGetLastError(), "initNeuralPathKernel launch");
 
         if (maxBounces > 0) {
             renderBounceKernel<<<grid, block>>>(
@@ -1797,28 +1967,35 @@ void RendererNeural::render(const Vec3& camPos, std::vector<uchar4>& hostPixels)
                     bounceInputs_,
                     bouncePositions_,
                     bounceNormals_,
+                    bounceColors_,
                     bounceHitFlags_,
                     bounceDirs_);
             checkCuda(cudaGetLastError(), "renderBounceKernel launch");
 
             forwardOnHits(bounceInputs_, bounceHitFlags_, bouncePositions_, bounceNormals_,
                           "cudaMemset bounce hitCount");
-            recordEnvMissesKernel<<<grid, block>>>(
+            integrateNeuralBounceKernel<<<grid, block>>>(
+                    pathThroughput_,
+                    pathRadiance_,
+                    pathActive_,
                     bounceHitFlags_,
+                    bounceColors_,
                     bounceDirs_,
-                    envHitFlags_,
-                    envDirs_,
-                    params);
-            checkCuda(cudaGetLastError(), "recordEnvMissesKernel bounce launch");
+                    1,
+                    params,
+                    envView);
+            checkCuda(cudaGetLastError(), "integrateNeuralBounceKernel launch");
 
             float* inInputs = bounceInputs_;
             float* inPositions = bouncePositions_;
             float* inNormals = bounceNormals_;
+            float* inColors = bounceColors_;
             int* inFlags = bounceHitFlags_;
             float* inDirs = bounceDirs_;
             float* outInputs = bounce2Inputs_;
             float* outPositions = bounce2Positions_;
             float* outNormals = bounce2Normals_;
+            float* outColors = bounce2Colors_;
             int* outFlags = bounce2HitFlags_;
             float* outDirs = bounce2Dirs_;
 
@@ -1834,23 +2011,29 @@ void RendererNeural::render(const Vec3& camPos, std::vector<uchar4>& hostPixels)
                         outInputs,
                         outPositions,
                         outNormals,
+                        outColors,
                         outFlags,
                         outDirs);
                 checkCuda(cudaGetLastError(), "renderBounceFromStateKernel launch");
 
                 forwardOnHits(outInputs, outFlags, outPositions, outNormals,
                               "cudaMemset bounce hitCount");
-                recordEnvMissesKernel<<<grid, block>>>(
+                integrateNeuralBounceKernel<<<grid, block>>>(
+                        pathThroughput_,
+                        pathRadiance_,
+                        pathActive_,
                         outFlags,
+                        outColors,
                         outDirs,
-                        envHitFlags_,
-                        envDirs_,
-                        params);
-                checkCuda(cudaGetLastError(), "recordEnvMissesKernel bounce launch");
+                        bounce,
+                        params,
+                        envView);
+                checkCuda(cudaGetLastError(), "integrateNeuralBounceKernel launch");
 
                 std::swap(inInputs, outInputs);
                 std::swap(inPositions, outPositions);
                 std::swap(inNormals, outNormals);
+                std::swap(inColors, outColors);
                 std::swap(inFlags, outFlags);
                 std::swap(inDirs, outDirs);
             }
@@ -1878,7 +2061,7 @@ void RendererNeural::render(const Vec3& camPos, std::vector<uchar4>& hostPixels)
         }
     }
 
-    bool useNeuralBounce = neuralActive && !lossView_;
+    bool useNeuralBounce = neuralActive && !lossView_ && !lambertView_;
     if (lambertView_) {
         lambertKernel<<<grid, block>>>(
                 devicePixels_,
@@ -1895,16 +2078,12 @@ void RendererNeural::render(const Vec3& camPos, std::vector<uchar4>& hostPixels)
             checkCuda(cudaGetLastError(), "lossToneMapKernel launch");
         }
     } else if (useNeuralBounce) {
-        pathTraceNeuralEnvKernel<<<grid, block>>>(
+        finalizeNeuralPathKernel<<<grid, block>>>(
                 devicePixels_,
                 accum_,
-                hitFlags_,
-                hitColors_,
-                envHitFlags_,
-                envDirs_,
-                params,
-                envView);
-        checkCuda(cudaGetLastError(), "pathTraceNeuralEnvKernel launch");
+                pathRadiance_,
+                params);
+        checkCuda(cudaGetLastError(), "finalizeNeuralPathKernel launch");
         accumSampleCount_ += static_cast<uint32_t>(samplesPerPixel);
     } else {
         pathTraceKernel<<<grid, block>>>(
@@ -1970,6 +2149,10 @@ void RendererNeural::release() {
         cudaFree(bounceNormals_);
         bounceNormals_ = nullptr;
     }
+    if (bounceColors_) {
+        cudaFree(bounceColors_);
+        bounceColors_ = nullptr;
+    }
     if (bounceDirs_) {
         cudaFree(bounceDirs_);
         bounceDirs_ = nullptr;
@@ -1986,6 +2169,10 @@ void RendererNeural::release() {
         cudaFree(bounce2Normals_);
         bounce2Normals_ = nullptr;
     }
+    if (bounce2Colors_) {
+        cudaFree(bounce2Colors_);
+        bounce2Colors_ = nullptr;
+    }
     if (bounce2Dirs_) {
         cudaFree(bounce2Dirs_);
         bounce2Dirs_ = nullptr;
@@ -1993,6 +2180,14 @@ void RendererNeural::release() {
     if (envDirs_) {
         cudaFree(envDirs_);
         envDirs_ = nullptr;
+    }
+    if (pathThroughput_) {
+        cudaFree(pathThroughput_);
+        pathThroughput_ = nullptr;
+    }
+    if (pathRadiance_) {
+        cudaFree(pathRadiance_);
+        pathRadiance_ = nullptr;
     }
     if (lossValues_) {
         cudaFree(lossValues_);
@@ -2042,6 +2237,10 @@ void RendererNeural::release() {
         cudaFree(envHitFlags_);
         envHitFlags_ = nullptr;
     }
+    if (pathActive_) {
+        cudaFree(pathActive_);
+        pathActive_ = nullptr;
+    }
     if (hitIndices_) {
         cudaFree(hitIndices_);
         hitIndices_ = nullptr;
@@ -2078,9 +2277,10 @@ bool RendererNeural::ensureNetworkBuffers(size_t elementCount) {
     }
     if (elementCount <= bufferElements_ &&
             hitColors_ &&
-            bounceInputs_ && bouncePositions_ && bounceNormals_ && bounceDirs_ && bounceHitFlags_ &&
-            bounce2Inputs_ && bounce2Positions_ && bounce2Normals_ && bounce2Dirs_ && bounce2HitFlags_ &&
-            envDirs_ && envHitFlags_) {
+            bounceInputs_ && bouncePositions_ && bounceNormals_ && bounceDirs_ && bounceColors_ && bounceHitFlags_ &&
+            bounce2Inputs_ && bounce2Positions_ && bounce2Normals_ && bounce2Dirs_ && bounce2Colors_ && bounce2HitFlags_ &&
+            envDirs_ && envHitFlags_ &&
+            pathThroughput_ && pathRadiance_ && pathActive_) {
         return true;
     }
     if (inputs_) {
@@ -2131,6 +2331,10 @@ bool RendererNeural::ensureNetworkBuffers(size_t elementCount) {
         cudaFree(bounceNormals_);
         bounceNormals_ = nullptr;
     }
+    if (bounceColors_) {
+        cudaFree(bounceColors_);
+        bounceColors_ = nullptr;
+    }
     if (bounceDirs_) {
         cudaFree(bounceDirs_);
         bounceDirs_ = nullptr;
@@ -2147,6 +2351,10 @@ bool RendererNeural::ensureNetworkBuffers(size_t elementCount) {
         cudaFree(bounce2Normals_);
         bounce2Normals_ = nullptr;
     }
+    if (bounce2Colors_) {
+        cudaFree(bounce2Colors_);
+        bounce2Colors_ = nullptr;
+    }
     if (bounce2Dirs_) {
         cudaFree(bounce2Dirs_);
         bounce2Dirs_ = nullptr;
@@ -2154,6 +2362,14 @@ bool RendererNeural::ensureNetworkBuffers(size_t elementCount) {
     if (envDirs_) {
         cudaFree(envDirs_);
         envDirs_ = nullptr;
+    }
+    if (pathThroughput_) {
+        cudaFree(pathThroughput_);
+        pathThroughput_ = nullptr;
+    }
+    if (pathRadiance_) {
+        cudaFree(pathRadiance_);
+        pathRadiance_ = nullptr;
     }
     if (lossValues_) {
         cudaFree(lossValues_);
@@ -2187,6 +2403,10 @@ bool RendererNeural::ensureNetworkBuffers(size_t elementCount) {
         cudaFree(envHitFlags_);
         envHitFlags_ = nullptr;
     }
+    if (pathActive_) {
+        cudaFree(pathActive_);
+        pathActive_ = nullptr;
+    }
     if (hitIndices_) {
         cudaFree(hitIndices_);
         hitIndices_ = nullptr;
@@ -2205,12 +2425,16 @@ bool RendererNeural::ensureNetworkBuffers(size_t elementCount) {
     checkCuda(cudaMalloc(&bounceInputs_, inputBytes), "cudaMalloc bounce inputs");
     checkCuda(cudaMalloc(&bouncePositions_, inputBytes), "cudaMalloc bounce positions");
     checkCuda(cudaMalloc(&bounceNormals_, inputBytes), "cudaMalloc bounce normals");
+    checkCuda(cudaMalloc(&bounceColors_, inputBytes), "cudaMalloc bounce colors");
     checkCuda(cudaMalloc(&bounceDirs_, inputBytes), "cudaMalloc bounce dirs");
     checkCuda(cudaMalloc(&bounce2Inputs_, inputBytes), "cudaMalloc bounce2 inputs");
     checkCuda(cudaMalloc(&bounce2Positions_, inputBytes), "cudaMalloc bounce2 positions");
     checkCuda(cudaMalloc(&bounce2Normals_, inputBytes), "cudaMalloc bounce2 normals");
+    checkCuda(cudaMalloc(&bounce2Colors_, inputBytes), "cudaMalloc bounce2 colors");
     checkCuda(cudaMalloc(&bounce2Dirs_, inputBytes), "cudaMalloc bounce2 dirs");
     checkCuda(cudaMalloc(&envDirs_, inputBytes), "cudaMalloc env dirs");
+    checkCuda(cudaMalloc(&pathThroughput_, elementCount * sizeof(Vec3)), "cudaMalloc path throughput");
+    checkCuda(cudaMalloc(&pathRadiance_, elementCount * sizeof(Vec3)), "cudaMalloc path radiance");
     checkCuda(cudaMalloc(&lossValues_, elementCount * sizeof(float)), "cudaMalloc loss values");
     checkCuda(cudaMalloc(&lossMax_, sizeof(float)), "cudaMalloc loss max");
     checkCuda(cudaMalloc(&lossSum_, sizeof(float)), "cudaMalloc loss sum");
@@ -2228,6 +2452,7 @@ bool RendererNeural::ensureNetworkBuffers(size_t elementCount) {
     checkCuda(cudaMalloc(&bounceHitFlags_, elementCount * sizeof(int)), "cudaMalloc bounce hit flags");
     checkCuda(cudaMalloc(&bounce2HitFlags_, elementCount * sizeof(int)), "cudaMalloc bounce2 hit flags");
     checkCuda(cudaMalloc(&envHitFlags_, elementCount * sizeof(int)), "cudaMalloc env hit flags");
+    checkCuda(cudaMalloc(&pathActive_, elementCount * sizeof(int)), "cudaMalloc path active");
     checkCuda(cudaMalloc(&hitIndices_, elementCount * sizeof(int)), "cudaMalloc tcnn hit indices");
     checkCuda(cudaMalloc(&hitCount_, sizeof(int)), "cudaMalloc tcnn hit count");
 

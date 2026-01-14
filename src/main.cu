@@ -63,16 +63,18 @@ int main(int argc, char** argv) {
 
     InputController input(window);
 
-    // const char* kExactMeshPath = "/home/me/Downloads/chess.fbx";
-    // const char* kRoughMeshPath = "/home/me/Downloads/chess10000.fbx";
-    const char* kExactMeshPath = "/home/me/brain/mesh-mapping/models/petmonster_orig.fbx";
-    const char* kRoughMeshPath = "/home/me/brain/mesh-mapping/models/petmonster_inner_2000.fbx";
-    const char* kCheckpointPath = "/home/me/brain/mesh-mapping/inner_params.bin";
+    const char* kExactMeshPath = "/home/me/Downloads/chess_orig.fbx";
+    // const char* kExactMeshPath = "/home/me/Downloads/chess_outer_10000.fbx";
+    const char* kRoughMeshPath = "/home/me/Downloads/chess_outer_10000.fbx";
+    // const char* kExactMeshPath = "/home/me/brain/mesh-mapping/models/dragon_outer_3000.fbx";
+    // const char* kRoughMeshPath = "/home/me/brain/mesh-mapping/models/dragon_outer_3000.fbx";
+    const char* kCheckpointPath = "/home/me/brain/mesh-mapping/checkpoints/outer_params.bin";
     const int kBounceCount = 3;
     const int kSamplesPerPixel = 1;
     const bool kNormalizeMeshes = true;
     const bool kNearestTextureSampling = true;
-    const char* kDefaultHdriPath = "/home/me/Downloads/photo_studio_loft_hall_4k.exr";
+    // const char* kDefaultHdriPath = "/home/me/Downloads/photo_studio_loft_hall_4k.exr";
+    const char* kDefaultHdriPath = "/home/me/Downloads/lilienstein_4k.hdr";
 
     Scene scene;
     Mesh& exactMesh = scene.exactMesh();
@@ -167,7 +169,7 @@ int main(int argc, char** argv) {
     bool key3WasDown = false;
     bool showLossView = false;
     bool lambertView = false;
-    bool useNeuralQuery = false;
+    bool useNeuralQuery = true;
     int bounceCount = kBounceCount;
     int samplesPerPixel = kSamplesPerPixel;
     bool uiWantsMouse = false;

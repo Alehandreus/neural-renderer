@@ -73,11 +73,15 @@ class RendererNeural final {
     float* bouncePositions_ = nullptr;
     float* bounceNormals_ = nullptr;
     float* bounceDirs_ = nullptr;
+    float* bounceColors_ = nullptr;
     float* bounce2Inputs_ = nullptr;
     float* bounce2Positions_ = nullptr;
     float* bounce2Normals_ = nullptr;
     float* bounce2Dirs_ = nullptr;
+    float* bounce2Colors_ = nullptr;
     float* envDirs_ = nullptr;
+    Vec3* pathThroughput_ = nullptr;
+    Vec3* pathRadiance_ = nullptr;
     float* lossValues_ = nullptr;
     float* lossMax_ = nullptr;
     float* lossSum_ = nullptr;
@@ -86,6 +90,7 @@ class RendererNeural final {
     int* bounceHitFlags_ = nullptr;
     int* bounce2HitFlags_ = nullptr;
     int* envHitFlags_ = nullptr;
+    int* pathActive_ = nullptr;
     int* hitIndices_ = nullptr;
     int* hitCount_ = nullptr;
     size_t bufferElements_ = 0;
@@ -108,7 +113,7 @@ class RendererNeural final {
     uint32_t accumSampleCount_ = 0;
     float lastAvgLoss_ = 0.0f;
     int lastHitCount_ = 0;
-    bool useNeuralQuery_ = true;
+    bool useNeuralQuery_ = false;
     bool lastUseNeuralQuery_ = true;
     bool lastLambertView_ = false;
     int lastBounceCount_ = -1;
