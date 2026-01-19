@@ -947,7 +947,7 @@ __global__ void computeLossGradKernel(const float* compactedInputs,
             grad.x * meshExtent.x,
             grad.y * meshExtent.y,
             grad.z * meshExtent.z);
-    gradDelta = gradDelta * invHitCount;
+    gradDelta = gradDelta;// * invHitCount;
 
     dL_doutput[outputBase + 0] = __float2half(gradDelta.x);
     dL_doutput[outputBase + 1] = __float2half(gradDelta.y);
@@ -1011,7 +1011,7 @@ __global__ void addDirectGradKernel(const float* compactedInputs,
             grad.x * meshExtent.x,
             grad.y * meshExtent.y,
             grad.z * meshExtent.z);
-    gradDelta = gradDelta * invHitCount;
+    gradDelta = gradDelta;// * invHitCount;
 
     dL_dinput[inputBase + 0] += gradDelta.x;
     dL_dinput[inputBase + 1] += gradDelta.y;
@@ -1567,6 +1567,8 @@ __global__ void scatterInputGradsKernel(const float* compactedGradients,
     fullGradients[fullBase + 2] = compactedGradients[compactBase + 2];
 }
 
+#include "neural_debug_points.cuh"
+
 }  // namespace
 
 RendererNeural::RendererNeural(Scene& scene)
@@ -1760,15 +1762,19 @@ void RendererNeural::render(const Vec3& camPos, std::vector<uchar4>& hostPixels)
         }
     }
     bool lossThresholdChanged = fabsf(lossThreshold_ - lastLossThreshold_) > kEps;
+    bool debugPointCloudChanged = debugPointCloudView_ != lastDebugPointCloudView_;
+    bool debugPointStrideChanged = debugPointCloudStride_ != lastDebugPointCloudStride_;
     if (cameraMoved || useNeuralQuery_ != lastUseNeuralQuery_ || lambertView_ != lastLambertView_ ||
         maxBounces != lastBounceCount_ || samplesPerPixel != lastSamplesPerPixel_ ||
-        lossThresholdChanged) {
+        lossThresholdChanged || debugPointCloudChanged || debugPointStrideChanged) {
         resetAccum();
     }
     lastUseNeuralQuery_ = useNeuralQuery_;
     lastLambertView_ = lambertView_;
+    lastDebugPointCloudView_ = debugPointCloudView_;
     lastBounceCount_ = maxBounces;
     lastSamplesPerPixel_ = samplesPerPixel;
+    lastDebugPointCloudStride_ = debugPointCloudStride_;
     lastLossThreshold_ = lossThreshold_;
     lastCamPos_ = camPos;
     lastBasis_ = basis_;
@@ -1796,6 +1802,67 @@ void RendererNeural::render(const Vec3& camPos, std::vector<uchar4>& hostPixels)
     params.samplesPerPixel = samplesPerPixel;
     params.sampleOffset = accumSampleCount_;
 
+    int elementCountInt = static_cast<int>(elementCount);
+    if (debugPointCloudView_ && useNeuralQuery_ && network_) {
+        RenderParams debugParams = params;
+        debugParams.sampleOffset = 0;
+        renderDebugPointCloud(
+                devicePixels_,
+                inputs_,
+                hitPositions_,
+                normals_,
+                hitFlags_,
+                lossValues_,
+                lossMax_,
+                lossSum_,
+                lossHitCount_,
+                compactedInputs_,
+                compactedDLDInput_,
+                outputs_,
+                dL_doutput_,
+                hitIndices_,
+                hitCount_,
+                network_,
+                params_,
+                outputDims_,
+                outputElemSize_,
+                elementCountInt,
+                gdSteps_,
+                gdLearningRate_,
+                lossThreshold_,
+                debugPointCloudStride_,
+                debugParams,
+                meshMin,
+                meshExtent,
+                meshInvExtent,
+                meshView,
+                envView);
+
+        if (lossSum_ && lossHitCount_) {
+            float lossSumHost = 0.0f;
+            int hitCountHost = 0;
+            checkCuda(cudaMemcpy(&lossSumHost, lossSum_, sizeof(float), cudaMemcpyDeviceToHost),
+                      "cudaMemcpy debug lossSum");
+            checkCuda(cudaMemcpy(&hitCountHost, lossHitCount_, sizeof(int), cudaMemcpyDeviceToHost),
+                      "cudaMemcpy debug lossHitCount");
+            lastHitCount_ = hitCountHost;
+            if (hitCountHost > 0) {
+                lastAvgLoss_ = lossSumHost / static_cast<float>(hitCountHost);
+            } else {
+                lastAvgLoss_ = 0.0f;
+            }
+        }
+
+        checkCuda(cudaMemcpy(
+                hostPixels.data(),
+                devicePixels_,
+                pixelCount * sizeof(uchar4),
+                cudaMemcpyDeviceToHost),
+                "cudaMemcpy debug output");
+        accumSampleCount_ = 0;
+        return;
+    }
+
     dim3 block(8, 8);  // reduce block size to allow more resident blocks when register pressure is high
     dim3 grid((width_ + block.x - 1) / block.x, (height_ + block.y - 1) / block.y);
     renderNeuralKernel<<<grid, block>>>(
@@ -1811,7 +1878,6 @@ void RendererNeural::render(const Vec3& camPos, std::vector<uchar4>& hostPixels)
     const int compactBlock = 256;
     int compactGrid = static_cast<int>((elementCount + compactBlock - 1) / compactBlock);
     const int blockSize = 256;
-    int elementCountInt = static_cast<int>(elementCount);
 
     bool neuralActive = false;
     if (useNeuralQuery_ && network_) {

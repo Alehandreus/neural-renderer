@@ -37,6 +37,8 @@ class RendererNeural final {
     bool useNeuralQuery() const { return useNeuralQuery_; }
     bool loadWeightsFromFile(const std::string& path);
     void setLossView(bool enabled) { lossView_ = enabled; }
+    void setDebugPointCloudView(bool enabled) { debugPointCloudView_ = enabled; }
+    void setDebugPointCloudStride(int stride) { debugPointCloudStride_ = stride; }
     void setLossThreshold(float threshold) { lossThreshold_ = threshold; }
     void setGdSteps(int steps) { gdSteps_ = steps; }
     void setGdLearningRate(float rate) { gdLearningRate_ = rate; }
@@ -45,6 +47,8 @@ class RendererNeural final {
     void setLambertView(bool enabled) { lambertView_ = enabled; }
     float averageLoss() const { return lastAvgLoss_; }
     float lossThreshold() const { return lossThreshold_; }
+    bool debugPointCloudView() const { return debugPointCloudView_; }
+    int debugPointCloudStride() const { return debugPointCloudStride_; }
     int gdSteps() const { return gdSteps_; }
     float gdLearningRate() const { return gdLearningRate_; }
     int samplesPerPixel() const { return samplesPerPixel_; }
@@ -111,7 +115,9 @@ class RendererNeural final {
     Vec3* accum_ = nullptr;
     bool lossView_ = false;
     bool lambertView_ = false;
+    bool debugPointCloudView_ = false;
     float lossThreshold_ = 0.0f;
+    int debugPointCloudStride_ = 10;
     int gdSteps_ = 0;
     float gdLearningRate_ = 10.0f;
     int samplesPerPixel_ = 1;
@@ -122,8 +128,10 @@ class RendererNeural final {
     bool useNeuralQuery_ = false;
     bool lastUseNeuralQuery_ = true;
     bool lastLambertView_ = false;
+    bool lastDebugPointCloudView_ = false;
     int lastBounceCount_ = -1;
     int lastSamplesPerPixel_ = -1;
+    int lastDebugPointCloudStride_ = 10;
     float lastLossThreshold_ = 0.0f;
     bool hasLastCamera_ = false;
     Vec3 lastCamPos_{};

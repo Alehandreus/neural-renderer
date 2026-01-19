@@ -175,11 +175,13 @@ int main(int argc, char** argv) {
     bool showLossView = false;
     bool lambertView = false;
     bool useNeuralQuery = true;
+    bool debugPointCloudView = false;
     int bounceCount = kBounceCount;
     int samplesPerPixel = kSamplesPerPixel;
     int gdSteps = 0;
     float gdLearningRate = 10.0f;
     float lossThreshold = 0.0f;
+    int debugPointStride = 10;
     bool uiWantsMouse = false;
 
     while (!glfwWindowShouldClose(window)) {
@@ -221,18 +223,31 @@ int main(int argc, char** argv) {
         if (lossThreshold < 0.0f) {
             lossThreshold = 0.0f;
         }
+        if (debugPointStride < 1) {
+            debugPointStride = 1;
+        }
         if (!useNeuralQuery) {
             showLossView = false;
+            debugPointCloudView = false;
+        }
+        if (debugPointCloudView) {
+            showLossView = false;
+            lambertView = false;
         }
         renderer.setLossView(showLossView);
         renderer.setLambertView(lambertView);
         renderer.setUseNeuralQuery(useNeuralQuery);
+        renderer.setDebugPointCloudView(debugPointCloudView);
         int effectiveBounces = showLossView ? 0 : bounceCount;
+        if (debugPointCloudView) {
+            effectiveBounces = 0;
+        }
         renderer.setBounceCount(effectiveBounces);
         renderer.setSamplesPerPixel(samplesPerPixel);
         renderer.setGdSteps(useNeuralQuery ? gdSteps : 0);
         renderer.setGdLearningRate(gdLearningRate);
         renderer.setLossThreshold(useNeuralQuery ? lossThreshold : 0.0f);
+        renderer.setDebugPointCloudStride(debugPointStride);
 
         glfwGetFramebufferSize(window, &fbWidth, &fbHeight);
         if (fbWidth != renderer.width() || fbHeight != renderer.height()) {
@@ -306,6 +321,8 @@ int main(int argc, char** argv) {
         ImGui::Checkbox("Neural query", &useNeuralQuery);
         if (useNeuralQuery) {
             ImGui::Checkbox("Loss (first segment)", &showLossView);
+            ImGui::Checkbox("GD point cloud", &debugPointCloudView);
+            ImGui::InputInt("Point stride", &debugPointStride);
             ImGui::InputInt("GD steps", &gdSteps);
             ImGui::InputFloat("GD learning rate", &gdLearningRate, 0.1f, 1.0f, "%.3f");
             ImGui::InputFloat("Loss threshold", &lossThreshold, 0.01f, 0.1f, "%.4f");
