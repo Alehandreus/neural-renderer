@@ -70,13 +70,13 @@ int main(int argc, char** argv) {
     // const char* kExactMeshPath = "/home/me/brain/mesh-mapping/models/dragon_outer_3000.fbx";
     // const char* kRoughMeshPath = "/home/me/brain/mesh-mapping/models/dragon_outer_3000.fbx";
 
-    const char* kExactMeshPath = "/home/me/Downloads/sphere.fbx";
-    const char* kRoughMeshPath = "/home/me/Downloads/cube.fbx";
+    const char* kExactMeshPath = "/home/me/Downloads/sphere.obj";
+    const char* kRoughMeshPath = "/home/me/Downloads/cube.obj";
     
     const char* kCheckpointPath = "/home/me/brain/mesh-mapping/checkpoints/outer_params.bin";
     const int kBounceCount = 3;
     const int kSamplesPerPixel = 1;
-    const bool kNormalizeMeshes = true;
+    const bool kNormalizeMeshes = false;
     const bool kNearestTextureSampling = true;
     // const char* kDefaultHdriPath = "/home/me/Downloads/photo_studio_loft_hall_4k.exr";
     const char* kDefaultHdriPath = "/home/me/Downloads/lilienstein_4k.hdr";
@@ -173,13 +173,21 @@ int main(int argc, char** argv) {
     bool key2WasDown = false;
     bool key3WasDown = false;
     bool showLossView = false;
+    bool secondaryLossView = false;
     bool lambertView = false;
     bool useNeuralQuery = true;
     bool debugPointCloudView = false;
+    bool debugPointCloudExactNormal = false;
+    bool debugPointCloudDropNonExact = false;
+    bool debugPointCloudExactBigPoints = false;
+    bool debugPointCloudExactBigPointsOnly = false;
+    bool twoHitSelect = false;
     int bounceCount = kBounceCount;
     int samplesPerPixel = kSamplesPerPixel;
     int gdSteps = 0;
+    int gdSteps2 = 0;
     float gdLearningRate = 10.0f;
+    float gdLearningRate2 = 10.0f;
     float lossThreshold = 0.0f;
     int debugPointStride = 10;
     bool uiWantsMouse = false;
@@ -217,8 +225,14 @@ int main(int argc, char** argv) {
         if (gdSteps < 0) {
             gdSteps = 0;
         }
+        if (gdSteps2 < 0) {
+            gdSteps2 = 0;
+        }
         if (gdLearningRate < 0.0f) {
             gdLearningRate = 0.0f;
+        }
+        if (gdLearningRate2 < 0.0f) {
+            gdLearningRate2 = 0.0f;
         }
         if (lossThreshold < 0.0f) {
             lossThreshold = 0.0f;
@@ -228,24 +242,46 @@ int main(int argc, char** argv) {
         }
         if (!useNeuralQuery) {
             showLossView = false;
+            secondaryLossView = false;
             debugPointCloudView = false;
+            twoHitSelect = false;
         }
         if (debugPointCloudView) {
             showLossView = false;
+            secondaryLossView = false;
             lambertView = false;
         }
+        if (secondaryLossView) {
+            showLossView = false;
+            debugPointCloudView = false;
+            lambertView = false;
+        }
+        if (!debugPointCloudView) {
+            debugPointCloudExactNormal = false;
+            debugPointCloudDropNonExact = false;
+            debugPointCloudExactBigPoints = false;
+            debugPointCloudExactBigPointsOnly = false;
+        }
         renderer.setLossView(showLossView);
+        renderer.setSecondaryLossView(secondaryLossView);
         renderer.setLambertView(lambertView);
         renderer.setUseNeuralQuery(useNeuralQuery);
         renderer.setDebugPointCloudView(debugPointCloudView);
+        renderer.setDebugPointCloudExactNormal(debugPointCloudExactNormal);
+        renderer.setDebugPointCloudDropNonExact(debugPointCloudDropNonExact);
+        renderer.setDebugPointCloudExactBigPoints(debugPointCloudExactBigPoints);
+        renderer.setDebugPointCloudExactBigPointsOnly(debugPointCloudExactBigPointsOnly);
+        renderer.setTwoHitSelect(twoHitSelect);
         int effectiveBounces = showLossView ? 0 : bounceCount;
-        if (debugPointCloudView) {
+        if (debugPointCloudView || secondaryLossView) {
             effectiveBounces = 0;
         }
         renderer.setBounceCount(effectiveBounces);
         renderer.setSamplesPerPixel(samplesPerPixel);
         renderer.setGdSteps(useNeuralQuery ? gdSteps : 0);
+        renderer.setGdSteps2(useNeuralQuery ? gdSteps2 : 0);
         renderer.setGdLearningRate(gdLearningRate);
+        renderer.setGdLearningRate2(gdLearningRate2);
         renderer.setLossThreshold(useNeuralQuery ? lossThreshold : 0.0f);
         renderer.setDebugPointCloudStride(debugPointStride);
 
@@ -321,10 +357,20 @@ int main(int argc, char** argv) {
         ImGui::Checkbox("Neural query", &useNeuralQuery);
         if (useNeuralQuery) {
             ImGui::Checkbox("Loss (first segment)", &showLossView);
+            ImGui::Checkbox("Loss (exact->rough normal)", &secondaryLossView);
+            ImGui::Checkbox("Two-hit rough select", &twoHitSelect);
             ImGui::Checkbox("GD point cloud", &debugPointCloudView);
+            if (debugPointCloudView) {
+                ImGui::Checkbox("Point cloud exact->rough", &debugPointCloudExactNormal);
+                ImGui::Checkbox("Point cloud drop non-exact", &debugPointCloudDropNonExact);
+                ImGui::Checkbox("Point cloud exact big points", &debugPointCloudExactBigPoints);
+                ImGui::Checkbox("Point cloud exact big points (rough small)", &debugPointCloudExactBigPointsOnly);
+            }
             ImGui::InputInt("Point stride", &debugPointStride);
             ImGui::InputInt("GD steps", &gdSteps);
+            ImGui::InputInt("GD steps 2", &gdSteps2);
             ImGui::InputFloat("GD learning rate", &gdLearningRate, 0.1f, 1.0f, "%.3f");
+            ImGui::InputFloat("GD learning rate 2", &gdLearningRate2, 0.1f, 1.0f, "%.3f");
             ImGui::InputFloat("Loss threshold", &lossThreshold, 0.01f, 0.1f, "%.4f");
         }
         ImGui::Checkbox("Lambert (no bounces)", &lambertView);

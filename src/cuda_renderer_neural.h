@@ -37,11 +37,19 @@ class RendererNeural final {
     bool useNeuralQuery() const { return useNeuralQuery_; }
     bool loadWeightsFromFile(const std::string& path);
     void setLossView(bool enabled) { lossView_ = enabled; }
+    void setSecondaryLossView(bool enabled) { secondaryLossView_ = enabled; }
     void setDebugPointCloudView(bool enabled) { debugPointCloudView_ = enabled; }
+    void setDebugPointCloudExactNormal(bool enabled) { debugPointCloudExactNormal_ = enabled; }
+    void setDebugPointCloudDropNonExact(bool enabled) { debugPointCloudDropNonExact_ = enabled; }
+    void setDebugPointCloudExactBigPoints(bool enabled) { debugPointCloudExactBigPoints_ = enabled; }
+    void setDebugPointCloudExactBigPointsOnly(bool enabled) { debugPointCloudExactBigPointsOnly_ = enabled; }
+    void setTwoHitSelect(bool enabled) { twoHitSelect_ = enabled; }
     void setDebugPointCloudStride(int stride) { debugPointCloudStride_ = stride; }
     void setLossThreshold(float threshold) { lossThreshold_ = threshold; }
     void setGdSteps(int steps) { gdSteps_ = steps; }
+    void setGdSteps2(int steps) { gdSteps2_ = steps; }
     void setGdLearningRate(float rate) { gdLearningRate_ = rate; }
+    void setGdLearningRate2(float rate) { gdLearningRate2_ = rate; }
     void setSamplesPerPixel(int samples) { samplesPerPixel_ = samples; }
     void setBounceCount(int count) { bounceCount_ = count; }
     void setLambertView(bool enabled) { lambertView_ = enabled; }
@@ -50,6 +58,7 @@ class RendererNeural final {
     bool debugPointCloudView() const { return debugPointCloudView_; }
     int debugPointCloudStride() const { return debugPointCloudStride_; }
     int gdSteps() const { return gdSteps_; }
+    int gdSteps2() const { return gdSteps2_; }
     float gdLearningRate() const { return gdLearningRate_; }
     int samplesPerPixel() const { return samplesPerPixel_; }
     int bounceCount() const { return bounceCount_; }
@@ -70,6 +79,8 @@ class RendererNeural final {
     void* outputs_ = nullptr;
     void* dL_doutput_ = nullptr;
     float* dL_dinput_ = nullptr;
+    float* adamM_ = nullptr;
+    float* adamV_ = nullptr;
     void* dL_dparams_ = nullptr;
     float* inputs_ = nullptr;
     float* hitPositions_ = nullptr;
@@ -91,6 +102,7 @@ class RendererNeural final {
     Vec3* pathThroughput_ = nullptr;
     Vec3* pathRadiance_ = nullptr;
     float* lossValues_ = nullptr;
+    float* lossValues2_ = nullptr;
     float* lossMax_ = nullptr;
     float* lossSum_ = nullptr;
     int* lossHitCount_ = nullptr;
@@ -114,12 +126,20 @@ class RendererNeural final {
     uchar4* devicePixels_ = nullptr;
     Vec3* accum_ = nullptr;
     bool lossView_ = false;
+    bool secondaryLossView_ = false;
     bool lambertView_ = false;
     bool debugPointCloudView_ = false;
+    bool debugPointCloudExactNormal_ = false;
+    bool debugPointCloudDropNonExact_ = false;
+    bool debugPointCloudExactBigPoints_ = false;
+    bool debugPointCloudExactBigPointsOnly_ = false;
+    bool twoHitSelect_ = false;
     float lossThreshold_ = 0.0f;
     int debugPointCloudStride_ = 10;
     int gdSteps_ = 0;
+    int gdSteps2_ = 0;
     float gdLearningRate_ = 10.0f;
+    float gdLearningRate2_ = 10.0f;
     int samplesPerPixel_ = 1;
     int bounceCount_ = 0;
     uint32_t accumSampleCount_ = 0;
@@ -129,10 +149,18 @@ class RendererNeural final {
     bool lastUseNeuralQuery_ = true;
     bool lastLambertView_ = false;
     bool lastDebugPointCloudView_ = false;
+    bool lastSecondaryLossView_ = false;
+    bool lastDebugPointCloudExactNormal_ = false;
+    bool lastDebugPointCloudDropNonExact_ = false;
+    bool lastDebugPointCloudExactBigPoints_ = false;
+    bool lastDebugPointCloudExactBigPointsOnly_ = false;
+    bool lastTwoHitSelect_ = false;
     int lastBounceCount_ = -1;
     int lastSamplesPerPixel_ = -1;
     int lastDebugPointCloudStride_ = 10;
     float lastLossThreshold_ = 0.0f;
+    float lastGdLearningRate2_ = 10.0f;
+    int lastGdSteps2_ = 0;
     bool hasLastCamera_ = false;
     Vec3 lastCamPos_{};
     RenderBasis lastBasis_{};

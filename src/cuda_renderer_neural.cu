@@ -225,7 +225,10 @@ __device__ inline bool intersectAabb(const Ray& ray,
                                      float tMax,
                                      float* outTNear);
 
-__device__ inline bool traceMesh(const Ray& ray, MeshDeviceView mesh, HitInfo* outHit) {
+__device__ inline bool traceMesh(const Ray& ray,
+                                 MeshDeviceView mesh,
+                                 HitInfo* outHit,
+                                 bool cullBackfaces = true) {
     if (mesh.nodeCount <= 0 || mesh.triangleCount <= 0) {
         return false;
     }
@@ -260,7 +263,7 @@ __device__ inline bool traceMesh(const Ray& ray, MeshDeviceView mesh, HitInfo* o
             int end = start + node.count;
             for (int i = start; i < end; ++i) {
                 const Triangle& tri = mesh.triangles[i];
-                if (dot(tri.normal, ray.direction) >= 0.0f) {
+                if (cullBackfaces && dot(tri.normal, ray.direction) >= 0.0f) {
                     continue;
                 }
                 HitInfo hit = intersectTriangle(ray, tri);
@@ -326,6 +329,29 @@ __device__ inline bool traceMesh(const Ray& ray, MeshDeviceView mesh, HitInfo* o
     return bestHit.hit;
 }
 
+__device__ inline int traceMeshTwoHits(const Ray& ray,
+                                       MeshDeviceView mesh,
+                                       HitInfo* outHit1,
+                                       HitInfo* outHit2) {
+    HitInfo hit1{false, 0.0f, Vec3(), Vec3(), Vec2(), -1};
+    if (!traceMesh(ray, mesh, &hit1, false)) {
+        return 0;
+    }
+    if (outHit1) {
+        *outHit1 = hit1;
+    }
+    const float kEps = 1e-3f;
+    Ray ray2(ray.origin + ray.direction * (hit1.distance + kEps), ray.direction);
+    HitInfo hit2{false, 0.0f, Vec3(), Vec3(), Vec2(), -1};
+    if (traceMesh(ray2, mesh, &hit2, false)) {
+        if (outHit2) {
+            *outHit2 = hit2;
+        }
+        return 2;
+    }
+    return 1;
+}
+
 __device__ inline bool intersectAabb(const Ray& ray,
                                      const Vec3& invDir,
                                      const Vec3& boundsMin,
@@ -380,10 +406,19 @@ __global__ void renderNeuralKernel(float* neuralInputs,
                                    float* hitColors,
                                    int* hitFlags,
                                    RenderParams params,
-                                   MeshDeviceView mesh) {
+                                   MeshDeviceView mesh,
+                                   int useTwoHits,
+                                   float* altInputs,
+                                   float* altPositions,
+                                   float* altNormals,
+                                   float* altColors,
+                                   int* altFlags) {
     int x = blockIdx.x * blockDim.x + threadIdx.x;
     int y = blockIdx.y * blockDim.y + threadIdx.y;
     if (x >= params.width || y >= params.height) {
+        return;
+    }
+    if (params.samplesPerPixel <= 0 || params.pixelCount <= 0) {
         return;
     }
 
@@ -399,44 +434,122 @@ __global__ void renderNeuralKernel(float* neuralInputs,
         uint32_t rng = initRng(idx, params.sampleOffset, s);
         Ray ray = generatePrimaryRay(x, y, params, rng);
 
-        HitInfo bestHit{false, 0.0f, Vec3(), Vec3(), Vec2(), -1};
-        bool hit = traceMesh(ray, mesh, &bestHit);
-        if (hit) {
-            Vec3 hitPos = ray.at(bestHit.distance);
-            Vec3 local = hitPos - params.meshMin;
-            Vec3 normalized(
-                    local.x * params.meshInvExtent.x,
-                    local.y * params.meshInvExtent.y,
-                    local.z * params.meshInvExtent.z);
-            int base = sampleIdx * 3;
-            neuralInputs[base + 0] = normalized.x;
-            neuralInputs[base + 1] = normalized.y;
-            neuralInputs[base + 2] = normalized.z;
-            hitPositions[base + 0] = hitPos.x;
-            hitPositions[base + 1] = hitPos.y;
-            hitPositions[base + 2] = hitPos.z;
-            hitNormals[base + 0] = bestHit.normal.x;
-            hitNormals[base + 1] = bestHit.normal.y;
-            hitNormals[base + 2] = bestHit.normal.z;
-            hitColors[base + 0] = bestHit.color.x;
-            hitColors[base + 1] = bestHit.color.y;
-            hitColors[base + 2] = bestHit.color.z;
-            hitFlags[sampleIdx] = 1;
+        int base = sampleIdx * 3;
+        if (useTwoHits) {
+            HitInfo hit1{false, 0.0f, Vec3(), Vec3(), Vec2(), -1};
+            HitInfo hit2{false, 0.0f, Vec3(), Vec3(), Vec2(), -1};
+            int hitCount = traceMeshTwoHits(ray, mesh, &hit1, &hit2);
+            if (hitCount > 0) {
+                Vec3 hitPos = ray.at(hit1.distance);
+                Vec3 local = hitPos - params.meshMin;
+                Vec3 normalized(
+                        local.x * params.meshInvExtent.x,
+                        local.y * params.meshInvExtent.y,
+                        local.z * params.meshInvExtent.z);
+                neuralInputs[base + 0] = normalized.x;
+                neuralInputs[base + 1] = normalized.y;
+                neuralInputs[base + 2] = normalized.z;
+                hitPositions[base + 0] = hitPos.x;
+                hitPositions[base + 1] = hitPos.y;
+                hitPositions[base + 2] = hitPos.z;
+                hitNormals[base + 0] = hit1.normal.x;
+                hitNormals[base + 1] = hit1.normal.y;
+                hitNormals[base + 2] = hit1.normal.z;
+                hitColors[base + 0] = hit1.color.x;
+                hitColors[base + 1] = hit1.color.y;
+                hitColors[base + 2] = hit1.color.z;
+                hitFlags[sampleIdx] = 1;
+            } else {
+                neuralInputs[base + 0] = 0.0f;
+                neuralInputs[base + 1] = 0.0f;
+                neuralInputs[base + 2] = 0.0f;
+                hitPositions[base + 0] = 0.0f;
+                hitPositions[base + 1] = 0.0f;
+                hitPositions[base + 2] = 0.0f;
+                hitNormals[base + 0] = 0.0f;
+                hitNormals[base + 1] = 0.0f;
+                hitNormals[base + 2] = 0.0f;
+                hitColors[base + 0] = 0.0f;
+                hitColors[base + 1] = 0.0f;
+                hitColors[base + 2] = 0.0f;
+                hitFlags[sampleIdx] = 0;
+            }
+            if (altInputs && altPositions && altNormals && altColors && altFlags) {
+                if (hitCount > 1) {
+                    Vec3 hitPos2 = (ray.origin + ray.direction * (hit1.distance + 1e-3f))
+                            + ray.direction * hit2.distance;
+                    Vec3 local2 = hitPos2 - params.meshMin;
+                    Vec3 normalized2(
+                            local2.x * params.meshInvExtent.x,
+                            local2.y * params.meshInvExtent.y,
+                            local2.z * params.meshInvExtent.z);
+                    altInputs[base + 0] = normalized2.x;
+                    altInputs[base + 1] = normalized2.y;
+                    altInputs[base + 2] = normalized2.z;
+                    altPositions[base + 0] = hitPos2.x;
+                    altPositions[base + 1] = hitPos2.y;
+                    altPositions[base + 2] = hitPos2.z;
+                    altNormals[base + 0] = hit2.normal.x;
+                    altNormals[base + 1] = hit2.normal.y;
+                    altNormals[base + 2] = hit2.normal.z;
+                    altColors[base + 0] = hit2.color.x;
+                    altColors[base + 1] = hit2.color.y;
+                    altColors[base + 2] = hit2.color.z;
+                    altFlags[sampleIdx] = 1;
+                } else {
+                    altInputs[base + 0] = 0.0f;
+                    altInputs[base + 1] = 0.0f;
+                    altInputs[base + 2] = 0.0f;
+                    altPositions[base + 0] = 0.0f;
+                    altPositions[base + 1] = 0.0f;
+                    altPositions[base + 2] = 0.0f;
+                    altNormals[base + 0] = 0.0f;
+                    altNormals[base + 1] = 0.0f;
+                    altNormals[base + 2] = 0.0f;
+                    altColors[base + 0] = 0.0f;
+                    altColors[base + 1] = 0.0f;
+                    altColors[base + 2] = 0.0f;
+                    altFlags[sampleIdx] = 0;
+                }
+            }
         } else {
-            int base = sampleIdx * 3;
-            neuralInputs[base + 0] = 0.0f;
-            neuralInputs[base + 1] = 0.0f;
-            neuralInputs[base + 2] = 0.0f;
-            hitPositions[base + 0] = 0.0f;
-            hitPositions[base + 1] = 0.0f;
-            hitPositions[base + 2] = 0.0f;
-            hitNormals[base + 0] = 0.0f;
-            hitNormals[base + 1] = 0.0f;
-            hitNormals[base + 2] = 0.0f;
-            hitColors[base + 0] = 0.0f;
-            hitColors[base + 1] = 0.0f;
-            hitColors[base + 2] = 0.0f;
-            hitFlags[sampleIdx] = 0;
+            HitInfo bestHit{false, 0.0f, Vec3(), Vec3(), Vec2(), -1};
+            bool hit = traceMesh(ray, mesh, &bestHit);
+            if (hit) {
+                Vec3 hitPos = ray.at(bestHit.distance);
+                Vec3 local = hitPos - params.meshMin;
+                Vec3 normalized(
+                        local.x * params.meshInvExtent.x,
+                        local.y * params.meshInvExtent.y,
+                        local.z * params.meshInvExtent.z);
+                neuralInputs[base + 0] = normalized.x;
+                neuralInputs[base + 1] = normalized.y;
+                neuralInputs[base + 2] = normalized.z;
+                hitPositions[base + 0] = hitPos.x;
+                hitPositions[base + 1] = hitPos.y;
+                hitPositions[base + 2] = hitPos.z;
+                hitNormals[base + 0] = bestHit.normal.x;
+                hitNormals[base + 1] = bestHit.normal.y;
+                hitNormals[base + 2] = bestHit.normal.z;
+                hitColors[base + 0] = bestHit.color.x;
+                hitColors[base + 1] = bestHit.color.y;
+                hitColors[base + 2] = bestHit.color.z;
+                hitFlags[sampleIdx] = 1;
+            } else {
+                neuralInputs[base + 0] = 0.0f;
+                neuralInputs[base + 1] = 0.0f;
+                neuralInputs[base + 2] = 0.0f;
+                hitPositions[base + 0] = 0.0f;
+                hitPositions[base + 1] = 0.0f;
+                hitPositions[base + 2] = 0.0f;
+                hitNormals[base + 0] = 0.0f;
+                hitNormals[base + 1] = 0.0f;
+                hitNormals[base + 2] = 0.0f;
+                hitColors[base + 0] = 0.0f;
+                hitColors[base + 1] = 0.0f;
+                hitColors[base + 2] = 0.0f;
+                hitFlags[sampleIdx] = 0;
+            }
         }
     }
 }
@@ -954,6 +1067,56 @@ __global__ void computeLossGradKernel(const float* compactedInputs,
     dL_doutput[outputBase + 2] = __float2half(gradDelta.z);
 }
 
+__global__ void computeLossValuesKernel(const float* compactedInputs,
+                                        const __half* outputs,
+                                        const int* hitIndices,
+                                        int hitCount,
+                                        RenderParams params,
+                                        Vec3 meshMin,
+                                        Vec3 meshExtent,
+                                        int outputStride,
+                                        float* lossValues) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= hitCount) {
+        return;
+    }
+
+    int inputBase = idx * 3;
+    Vec3 xNorm(
+            compactedInputs[inputBase + 0],
+            compactedInputs[inputBase + 1],
+            compactedInputs[inputBase + 2]);
+
+    int outputBase = idx * outputStride;
+    Vec3 deltaNorm(
+            __half2float(outputs[outputBase + 0]),
+            __half2float(outputs[outputBase + 1]),
+            __half2float(outputs[outputBase + 2]));
+
+    Vec3 xUpdated = xNorm + deltaNorm;
+    Vec3 hitPos(
+            xUpdated.x * meshExtent.x + meshMin.x,
+            xUpdated.y * meshExtent.y + meshMin.y,
+            xUpdated.z * meshExtent.z + meshMin.z);
+
+    int sampleIdx = hitIndices[idx];
+    int pixelIdx = params.pixelCount > 0 ? (sampleIdx % params.pixelCount) : sampleIdx;
+    int sampleInPixel = params.pixelCount > 0 ? (sampleIdx / params.pixelCount) : 0;
+    int px = pixelIdx - (pixelIdx / params.width) * params.width;
+    int py = pixelIdx / params.width;
+
+    uint32_t rng = initRng(pixelIdx, params.sampleOffset, sampleInPixel);
+    Ray primaryRay = generatePrimaryRay(px, py, params, rng);
+    Vec3 dir = primaryRay.direction;
+
+    Vec3 toPoint = hitPos - params.camPos;
+    float t = dot(toPoint, dir);
+    Vec3 closest = params.camPos + dir * t;
+    Vec3 residual = hitPos - closest;
+    float dist = length(residual);
+    lossValues[sampleIdx] = dist;
+}
+
 __global__ void addDirectGradKernel(const float* compactedInputs,
                                     const __half* outputs,
                                     const int* hitIndices,
@@ -1018,6 +1181,46 @@ __global__ void addDirectGradKernel(const float* compactedInputs,
     dL_dinput[inputBase + 2] += gradDelta.z;
 }
 
+__global__ void selectLowerLossHitKernel(const float* altInputs,
+                                         const float* altPositions,
+                                         const float* altNormals,
+                                         const float* altColors,
+                                         const int* altFlags,
+                                         const float* altLoss,
+                                         float* inputs,
+                                         float* hitPositions,
+                                         float* hitNormals,
+                                         float* hitColors,
+                                         int* hitFlags,
+                                         const float* primaryLoss,
+                                         int count) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= count) {
+        return;
+    }
+    if (!altFlags[idx]) {
+        return;
+    }
+    if (!hitFlags[idx] || altLoss[idx] < primaryLoss[idx]) {
+        int base = idx * 3;
+        inputs[base + 0] = altInputs[base + 0];
+        inputs[base + 1] = altInputs[base + 1];
+        inputs[base + 2] = altInputs[base + 2];
+        hitPositions[base + 0] = altPositions[base + 0];
+        hitPositions[base + 1] = altPositions[base + 1];
+        hitPositions[base + 2] = altPositions[base + 2];
+        hitNormals[base + 0] = altNormals[base + 0];
+        hitNormals[base + 1] = altNormals[base + 1];
+        hitNormals[base + 2] = altNormals[base + 2];
+        if (altColors && hitColors) {
+            hitColors[base + 0] = altColors[base + 0];
+            hitColors[base + 1] = altColors[base + 1];
+            hitColors[base + 2] = altColors[base + 2];
+        }
+        hitFlags[idx] = 1;
+    }
+}
+
 __global__ void sgdInputsKernel(float* inputs,
                                 const float* grads,
                                 int count,
@@ -1028,6 +1231,30 @@ __global__ void sgdInputsKernel(float* inputs,
         return;
     }
     inputs[idx] -= lr * grads[idx];
+}
+
+__global__ void adamInputsKernel(float* inputs,
+                                 const float* grads,
+                                 float* m,
+                                 float* v,
+                                 int count,
+                                 float alpha,
+                                 float beta1,
+                                 float beta2,
+                                 float eps) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int total = count * 3;
+    if (idx >= total) {
+        return;
+    }
+    float g = grads[idx];
+    float mPrev = m[idx];
+    float vPrev = v[idx];
+    float mNew = beta1 * mPrev + (1.0f - beta1) * g;
+    float vNew = beta2 * vPrev + (1.0f - beta2) * g * g;
+    m[idx] = mNew;
+    v[idx] = vNew;
+    inputs[idx] -= alpha * mNew / (sqrtf(vNew) + eps);
 }
 
 __global__ void pathTraceKernel(uchar4* output,
@@ -1531,6 +1758,65 @@ __global__ void lossNeuralKernel(float* lossValues,
     }
 }
 
+__global__ void lossSecondaryKernel(float* lossValues,
+                                    RenderParams params,
+                                    MeshDeviceView exactMesh,
+                                    MeshDeviceView roughMesh,
+                                    float* lossMax,
+                                    float* lossSum,
+                                    int* lossHitCount) {
+    int x = blockIdx.x * blockDim.x + threadIdx.x;
+    int y = blockIdx.y * blockDim.y + threadIdx.y;
+    if (x >= params.width || y >= params.height) {
+        return;
+    }
+
+    int idx = y * params.width + x;
+    uint32_t rng = initRng(idx, params.sampleOffset, 0);
+    Ray primaryRay = generatePrimaryRay(x, y, params, rng);
+
+    float loss = 0.0f;
+    bool secondaryHit = false;
+
+    HitInfo exactHit{false, 0.0f, Vec3(), Vec3(), Vec2(), -1};
+    if (traceMesh(primaryRay, exactMesh, &exactHit, true)) {
+        Vec3 hitPos = primaryRay.at(exactHit.distance);
+        Vec3 normal = exactHit.normal;
+        float nlen = length(normal);
+        if (nlen > 0.0f) {
+            normal = normal / nlen;
+        } else {
+            normal = Vec3(0.0f, 1.0f, 0.0f);
+        }
+        if (dot(normal, primaryRay.direction) > 0.0f) {
+            normal = normal * -1.0f;
+        }
+
+        Ray secondaryRay(hitPos + normal * 1e-3f, normal);
+        HitInfo roughHit{false, 0.0f, Vec3(), Vec3(), Vec2(), -1};
+        if (traceMesh(secondaryRay, roughMesh, &roughHit, false)) {
+            Vec3 secondaryPos = secondaryRay.at(roughHit.distance);
+            Vec3 toPoint = secondaryPos - params.camPos;
+            float t = dot(toPoint, primaryRay.direction);
+            Vec3 closest = params.camPos + primaryRay.direction * t;
+            Vec3 delta = secondaryPos - closest;
+            loss = length(delta);
+            secondaryHit = true;
+        }
+    }
+
+    lossValues[idx] = loss;
+    if (secondaryHit && loss > 0.0f) {
+        atomicMaxFloat(lossMax, loss);
+    }
+    if (lossSum && secondaryHit) {
+        atomicAdd(lossSum, loss);
+    }
+    if (lossHitCount && secondaryHit) {
+        atomicAdd(lossHitCount, 1);
+    }
+}
+
 __global__ void lossToneMapKernel(uchar4* output,
                                   const float* lossValues,
                                   RenderParams params,
@@ -1583,7 +1869,7 @@ RendererNeural::RendererNeural(Scene& scene)
             {"otype", "HashGrid"},
             {"n_levels", 8},
             {"n_features_per_level", 8},
-            {"log2_hashmap_size", 10},
+            {"log2_hashmap_size", 20},
             {"base_resolution", 2},
             {"per_level_scale", 2.0},
             {"fixed_point_pos", false},
@@ -1705,13 +1991,26 @@ void RendererNeural::render(const Vec3& camPos, std::vector<uchar4>& hostPixels)
         maxBounces = 0;
     }
 
-    Mesh& mesh = useNeuralQuery_ ? scene_->roughMesh() : scene_->exactMesh();
+    Mesh& exactMesh = scene_->exactMesh();
+    Mesh& roughMesh = scene_->roughMesh();
+    Mesh& mesh = useNeuralQuery_ ? roughMesh : exactMesh;
     if (!mesh.uploadToDevice()) {
         return;
+    }
+    if (secondaryLossView_ ||
+        (debugPointCloudView_ &&
+         (debugPointCloudExactNormal_ || debugPointCloudDropNonExact_ ||
+          debugPointCloudExactBigPoints_ || debugPointCloudExactBigPointsOnly_))) {
+        Mesh& otherMesh = useNeuralQuery_ ? exactMesh : roughMesh;
+        if (!otherMesh.uploadToDevice()) {
+            return;
+        }
     }
     EnvironmentMap& environment = scene_->environment();
     environment.uploadToDevice();
     MeshDeviceView meshView = mesh.deviceView();
+    MeshDeviceView exactView = exactMesh.deviceView();
+    MeshDeviceView roughView = roughMesh.deviceView();
     EnvironmentDeviceView envView = environment.deviceView();
 
     size_t pixelCount = static_cast<size_t>(width_) * static_cast<size_t>(height_);
@@ -1763,15 +2062,38 @@ void RendererNeural::render(const Vec3& camPos, std::vector<uchar4>& hostPixels)
     }
     bool lossThresholdChanged = fabsf(lossThreshold_ - lastLossThreshold_) > kEps;
     bool debugPointCloudChanged = debugPointCloudView_ != lastDebugPointCloudView_;
+    bool secondaryLossChanged = secondaryLossView_ != lastSecondaryLossView_;
+    bool debugPointCloudExactNormalChanged = debugPointCloudExactNormal_ != lastDebugPointCloudExactNormal_;
+    bool debugPointCloudDropNonExactChanged = debugPointCloudDropNonExact_ != lastDebugPointCloudDropNonExact_;
+    bool debugPointCloudExactBigPointsChanged =
+            debugPointCloudExactBigPoints_ != lastDebugPointCloudExactBigPoints_;
+    bool debugPointCloudExactBigPointsOnlyChanged =
+            debugPointCloudExactBigPointsOnly_ != lastDebugPointCloudExactBigPointsOnly_;
+    bool twoHitSelectChanged = twoHitSelect_ != lastTwoHitSelect_;
     bool debugPointStrideChanged = debugPointCloudStride_ != lastDebugPointCloudStride_;
+    bool gdLearningRate2Changed = fabsf(gdLearningRate2_ - lastGdLearningRate2_) > kEps;
+    bool gdSteps2Changed = gdSteps2_ != lastGdSteps2_;
     if (cameraMoved || useNeuralQuery_ != lastUseNeuralQuery_ || lambertView_ != lastLambertView_ ||
         maxBounces != lastBounceCount_ || samplesPerPixel != lastSamplesPerPixel_ ||
-        lossThresholdChanged || debugPointCloudChanged || debugPointStrideChanged) {
+        lossThresholdChanged || debugPointCloudChanged || secondaryLossChanged ||
+        debugPointCloudExactNormalChanged || debugPointCloudDropNonExactChanged ||
+        debugPointCloudExactBigPointsChanged || debugPointCloudExactBigPointsOnlyChanged ||
+        twoHitSelectChanged ||
+        gdLearningRate2Changed || gdSteps2Changed ||
+        debugPointStrideChanged) {
         resetAccum();
     }
     lastUseNeuralQuery_ = useNeuralQuery_;
     lastLambertView_ = lambertView_;
     lastDebugPointCloudView_ = debugPointCloudView_;
+    lastSecondaryLossView_ = secondaryLossView_;
+    lastDebugPointCloudExactNormal_ = debugPointCloudExactNormal_;
+    lastDebugPointCloudDropNonExact_ = debugPointCloudDropNonExact_;
+    lastDebugPointCloudExactBigPoints_ = debugPointCloudExactBigPoints_;
+    lastDebugPointCloudExactBigPointsOnly_ = debugPointCloudExactBigPointsOnly_;
+    lastTwoHitSelect_ = twoHitSelect_;
+    lastGdLearningRate2_ = gdLearningRate2_;
+    lastGdSteps2_ = gdSteps2_;
     lastBounceCount_ = maxBounces;
     lastSamplesPerPixel_ = samplesPerPixel;
     lastDebugPointCloudStride_ = debugPointCloudStride_;
@@ -1813,11 +2135,14 @@ void RendererNeural::render(const Vec3& camPos, std::vector<uchar4>& hostPixels)
                 normals_,
                 hitFlags_,
                 lossValues_,
+                lossValues2_,
                 lossMax_,
                 lossSum_,
                 lossHitCount_,
                 compactedInputs_,
                 compactedDLDInput_,
+                adamM_,
+                adamV_,
                 outputs_,
                 dL_doutput_,
                 hitIndices_,
@@ -1828,14 +2153,27 @@ void RendererNeural::render(const Vec3& camPos, std::vector<uchar4>& hostPixels)
                 outputElemSize_,
                 elementCountInt,
                 gdSteps_,
+                gdSteps2_,
                 gdLearningRate_,
+                gdLearningRate2_,
                 lossThreshold_,
                 debugPointCloudStride_,
+                twoHitSelect_,
+                bounceInputs_,
+                bouncePositions_,
+                bounceNormals_,
+                bounceHitFlags_,
+                debugPointCloudExactNormal_,
+                debugPointCloudDropNonExact_,
+                debugPointCloudExactBigPoints_,
+                debugPointCloudExactBigPointsOnly_,
                 debugParams,
                 meshMin,
                 meshExtent,
                 meshInvExtent,
                 meshView,
+                exactView,
+                roughView,
                 envView);
 
         if (lossSum_ && lossHitCount_) {
@@ -1865,6 +2203,51 @@ void RendererNeural::render(const Vec3& camPos, std::vector<uchar4>& hostPixels)
 
     dim3 block(8, 8);  // reduce block size to allow more resident blocks when register pressure is high
     dim3 grid((width_ + block.x - 1) / block.x, (height_ + block.y - 1) / block.y);
+    if (secondaryLossView_) {
+        RenderParams debugParams = params;
+        debugParams.sampleOffset = 0;
+        if (lossValues_ && lossMax_ && lossSum_ && lossHitCount_) {
+            checkCuda(cudaMemset(lossMax_, 0, sizeof(float)), "cudaMemset secondary lossMax");
+            checkCuda(cudaMemset(lossSum_, 0, sizeof(float)), "cudaMemset secondary lossSum");
+            checkCuda(cudaMemset(lossHitCount_, 0, sizeof(int)), "cudaMemset secondary lossHitCount");
+            lossSecondaryKernel<<<grid, block>>>(
+                    lossValues_,
+                    debugParams,
+                    exactView,
+                    roughView,
+                    lossMax_,
+                    lossSum_,
+                    lossHitCount_);
+            checkCuda(cudaGetLastError(), "lossSecondaryKernel launch");
+
+            float lossSumHost = 0.0f;
+            int hitCountHost = 0;
+            checkCuda(cudaMemcpy(&lossSumHost, lossSum_, sizeof(float), cudaMemcpyDeviceToHost),
+                      "cudaMemcpy secondary lossSum");
+            checkCuda(cudaMemcpy(&hitCountHost, lossHitCount_, sizeof(int), cudaMemcpyDeviceToHost),
+                      "cudaMemcpy secondary lossHitCount");
+            lastHitCount_ = hitCountHost;
+            if (hitCountHost > 0) {
+                lastAvgLoss_ = lossSumHost / static_cast<float>(hitCountHost);
+            } else {
+                lastAvgLoss_ = 0.0f;
+            }
+
+            lossToneMapKernel<<<grid, block>>>(devicePixels_, lossValues_, debugParams, lossMax_);
+            checkCuda(cudaGetLastError(), "lossToneMapKernel secondary launch");
+        }
+
+        checkCuda(cudaMemcpy(
+                hostPixels.data(),
+                devicePixels_,
+                hostPixels.size() * sizeof(uchar4),
+                cudaMemcpyDeviceToHost),
+                "cudaMemcpy secondary loss output");
+        accumSampleCount_ = 0;
+        return;
+    }
+
+    int useTwoHits = (useNeuralQuery_ && twoHitSelect_ && network_) ? 1 : 0;
     renderNeuralKernel<<<grid, block>>>(
             inputs_,
             hitPositions_,
@@ -1872,12 +2255,146 @@ void RendererNeural::render(const Vec3& camPos, std::vector<uchar4>& hostPixels)
             hitColors_,
             hitFlags_,
             params,
-            meshView);
+            meshView,
+            useTwoHits,
+            useTwoHits ? bounceInputs_ : nullptr,
+            useTwoHits ? bouncePositions_ : nullptr,
+            useTwoHits ? bounceNormals_ : nullptr,
+            useTwoHits ? bounceColors_ : nullptr,
+            useTwoHits ? bounceHitFlags_ : nullptr);
     checkCuda(cudaGetLastError(), "renderNeuralKernel launch");
 
     const int compactBlock = 256;
     int compactGrid = static_cast<int>((elementCount + compactBlock - 1) / compactBlock);
     const int blockSize = 256;
+
+    if (useTwoHits && network_ && outputs_ && lossValues_ && lossValues2_ &&
+            compactedInputs_ && hitIndices_ && hitCount_) {
+        checkCuda(cudaMemset(lossValues_, 0, elementCount * sizeof(float)),
+                  "cudaMemset two-hit loss values");
+        checkCuda(cudaMemset(hitCount_, 0, sizeof(int)), "cudaMemset two-hit hitCount");
+        compactInputsKernel<<<compactGrid, compactBlock>>>(
+                inputs_,
+                hitFlags_,
+                elementCountInt,
+                compactedInputs_,
+                hitIndices_,
+                hitCount_);
+        checkCuda(cudaGetLastError(), "compactInputsKernel two-hit primary launch");
+
+        int hitCount = 0;
+        checkCuda(cudaMemcpy(&hitCount, hitCount_, sizeof(int), cudaMemcpyDeviceToHost),
+                  "cudaMemcpy two-hit hitCount");
+        if (hitCount > 0) {
+            size_t hitCountSize = static_cast<size_t>(hitCount);
+            size_t granularity = static_cast<size_t>(tcnn::cpp::batch_size_granularity());
+            size_t paddedCount = roundUp(hitCountSize, granularity);
+            if (paddedCount > hitCountSize) {
+                size_t tail = paddedCount - hitCountSize;
+                checkCuda(cudaMemset(
+                        compactedInputs_ + hitCountSize * 3,
+                        0,
+                        tail * 3 * sizeof(float)),
+                        "cudaMemset two-hit compacted inputs tail");
+            }
+
+            {
+                tcnn::cpp::Context ctx = network_->forward(
+                    0,
+                    static_cast<uint32_t>(paddedCount),
+                    compactedInputs_,
+                    outputs_,
+                    params_,
+                    false
+                );
+                (void)ctx;
+            }
+
+            int lossGrid = (hitCount + blockSize - 1) / blockSize;
+            computeLossValuesKernel<<<lossGrid, blockSize>>>(
+                    compactedInputs_,
+                    static_cast<const __half*>(outputs_),
+                    hitIndices_,
+                    hitCount,
+                    params,
+                    meshMin,
+                    meshExtent,
+                    static_cast<int>(outputDims_),
+                    lossValues_);
+            checkCuda(cudaGetLastError(), "computeLossValuesKernel primary launch");
+        }
+
+        checkCuda(cudaMemset(lossValues2_, 0, elementCount * sizeof(float)),
+                  "cudaMemset two-hit loss values 2");
+        checkCuda(cudaMemset(hitCount_, 0, sizeof(int)), "cudaMemset two-hit hitCount 2");
+        compactInputsKernel<<<compactGrid, compactBlock>>>(
+                bounceInputs_,
+                bounceHitFlags_,
+                elementCountInt,
+                compactedInputs_,
+                hitIndices_,
+                hitCount_);
+        checkCuda(cudaGetLastError(), "compactInputsKernel two-hit alt launch");
+
+        hitCount = 0;
+        checkCuda(cudaMemcpy(&hitCount, hitCount_, sizeof(int), cudaMemcpyDeviceToHost),
+                  "cudaMemcpy two-hit hitCount 2");
+        if (hitCount > 0) {
+            size_t hitCountSize = static_cast<size_t>(hitCount);
+            size_t granularity = static_cast<size_t>(tcnn::cpp::batch_size_granularity());
+            size_t paddedCount = roundUp(hitCountSize, granularity);
+            if (paddedCount > hitCountSize) {
+                size_t tail = paddedCount - hitCountSize;
+                checkCuda(cudaMemset(
+                        compactedInputs_ + hitCountSize * 3,
+                        0,
+                        tail * 3 * sizeof(float)),
+                        "cudaMemset two-hit compacted inputs 2 tail");
+            }
+
+            {
+                tcnn::cpp::Context ctx = network_->forward(
+                    0,
+                    static_cast<uint32_t>(paddedCount),
+                    compactedInputs_,
+                    outputs_,
+                    params_,
+                    false
+                );
+                (void)ctx;
+            }
+
+            int lossGrid = (hitCount + blockSize - 1) / blockSize;
+            computeLossValuesKernel<<<lossGrid, blockSize>>>(
+                    compactedInputs_,
+                    static_cast<const __half*>(outputs_),
+                    hitIndices_,
+                    hitCount,
+                    params,
+                    meshMin,
+                    meshExtent,
+                    static_cast<int>(outputDims_),
+                    lossValues2_);
+            checkCuda(cudaGetLastError(), "computeLossValuesKernel alt launch");
+        }
+
+        int selectGrid = (elementCountInt + blockSize - 1) / blockSize;
+        selectLowerLossHitKernel<<<selectGrid, blockSize>>>(
+                bounceInputs_,
+                bouncePositions_,
+                bounceNormals_,
+                bounceColors_,
+                bounceHitFlags_,
+                lossValues2_,
+                inputs_,
+                hitPositions_,
+                normals_,
+                hitColors_,
+                hitFlags_,
+                lossValues_,
+                elementCountInt);
+        checkCuda(cudaGetLastError(), "selectLowerLossHitKernel launch");
+    }
 
     bool neuralActive = false;
     if (useNeuralQuery_ && network_) {
@@ -1927,10 +2444,15 @@ void RendererNeural::render(const Vec3& camPos, std::vector<uchar4>& hostPixels)
                 int gradGrid = static_cast<int>((hitCount + blockSize - 1) / blockSize);
                 int inputGrid = static_cast<int>(((hitCount * 3) + blockSize - 1) / blockSize);
                 float invHitCount = 1.0f / static_cast<float>(hitCount);
-                int steps = gdSteps_;
-                if (steps < 0) {
-                    steps = 0;
+                int steps1 = gdSteps_;
+                if (steps1 < 0) {
+                    steps1 = 0;
                 }
+                int steps2 = gdSteps2_;
+                if (steps2 < 0) {
+                    steps2 = 0;
+                }
+                int steps = steps1 + steps2;
                 // if (steps > 10) {
                 //     steps = 10;
                 // }
@@ -1938,8 +2460,20 @@ void RendererNeural::render(const Vec3& camPos, std::vector<uchar4>& hostPixels)
                 if (learningRate < 0.0f) {
                     learningRate = 0.0f;
                 }
+                float learningRate2 = gdLearningRate2_;
+                if (learningRate2 < 0.0f) {
+                    learningRate2 = 0.0f;
+                }
+                int firstStageSteps = steps1;
 
+                if (adamM_ && adamV_) {
+                    checkCuda(cudaMemset(adamM_, 0, hitCount * 3 * sizeof(float)),
+                              "cudaMemset adam m");
+                    checkCuda(cudaMemset(adamV_, 0, hitCount * 3 * sizeof(float)),
+                              "cudaMemset adam v");
+                }
                 for (int step = 0; step < steps; ++step) {
+                    float stepLearningRate = (step < firstStageSteps) ? learningRate : learningRate2;
                     tcnn::cpp::Context ctx = network_->forward(
                         0,
                         static_cast<uint32_t>(paddedCount),
@@ -1988,12 +2522,32 @@ void RendererNeural::render(const Vec3& camPos, std::vector<uchar4>& hostPixels)
                             compactedDLDInput_);
                     checkCuda(cudaGetLastError(), "addDirectGradKernel launch");
 
-                    sgdInputsKernel<<<inputGrid, blockSize>>>(
-                            compactedInputs_,
-                            compactedDLDInput_,
-                            hitCount,
-                            learningRate);
-                    checkCuda(cudaGetLastError(), "sgdInputsKernel launch");
+                    if (adamM_ && adamV_) {
+                        const float beta1 = 0.9f;
+                        const float beta2 = 0.999f;
+                        const float eps = 1e-8f;
+                        float t = static_cast<float>(step + 1);
+                        float alpha = stepLearningRate * sqrtf(1.0f - powf(beta2, t)) /
+                                (1.0f - powf(beta1, t));
+                        adamInputsKernel<<<inputGrid, blockSize>>>(
+                                compactedInputs_,
+                                compactedDLDInput_,
+                                adamM_,
+                                adamV_,
+                                hitCount,
+                                alpha,
+                                beta1,
+                                beta2,
+                                eps);
+                        checkCuda(cudaGetLastError(), "adamInputsKernel launch");
+                    } else {
+                        sgdInputsKernel<<<inputGrid, blockSize>>>(
+                                compactedInputs_,
+                                compactedDLDInput_,
+                                hitCount,
+                                stepLearningRate);
+                        checkCuda(cudaGetLastError(), "sgdInputsKernel launch");
+                    }
 
                     projectInputsToMeshKernel<<<gradGrid, blockSize>>>(
                             compactedInputs_,
@@ -2367,6 +2921,10 @@ void RendererNeural::release() {
         cudaFree(lossValues_);
         lossValues_ = nullptr;
     }
+    if (lossValues2_) {
+        cudaFree(lossValues2_);
+        lossValues2_ = nullptr;
+    }
     if (lossMax_) {
         cudaFree(lossMax_);
         lossMax_ = nullptr;
@@ -2390,6 +2948,14 @@ void RendererNeural::release() {
     if (dL_dinput_) {
         cudaFree(dL_dinput_);
         dL_dinput_ = nullptr;
+    }
+    if (adamM_) {
+        cudaFree(adamM_);
+        adamM_ = nullptr;
+    }
+    if (adamV_) {
+        cudaFree(adamV_);
+        adamV_ = nullptr;
     }
     if (compactedDLDInput_) {
         cudaFree(compactedDLDInput_);
@@ -2454,7 +3020,9 @@ bool RendererNeural::ensureNetworkBuffers(size_t elementCount) {
             bounceInputs_ && bouncePositions_ && bounceNormals_ && bounceDirs_ && bounceColors_ && bounceHitFlags_ &&
             bounce2Inputs_ && bounce2Positions_ && bounce2Normals_ && bounce2Dirs_ && bounce2Colors_ && bounce2HitFlags_ &&
             envDirs_ && envHitFlags_ &&
-            pathThroughput_ && pathRadiance_ && pathActive_) {
+            pathThroughput_ && pathRadiance_ && pathActive_ &&
+            adamM_ && adamV_ &&
+            lossValues2_) {
         return true;
     }
     if (inputs_) {
@@ -2484,6 +3052,14 @@ bool RendererNeural::ensureNetworkBuffers(size_t elementCount) {
     if (dL_dinput_) {
         cudaFree(dL_dinput_);
         dL_dinput_ = nullptr;
+    }
+    if (adamM_) {
+        cudaFree(adamM_);
+        adamM_ = nullptr;
+    }
+    if (adamV_) {
+        cudaFree(adamV_);
+        adamV_ = nullptr;
     }
     if (compactedDLDInput_) {
         cudaFree(compactedDLDInput_);
@@ -2549,6 +3125,10 @@ bool RendererNeural::ensureNetworkBuffers(size_t elementCount) {
         cudaFree(lossValues_);
         lossValues_ = nullptr;
     }
+    if (lossValues2_) {
+        cudaFree(lossValues2_);
+        lossValues2_ = nullptr;
+    }
     if (lossMax_) {
         cudaFree(lossMax_);
         lossMax_ = nullptr;
@@ -2610,6 +3190,7 @@ bool RendererNeural::ensureNetworkBuffers(size_t elementCount) {
     checkCuda(cudaMalloc(&pathThroughput_, elementCount * sizeof(Vec3)), "cudaMalloc path throughput");
     checkCuda(cudaMalloc(&pathRadiance_, elementCount * sizeof(Vec3)), "cudaMalloc path radiance");
     checkCuda(cudaMalloc(&lossValues_, elementCount * sizeof(float)), "cudaMalloc loss values");
+    checkCuda(cudaMalloc(&lossValues2_, elementCount * sizeof(float)), "cudaMalloc loss values 2");
     checkCuda(cudaMalloc(&lossMax_, sizeof(float)), "cudaMalloc loss max");
     checkCuda(cudaMalloc(&lossSum_, sizeof(float)), "cudaMalloc loss sum");
     checkCuda(cudaMalloc(&lossHitCount_, sizeof(int)), "cudaMalloc loss hit count");
@@ -2621,6 +3202,8 @@ bool RendererNeural::ensureNetworkBuffers(size_t elementCount) {
     }
     size_t inputGradBytes = elementCount * 3 * sizeof(float);
     checkCuda(cudaMalloc(&dL_dinput_, inputGradBytes), "cudaMalloc tcnn dL_dinput");
+    checkCuda(cudaMalloc(&adamM_, inputGradBytes), "cudaMalloc tcnn adam m");
+    checkCuda(cudaMalloc(&adamV_, inputGradBytes), "cudaMalloc tcnn adam v");
     checkCuda(cudaMalloc(&compactedDLDInput_, inputGradBytes), "cudaMalloc tcnn compacted dL_dinput");
     checkCuda(cudaMalloc(&hitFlags_, elementCount * sizeof(int)), "cudaMalloc tcnn hit flags");
     checkCuda(cudaMalloc(&bounceHitFlags_, elementCount * sizeof(int)), "cudaMalloc bounce hit flags");

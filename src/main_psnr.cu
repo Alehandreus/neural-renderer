@@ -185,7 +185,7 @@ int main(int argc, char** argv) {
     // const char* kRoughMeshPath = "/home/me/brain/mesh-mapping/models/dragon_outer_3000.fbx";
     const char* kCheckpointPath = "/home/me/brain/mesh-mapping/checkpoints/outer_params.bin";
     const int kBounceCount = 3;
-    const bool kNormalizeMeshes = true;
+    const bool kNormalizeMeshes = false;
     const bool kNearestTextureSampling = true;
     const char* kDefaultHdriPath = "/home/me/Downloads/lilienstein_4k.hdr";
     const int kWidth = 1920;
