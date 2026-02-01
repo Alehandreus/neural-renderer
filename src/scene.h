@@ -45,11 +45,14 @@ private:
 
 class Scene {
 public:
-    Mesh& exactMesh() { return exactMesh_; }
-    const Mesh& exactMesh() const { return exactMesh_; }
+    Mesh& originalMesh() { return originalMesh_; }
+    const Mesh& originalMesh() const { return originalMesh_; }
 
-    Mesh& roughMesh() { return roughMesh_; }
-    const Mesh& roughMesh() const { return roughMesh_; }
+    Mesh& innerShell() { return innerShell_; }
+    const Mesh& innerShell() const { return innerShell_; }
+
+    Mesh& outerShell() { return outerShell_; }
+    const Mesh& outerShell() const { return outerShell_; }
 
     EnvironmentMap& environment() { return environment_; }
     const EnvironmentMap& environment() const { return environment_; }
@@ -58,8 +61,9 @@ public:
     const Material& material() const { return material_; }
 
 private:
-    Mesh exactMesh_;
-    Mesh roughMesh_;
+    Mesh originalMesh_;
+    Mesh innerShell_;
+    Mesh outerShell_;
     EnvironmentMap environment_;
     Material material_;
 };

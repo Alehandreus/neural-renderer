@@ -139,3 +139,4 @@ if (TARGET assimp::assimp)
 else()
     target_link_libraries(cuda_imgui_sphere PRIVATE assimp)
 endif()
+

@@ -19,47 +19,21 @@ class Scene;
 
 class RendererNeural final {
  public:
-    enum class GradientMode {
-        InputOnly,
-        WeightsOnly,
-        InputAndWeights
-    };
-
     explicit RendererNeural(Scene& scene);
     ~RendererNeural();
 
     void resize(int width, int height);
     void setCameraBasis(const RenderBasis& basis);
     void render(const Vec3& camPos, std::vector<uchar4>& hostPixels);
-    void setGradientMode(GradientMode mode) { gradientMode_ = mode; }
-    GradientMode gradientMode() const { return gradientMode_; }
+
     void setUseNeuralQuery(bool enabled) { useNeuralQuery_ = enabled; }
     bool useNeuralQuery() const { return useNeuralQuery_; }
     bool loadWeightsFromFile(const std::string& path);
-    void setLossView(bool enabled) { lossView_ = enabled; }
-    void setSecondaryLossView(bool enabled) { secondaryLossView_ = enabled; }
-    void setDebugPointCloudView(bool enabled) { debugPointCloudView_ = enabled; }
-    void setDebugPointCloudExactNormal(bool enabled) { debugPointCloudExactNormal_ = enabled; }
-    void setDebugPointCloudDropNonExact(bool enabled) { debugPointCloudDropNonExact_ = enabled; }
-    void setDebugPointCloudExactBigPoints(bool enabled) { debugPointCloudExactBigPoints_ = enabled; }
-    void setDebugPointCloudExactBigPointsOnly(bool enabled) { debugPointCloudExactBigPointsOnly_ = enabled; }
-    void setTwoHitSelect(bool enabled) { twoHitSelect_ = enabled; }
-    void setDebugPointCloudStride(int stride) { debugPointCloudStride_ = stride; }
-    void setLossThreshold(float threshold) { lossThreshold_ = threshold; }
-    void setGdSteps(int steps) { gdSteps_ = steps; }
-    void setGdSteps2(int steps) { gdSteps2_ = steps; }
-    void setGdLearningRate(float rate) { gdLearningRate_ = rate; }
-    void setGdLearningRate2(float rate) { gdLearningRate2_ = rate; }
+
     void setSamplesPerPixel(int samples) { samplesPerPixel_ = samples; }
     void setBounceCount(int count) { bounceCount_ = count; }
     void setLambertView(bool enabled) { lambertView_ = enabled; }
-    float averageLoss() const { return lastAvgLoss_; }
-    float lossThreshold() const { return lossThreshold_; }
-    bool debugPointCloudView() const { return debugPointCloudView_; }
-    int debugPointCloudStride() const { return debugPointCloudStride_; }
-    int gdSteps() const { return gdSteps_; }
-    int gdSteps2() const { return gdSteps2_; }
-    float gdLearningRate() const { return gdLearningRate_; }
+
     int samplesPerPixel() const { return samplesPerPixel_; }
     int bounceCount() const { return bounceCount_; }
     size_t paramsBytes() const { return paramsBytes_; }
@@ -77,90 +51,63 @@ class RendererNeural final {
     tcnn::cpp::Module* network_ = nullptr;
     void* params_ = nullptr;
     void* outputs_ = nullptr;
-    void* dL_doutput_ = nullptr;
-    float* dL_dinput_ = nullptr;
-    float* adamM_ = nullptr;
-    float* adamV_ = nullptr;
-    void* dL_dparams_ = nullptr;
     float* inputs_ = nullptr;
-    float* hitPositions_ = nullptr;
-    float* hitColors_ = nullptr;
     float* compactedInputs_ = nullptr;
-    float* compactedDLDInput_ = nullptr;
-    float* normals_ = nullptr;
-    float* bounceInputs_ = nullptr;
+    int* hitIndices_ = nullptr;
+    int* hitCount_ = nullptr;
+
+    float* outerHitPositions_ = nullptr;
+    float* innerHitPositions_ = nullptr;
+    float* rayDirections_ = nullptr;
+    int* outerHitFlags_ = nullptr;
+
+    float* hitPositions_ = nullptr;
+    float* hitNormals_ = nullptr;
+    float* hitColors_ = nullptr;
+    int* hitFlags_ = nullptr;
+
     float* bouncePositions_ = nullptr;
     float* bounceNormals_ = nullptr;
     float* bounceDirs_ = nullptr;
     float* bounceColors_ = nullptr;
-    float* bounce2Inputs_ = nullptr;
+    int* bounceHitFlags_ = nullptr;
+
     float* bounce2Positions_ = nullptr;
     float* bounce2Normals_ = nullptr;
     float* bounce2Dirs_ = nullptr;
     float* bounce2Colors_ = nullptr;
+    int* bounce2HitFlags_ = nullptr;
+
     float* envDirs_ = nullptr;
+    int* envHitFlags_ = nullptr;
+
     Vec3* pathThroughput_ = nullptr;
     Vec3* pathRadiance_ = nullptr;
-    float* lossValues_ = nullptr;
-    float* lossValues2_ = nullptr;
-    float* lossMax_ = nullptr;
-    float* lossSum_ = nullptr;
-    int* lossHitCount_ = nullptr;
-    int* hitFlags_ = nullptr;
-    int* bounceHitFlags_ = nullptr;
-    int* bounce2HitFlags_ = nullptr;
-    int* envHitFlags_ = nullptr;
     int* pathActive_ = nullptr;
-    int* hitIndices_ = nullptr;
-    int* hitCount_ = nullptr;
+
     size_t bufferElements_ = 0;
     size_t accumPixels_ = 0;
     size_t paramsBytes_ = 0;
     uint32_t outputDims_ = 0;
     size_t outputElemSize_ = 0;
-    GradientMode gradientMode_ = GradientMode::InputOnly;
+
     RenderBasis basis_{};
     Vec3 lightDir_{};
     int width_ = 0;
     int height_ = 0;
     uchar4* devicePixels_ = nullptr;
     Vec3* accum_ = nullptr;
-    bool lossView_ = false;
-    bool secondaryLossView_ = false;
+
     bool lambertView_ = false;
-    bool debugPointCloudView_ = false;
-    bool debugPointCloudExactNormal_ = false;
-    bool debugPointCloudDropNonExact_ = false;
-    bool debugPointCloudExactBigPoints_ = false;
-    bool debugPointCloudExactBigPointsOnly_ = false;
-    bool twoHitSelect_ = false;
-    float lossThreshold_ = 0.0f;
-    int debugPointCloudStride_ = 10;
-    int gdSteps_ = 0;
-    int gdSteps2_ = 0;
-    float gdLearningRate_ = 10.0f;
-    float gdLearningRate2_ = 10.0f;
+    bool useNeuralQuery_ = false;
     int samplesPerPixel_ = 1;
     int bounceCount_ = 0;
     uint32_t accumSampleCount_ = 0;
-    float lastAvgLoss_ = 0.0f;
-    int lastHitCount_ = 0;
-    bool useNeuralQuery_ = false;
+
     bool lastUseNeuralQuery_ = true;
     bool lastLambertView_ = false;
-    bool lastDebugPointCloudView_ = false;
-    bool lastSecondaryLossView_ = false;
-    bool lastDebugPointCloudExactNormal_ = false;
-    bool lastDebugPointCloudDropNonExact_ = false;
-    bool lastDebugPointCloudExactBigPoints_ = false;
-    bool lastDebugPointCloudExactBigPointsOnly_ = false;
-    bool lastTwoHitSelect_ = false;
     int lastBounceCount_ = -1;
     int lastSamplesPerPixel_ = -1;
-    int lastDebugPointCloudStride_ = 10;
-    float lastLossThreshold_ = 0.0f;
-    float lastGdLearningRate2_ = 10.0f;
-    int lastGdSteps2_ = 0;
     bool hasLastCamera_ = false;
     Vec3 lastCamPos_{};
     RenderBasis lastBasis_{};

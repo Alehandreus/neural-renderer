@@ -25,6 +25,26 @@ void glfwErrorCallback(int error, const char* description) {
     std::fprintf(stderr, "GLFW error %d: %s\n", error, description);
 }
 
+bool loadMesh(const char* path, Mesh* mesh, const char* label, bool normalize, bool nearestTex) {
+    if (!path || path[0] == '\0') return false;
+    std::string loadError;
+    std::filesystem::path meshPath(path);
+    std::string ext = meshPath.extension().string();
+    for (char& ch : ext) {
+        ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+    }
+    bool loaded = false;
+    if (ext == ".gltf" || ext == ".glb") {
+        loaded = LoadTexturedGltfFromFile(path, mesh, &loadError, normalize, nearestTex);
+    } else {
+        loaded = LoadMeshFromFile(path, mesh, &loadError, normalize);
+    }
+    if (!loaded) {
+        std::fprintf(stderr, "Failed to load %s mesh '%s': %s\n", label, path, loadError.c_str());
+    }
+    return loaded;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -42,7 +62,7 @@ int main(int argc, char** argv) {
 #endif
     glfwWindowHint(GLFW_RESIZABLE, GLFW_TRUE);
 
-    const int startWidth = 1920;
+    const int startWidth = 1080;
     const int startHeight = 1080;
     GLFWwindow* window = glfwCreateWindow(startWidth, startHeight, "CUDA ImGui Sphere", nullptr, nullptr);
     if (!window) {
@@ -63,66 +83,38 @@ int main(int argc, char** argv) {
 
     InputController input(window);
 
-    // const char* kExactMeshPath = "/home/me/Downloads/chess_orig.fbx";
-    // const char* kExactMeshPath = "/home/me/Downloads/chess_outer_10000.fbx";
-    // const char* kRoughMeshPath = "/home/me/Downloads/chess_outer_10000.fbx";
-
-    // const char* kExactMeshPath = "/home/me/brain/mesh-mapping/models/dragon_outer_3000.fbx";
-    // const char* kRoughMeshPath = "/home/me/brain/mesh-mapping/models/dragon_outer_3000.fbx";
-
-    const char* kExactMeshPath = "/home/me/Downloads/sphere.obj";
-    const char* kRoughMeshPath = "/home/me/Downloads/cube.obj";
-    
+    const char* kOriginalMeshPath = "/home/me/Downloads/sphere.obj";
+    const char* kInnerShellPath = "";
+    const char* kOuterShellPath = "/home/me/Downloads/cube.obj";
     const char* kCheckpointPath = "/home/me/brain/mesh-mapping/checkpoints/outer_params.bin";
     const int kBounceCount = 3;
     const int kSamplesPerPixel = 1;
     const bool kNormalizeMeshes = false;
     const bool kNearestTextureSampling = true;
-    // const char* kDefaultHdriPath = "/home/me/Downloads/photo_studio_loft_hall_4k.exr";
     const char* kDefaultHdriPath = "/home/me/Downloads/lilienstein_4k.hdr";
 
     Scene scene;
-    Mesh& exactMesh = scene.exactMesh();
-    Mesh& roughMesh = scene.roughMesh();
-    std::string exactMeshLabel = "procedural sphere";
-    std::string roughMeshLabel = "procedural sphere";
-    if (kExactMeshPath && kExactMeshPath[0] != '\0') {
-        std::string loadError;
-        std::filesystem::path meshPath(kExactMeshPath);
-        std::string ext = meshPath.extension().string();
-        for (char& ch : ext) {
-            ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
-        }
-        bool loaded = false;
-        if (ext == ".gltf" || ext == ".glb") {
-            loaded = LoadTexturedGltfFromFile(
-                    kExactMeshPath,
-                    &exactMesh,
-                    &loadError,
-                    kNormalizeMeshes,
-                    kNearestTextureSampling);
-        } else {
-            loaded = LoadMeshFromFile(kExactMeshPath, &exactMesh, &loadError, kNormalizeMeshes);
-        }
-        if (loaded) {
-            exactMeshLabel = kExactMeshPath;
-        } else {
-            std::fprintf(stderr, "Failed to load exact mesh '%s': %s\n", kExactMeshPath, loadError.c_str());
-        }
+    Mesh& originalMesh = scene.originalMesh();
+    Mesh& innerShell = scene.innerShell();
+    Mesh& outerShell = scene.outerShell();
+
+    std::string originalMeshLabel = "procedural sphere";
+    std::string innerShellLabel = "(none)";
+    std::string outerShellLabel = "(none)";
+
+    if (loadMesh(kOriginalMeshPath, &originalMesh, "original", kNormalizeMeshes, kNearestTextureSampling)) {
+        originalMeshLabel = kOriginalMeshPath;
     }
-    if (exactMesh.triangleCount() == 0) {
-        GenerateUvSphere(&exactMesh, 48, 96, 1.0f);
+    if (originalMesh.triangleCount() == 0) {
+        GenerateUvSphere(&originalMesh, 48, 96, 1.0f);
     }
-    if (kRoughMeshPath && kRoughMeshPath[0] != '\0') {
-        std::string loadError;
-        if (LoadMeshFromFile(kRoughMeshPath, &roughMesh, &loadError, kNormalizeMeshes)) {
-            roughMeshLabel = kRoughMeshPath;
-        } else {
-            std::fprintf(stderr, "Failed to load rough mesh '%s': %s\n", kRoughMeshPath, loadError.c_str());
-        }
+
+    if (loadMesh(kInnerShellPath, &innerShell, "inner shell", kNormalizeMeshes, false)) {
+        innerShellLabel = kInnerShellPath;
     }
-    if (roughMesh.triangleCount() == 0) {
-        GenerateUvSphere(&roughMesh, 48, 96, 1.0f);
+
+    if (loadMesh(kOuterShellPath, &outerShell, "outer shell", kNormalizeMeshes, false)) {
+        outerShellLabel = kOuterShellPath;
     }
 
     std::string envError;
@@ -169,27 +161,10 @@ int main(int argc, char** argv) {
             nullptr);
 
     double lastTime = glfwGetTime();
-    bool key1WasDown = false;
-    bool key2WasDown = false;
-    bool key3WasDown = false;
-    bool showLossView = false;
-    bool secondaryLossView = false;
     bool lambertView = false;
     bool useNeuralQuery = true;
-    bool debugPointCloudView = false;
-    bool debugPointCloudExactNormal = false;
-    bool debugPointCloudDropNonExact = false;
-    bool debugPointCloudExactBigPoints = false;
-    bool debugPointCloudExactBigPointsOnly = false;
-    bool twoHitSelect = false;
     int bounceCount = kBounceCount;
     int samplesPerPixel = kSamplesPerPixel;
-    int gdSteps = 0;
-    int gdSteps2 = 0;
-    float gdLearningRate = 10.0f;
-    float gdLearningRate2 = 10.0f;
-    float lossThreshold = 0.0f;
-    int debugPointStride = 10;
     bool uiWantsMouse = false;
 
     while (!glfwWindowShouldClose(window)) {
@@ -201,89 +176,14 @@ int main(int argc, char** argv) {
 
         const CameraState& camera = input.camera();
         const CameraBasis& basis = input.basis();
-        bool key1Down = glfwGetKey(window, GLFW_KEY_1) == GLFW_PRESS;
-        bool key2Down = glfwGetKey(window, GLFW_KEY_2) == GLFW_PRESS;
-        bool key3Down = glfwGetKey(window, GLFW_KEY_3) == GLFW_PRESS;
-        if (key1Down && !key1WasDown) {
-            renderer.setGradientMode(RendererNeural::GradientMode::InputOnly);
-        }
-        if (key2Down && !key2WasDown) {
-            renderer.setGradientMode(RendererNeural::GradientMode::WeightsOnly);
-        }
-        if (key3Down && !key3WasDown) {
-            renderer.setGradientMode(RendererNeural::GradientMode::InputAndWeights);
-        }
-        key1WasDown = key1Down;
-        key2WasDown = key2Down;
-        key3WasDown = key3Down;
-        if (bounceCount < 0) {
-            bounceCount = 0;
-        }
-        if (samplesPerPixel < 1) {
-            samplesPerPixel = 1;
-        }
-        if (gdSteps < 0) {
-            gdSteps = 0;
-        }
-        if (gdSteps2 < 0) {
-            gdSteps2 = 0;
-        }
-        if (gdLearningRate < 0.0f) {
-            gdLearningRate = 0.0f;
-        }
-        if (gdLearningRate2 < 0.0f) {
-            gdLearningRate2 = 0.0f;
-        }
-        if (lossThreshold < 0.0f) {
-            lossThreshold = 0.0f;
-        }
-        if (debugPointStride < 1) {
-            debugPointStride = 1;
-        }
-        if (!useNeuralQuery) {
-            showLossView = false;
-            secondaryLossView = false;
-            debugPointCloudView = false;
-            twoHitSelect = false;
-        }
-        if (debugPointCloudView) {
-            showLossView = false;
-            secondaryLossView = false;
-            lambertView = false;
-        }
-        if (secondaryLossView) {
-            showLossView = false;
-            debugPointCloudView = false;
-            lambertView = false;
-        }
-        if (!debugPointCloudView) {
-            debugPointCloudExactNormal = false;
-            debugPointCloudDropNonExact = false;
-            debugPointCloudExactBigPoints = false;
-            debugPointCloudExactBigPointsOnly = false;
-        }
-        renderer.setLossView(showLossView);
-        renderer.setSecondaryLossView(secondaryLossView);
+
+        if (bounceCount < 0) bounceCount = 0;
+        if (samplesPerPixel < 1) samplesPerPixel = 1;
+
         renderer.setLambertView(lambertView);
         renderer.setUseNeuralQuery(useNeuralQuery);
-        renderer.setDebugPointCloudView(debugPointCloudView);
-        renderer.setDebugPointCloudExactNormal(debugPointCloudExactNormal);
-        renderer.setDebugPointCloudDropNonExact(debugPointCloudDropNonExact);
-        renderer.setDebugPointCloudExactBigPoints(debugPointCloudExactBigPoints);
-        renderer.setDebugPointCloudExactBigPointsOnly(debugPointCloudExactBigPointsOnly);
-        renderer.setTwoHitSelect(twoHitSelect);
-        int effectiveBounces = showLossView ? 0 : bounceCount;
-        if (debugPointCloudView || secondaryLossView) {
-            effectiveBounces = 0;
-        }
-        renderer.setBounceCount(effectiveBounces);
+        renderer.setBounceCount(bounceCount);
         renderer.setSamplesPerPixel(samplesPerPixel);
-        renderer.setGdSteps(useNeuralQuery ? gdSteps : 0);
-        renderer.setGdSteps2(useNeuralQuery ? gdSteps2 : 0);
-        renderer.setGdLearningRate(gdLearningRate);
-        renderer.setGdLearningRate2(gdLearningRate2);
-        renderer.setLossThreshold(useNeuralQuery ? lossThreshold : 0.0f);
-        renderer.setDebugPointCloudStride(debugPointStride);
 
         glfwGetFramebufferSize(window, &fbWidth, &fbHeight);
         if (fbWidth != renderer.width() || fbHeight != renderer.height()) {
@@ -355,40 +255,31 @@ int main(int argc, char** argv) {
         ImGui::Text("WASD move, Q/E up/down, mouse look.");
         ImGui::Text("ESC releases mouse, click to recapture.");
         ImGui::Checkbox("Neural query", &useNeuralQuery);
-        if (useNeuralQuery) {
-            ImGui::Checkbox("Loss (first segment)", &showLossView);
-            ImGui::Checkbox("Loss (exact->rough normal)", &secondaryLossView);
-            ImGui::Checkbox("Two-hit rough select", &twoHitSelect);
-            ImGui::Checkbox("GD point cloud", &debugPointCloudView);
-            if (debugPointCloudView) {
-                ImGui::Checkbox("Point cloud exact->rough", &debugPointCloudExactNormal);
-                ImGui::Checkbox("Point cloud drop non-exact", &debugPointCloudDropNonExact);
-                ImGui::Checkbox("Point cloud exact big points", &debugPointCloudExactBigPoints);
-                ImGui::Checkbox("Point cloud exact big points (rough small)", &debugPointCloudExactBigPointsOnly);
-            }
-            ImGui::InputInt("Point stride", &debugPointStride);
-            ImGui::InputInt("GD steps", &gdSteps);
-            ImGui::InputInt("GD steps 2", &gdSteps2);
-            ImGui::InputFloat("GD learning rate", &gdLearningRate, 0.1f, 1.0f, "%.3f");
-            ImGui::InputFloat("GD learning rate 2", &gdLearningRate2, 0.1f, 1.0f, "%.3f");
-            ImGui::InputFloat("Loss threshold", &lossThreshold, 0.01f, 0.1f, "%.4f");
-        }
         ImGui::Checkbox("Lambert (no bounces)", &lambertView);
-        ImGui::Text("Avg loss: %.6f", renderer.averageLoss());
         ImGui::InputInt("Max bounces", &bounceCount);
         ImGui::InputInt("Samples per pixel", &samplesPerPixel);
         ImGui::Text("Resolution: %d x %d", fbWidth, fbHeight);
-        ImGui::Text("Active mesh: %s", useNeuralQuery ? "rough" : "exact");
-        ImGui::Text("Exact mesh: %s", exactMeshLabel.c_str());
-        ImGui::Text("Exact triangles: %d", exactMesh.triangleCount());
-        ImGui::Text("Exact BVH nodes: %d (%.2f MB)",
-                    exactMesh.nodeCount(),
-                    static_cast<double>(exactMesh.bvhStorageBytes()) / (1024.0 * 1024.0));
-        ImGui::Text("Rough mesh: %s", roughMeshLabel.c_str());
-        ImGui::Text("Rough triangles: %d", roughMesh.triangleCount());
-        ImGui::Text("Rough BVH nodes: %d (%.2f MB)",
-                    roughMesh.nodeCount(),
-                    static_cast<double>(roughMesh.bvhStorageBytes()) / (1024.0 * 1024.0));
+        ImGui::Text("Active mesh: %s", useNeuralQuery ? "neural (shells)" : "original");
+        ImGui::Separator();
+        ImGui::Text("Original: %s", originalMeshLabel.c_str());
+        ImGui::Text("  triangles: %d, BVH: %d (%.2f MB)",
+                    originalMesh.triangleCount(),
+                    originalMesh.nodeCount(),
+                    static_cast<double>(originalMesh.bvhStorageBytes()) / (1024.0 * 1024.0));
+        ImGui::Text("Inner shell: %s", innerShellLabel.c_str());
+        if (innerShell.triangleCount() > 0) {
+            ImGui::Text("  triangles: %d, BVH: %d (%.2f MB)",
+                        innerShell.triangleCount(),
+                        innerShell.nodeCount(),
+                        static_cast<double>(innerShell.bvhStorageBytes()) / (1024.0 * 1024.0));
+        }
+        ImGui::Text("Outer shell: %s", outerShellLabel.c_str());
+        if (outerShell.triangleCount() > 0) {
+            ImGui::Text("  triangles: %d, BVH: %d (%.2f MB)",
+                        outerShell.triangleCount(),
+                        outerShell.nodeCount(),
+                        static_cast<double>(outerShell.bvhStorageBytes()) / (1024.0 * 1024.0));
+        }
         ImGui::Text("Network params (fp16): %.2f MB",
                     static_cast<double>(renderer.paramsBytes()) / (1024.0 * 1024.0));
         ImGui::Text("FPS: %.1f", io.Framerate);

@@ -12,6 +12,7 @@ struct HitInfo {
     Vec3 color;
     Vec2 uv;
     int texId;
+    int triIndex;
 };
 
 struct Triangle {
@@ -45,25 +46,25 @@ __host__ __device__ inline HitInfo intersectTriangle(const Ray& ray, const Trian
     Vec3 pvec = cross(ray.direction, edge2);
     float det = dot(edge1, pvec);
     if (fabsf(det) < kEpsilon) {
-        return HitInfo{false, 0.0f, Vec3(), Vec3(), Vec2(), -1};
+        return HitInfo{false, 0.0f, Vec3(), Vec3(), Vec2(), -1, -1};
     }
 
     float invDet = 1.0f / det;
     Vec3 tvec = ray.origin - tri.v0;
     float u = dot(tvec, pvec) * invDet;
     if (u < 0.0f || u > 1.0f) {
-        return HitInfo{false, 0.0f, Vec3(), Vec3(), Vec2(), -1};
+        return HitInfo{false, 0.0f, Vec3(), Vec3(), Vec2(), -1, -1};
     }
 
     Vec3 qvec = cross(tvec, edge1);
     float v = dot(ray.direction, qvec) * invDet;
     if (v < 0.0f || (u + v) > 1.0f) {
-        return HitInfo{false, 0.0f, Vec3(), Vec3(), Vec2(), -1};
+        return HitInfo{false, 0.0f, Vec3(), Vec3(), Vec2(), -1, -1};
     }
 
     float t = dot(edge2, qvec) * invDet;
     if (t <= kEpsilon) {
-        return HitInfo{false, 0.0f, Vec3(), Vec3(), Vec2(), -1};
+        return HitInfo{false, 0.0f, Vec3(), Vec3(), Vec2(), -1, -1};
     }
 
     float w = 1.0f - u - v;
@@ -78,5 +79,5 @@ __host__ __device__ inline HitInfo intersectTriangle(const Ray& ray, const Trian
     Vec3 color = tri.c0 * w + tri.c1 * u + tri.c2 * v;
     Vec2 uv = tri.uv0 * w + tri.uv1 * u + tri.uv2 * v;
 
-    return HitInfo{true, t, normal, color, uv, tri.texId};
+    return HitInfo{true, t, normal, color, uv, tri.texId, -1};
 }
