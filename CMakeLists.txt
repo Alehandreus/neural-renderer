@@ -89,6 +89,10 @@ if (NOT stb_POPULATED)
     FetchContent_Populate(stb)
 endif()
 
+# FLIP library
+set(FLIP_LIBRARY ON CACHE BOOL "" FORCE)
+add_subdirectory(ext/flip-cuda)
+
 add_library(imgui STATIC
     ${imgui_SOURCE_DIR}/imgui.cpp
     ${imgui_SOURCE_DIR}/imgui_draw.cpp
@@ -106,7 +110,7 @@ target_compile_definitions(imgui PUBLIC IMGUI_DISABLE_OBSOLETE_FUNCTIONS)
 
 find_package(OpenGL REQUIRED)
 
-add_executable(cuda_imgui_sphere
+add_executable(imgui_renderer
     src/bvh_data.h
     src/cuda_renderer_neural.cu
     src/cuda_renderer_neural.h
@@ -128,15 +132,49 @@ add_executable(cuda_imgui_sphere
     src/triangle.h
     src/vec3.h
 )
-target_include_directories(cuda_imgui_sphere PRIVATE
+target_include_directories(imgui_renderer PRIVATE
     ${tinyexr_SOURCE_DIR}
     ${tinyexr_SOURCE_DIR}/deps/miniz
     ${stb_SOURCE_DIR}
 )
-target_link_libraries(cuda_imgui_sphere PRIVATE imgui glfw OpenGL::GL bvh tiny-cuda-nn)
+target_link_libraries(imgui_renderer PRIVATE imgui glfw OpenGL::GL bvh tiny-cuda-nn)
 if (TARGET assimp::assimp)
-    target_link_libraries(cuda_imgui_sphere PRIVATE assimp::assimp)
+    target_link_libraries(imgui_renderer PRIVATE assimp::assimp)
 else()
-    target_link_libraries(cuda_imgui_sphere PRIVATE assimp)
+    target_link_libraries(imgui_renderer PRIVATE assimp)
+endif()
+
+# Evaluation tool (ground truth vs neural comparison with PSNR and FLIP)
+add_executable(evaluate
+    src/bvh_data.h
+    src/cuda_renderer_neural.cu
+    src/cuda_renderer_neural.h
+    src/main_comparison.cu
+    src/mesh.cu
+    src/mesh.h
+    src/mesh_bvh.cpp
+    src/mesh_loader.cpp
+    src/mesh_loader.h
+    src/material.h
+    src/ray.h
+    src/renderer.h
+    src/scene.cu
+    src/scene.h
+    src/stb_image.cpp
+    src/triangle.h
+    src/vec3.h
+)
+target_include_directories(evaluate PRIVATE
+    ${tinyexr_SOURCE_DIR}
+    ${tinyexr_SOURCE_DIR}/deps/miniz
+    ${stb_SOURCE_DIR}
+    ext/flip-cuda
+    ext/flip-cuda/common
+)
+target_link_libraries(evaluate PRIVATE bvh tiny-cuda-nn flip-cuda)
+if (TARGET assimp::assimp)
+    target_link_libraries(evaluate PRIVATE assimp::assimp)
+else()
+    target_link_libraries(evaluate PRIVATE assimp)
 endif()
 

@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <ctime>
 #include <filesystem>
 #include <memory>
 #include <string>
@@ -86,11 +87,16 @@ int main(int argc, char** argv) {
     // const char* kOriginalMeshPath = "/home/me/brain/mesh-mapping/models/superdragon_orig.obj";
     // const char* kInnerShellPath = "/home/me/brain/mesh-mapping/models/superdragon_inner_5000.obj";
     // const char* kOuterShellPath = "/home/me/brain/mesh-mapping/models/superdragon_outer_5000.obj";
-    const char* kOriginalMeshPath = "/home/me/Downloads/chess_orig.fbx";
-    const char* kInnerShellPath = "/home/me/Downloads/chess_outer_10000.fbx";
-    const char* kOuterShellPath = "/home/me/Downloads/chess_inner_10000.fbx";
 
-    const char* kCheckpointPath = "/home/me/brain/mesh-mapping/checkpoints/run_1770028802.bin";
+    const char* kOriginalMeshPath = "/home/me/Downloads/chess_orig.fbx";
+    const char* kInnerShellPath = "/home/me/Downloads/chess_inner_10000.fbx";
+    const char* kOuterShellPath = "/home/me/Downloads/chess_outer_10000.fbx";
+
+    // const char* kOriginalMeshPath = "/home/me/Downloads/sphere_orig.obj";
+    // const char* kInnerShellPath = "/home/me/Downloads/sphere_inner.obj";
+    // const char* kOuterShellPath = "/home/me/Downloads/sphere_outer.obj";
+
+    const char* kCheckpointPath = "/home/me/brain/mesh-mapping/checkpoints/sphere_debug2.bin";
     const int kBounceCount = 3;
     const int kSamplesPerPixel = 1;
     const bool kNormalizeMeshes = false;
@@ -298,6 +304,30 @@ int main(int argc, char** argv) {
         ImGui::InputInt("Samples per pixel", &samplesPerPixel);
         const char* meshNames[] = {"Original", "Inner shell", "Outer shell"};
         ImGui::Combo("Classic mesh", &classicMeshIndex, meshNames, 3);
+        if (ImGui::Button("Export camera to JSON")) {
+            const char* exportPath = "camera.json";
+            FILE* f = std::fopen(exportPath, "w");
+            if (f) {
+                // Generate filename from timestamp.
+                auto now = std::time(nullptr);
+                char timestamp[64];
+                std::strftime(timestamp, sizeof(timestamp), "%Y%m%d_%H%M%S", std::localtime(&now));
+                std::string filename = std::string("view_") + timestamp;
+
+                std::fprintf(f, "{\n");
+                std::fprintf(f, "  \"filename\": \"%s\",\n", filename.c_str());
+                std::fprintf(f, "  \"position\": [%.6f, %.6f, %.6f],\n",
+                             camera.position.x, camera.position.y, camera.position.z);
+                std::fprintf(f, "  \"yaw\": %.6f,\n", camera.yaw);
+                std::fprintf(f, "  \"pitch\": %.6f,\n", camera.pitch);
+                std::fprintf(f, "  \"fovY\": %.6f\n", camera.fovY);
+                std::fprintf(f, "}\n");
+                std::fclose(f);
+                std::printf("Camera exported to %s (filename: %s)\n", exportPath, filename.c_str());
+            } else {
+                std::fprintf(stderr, "Failed to open %s for writing\n", exportPath);
+            }
+        }
         ImGui::Text("Resolution: %d x %d", fbWidth, fbHeight);
         ImGui::Separator();
         ImGui::Text("Original: %s", originalMeshLabel.c_str());

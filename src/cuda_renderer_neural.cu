@@ -539,7 +539,8 @@ __global__ void applyNeuralOutputKernel(const __half* outputs,
                                         float* hitPositions,
                                         float* hitNormals,
                                         float* hitColors,
-                                        int* hitFlags) {
+                                        int* hitFlags,
+                                        Vec3 materialColor) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= hitCount) {
         return;
@@ -578,9 +579,9 @@ __global__ void applyNeuralOutputKernel(const __half* outputs,
         hitNormals[srcBase + 1] = normal.y;
         hitNormals[srcBase + 2] = normal.z;
 
-        hitColors[srcBase + 0] = 1.0f;
-        hitColors[srcBase + 1] = 1.0f;
-        hitColors[srcBase + 2] = 1.0f;
+        hitColors[srcBase + 0] = materialColor.x;
+        hitColors[srcBase + 1] = materialColor.y;
+        hitColors[srcBase + 2] = materialColor.z;
         hitFlags[sampleIdx] = 1;
     } else {
         hitPositions[srcBase + 0] = 0.0f;
@@ -1710,7 +1711,8 @@ void RendererNeural::render(const Vec3& camPos, std::vector<uchar4>& hostPixels)
                     hitPositions_,
                     hitNormals_,
                     hitColors_,
-                    hitFlags_);
+                    hitFlags_,
+                    params.materialColor);
             checkCuda(cudaGetLastError(), "applyNeuralOutputKernel launch");
         }
 
