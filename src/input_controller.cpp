@@ -118,7 +118,7 @@ void InputController::updateMouse() {
 }
 
 void InputController::updateKeyboard(float dt) {
-    float speed = 3.5f;
+    float speed = moveSpeed_;
     if (glfwGetKey(window_, GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS) {
         speed *= 2.0f;
     }

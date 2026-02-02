@@ -27,6 +27,8 @@ class InputController {
     const CameraState& camera() const { return camera_; }
     const CameraBasis& basis() const { return basis_; }
 
+    void setMoveSpeed(float speed) { moveSpeed_ = speed; }
+
  private:
     struct MouseLookState {
         double lastX = 0.0;
@@ -44,6 +46,7 @@ class InputController {
     CameraState camera_{};
     CameraBasis basis_{};
     MouseLookState mouseState_{};
+    float moveSpeed_ = 30.0f;
     bool mouseCaptured_ = true;
     bool escWasDown_ = false;
     bool clickWasDown_ = false;

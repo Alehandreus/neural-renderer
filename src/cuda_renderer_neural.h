@@ -33,10 +33,12 @@ class RendererNeural final {
     void setSamplesPerPixel(int samples) { samplesPerPixel_ = samples; }
     void setBounceCount(int count) { bounceCount_ = count; }
     void setLambertView(bool enabled) { lambertView_ = enabled; }
+    void setClassicMeshIndex(int index) { classicMeshIndex_ = index; }
+    int classicMeshIndex() const { return classicMeshIndex_; }
 
     int samplesPerPixel() const { return samplesPerPixel_; }
     int bounceCount() const { return bounceCount_; }
-    size_t paramsBytes() const { return paramsBytes_; }
+    size_t paramsBytes() const { return pointEncParamsBytes_ + dirEncParamsBytes_ + mlpParamsBytes_; }
     int width() const { return width_; }
     int height() const { return height_; }
 
@@ -48,24 +50,50 @@ class RendererNeural final {
     void resetAccum();
 
     Scene* scene_ = nullptr;
-    tcnn::cpp::Module* network_ = nullptr;
-    void* params_ = nullptr;
+
+    // Three separate tcnn modules matching Python RayModel.
+    tcnn::cpp::Module* pointEncoding_ = nullptr;
+    tcnn::cpp::Module* dirEncoding_ = nullptr;
+    tcnn::cpp::Module* mlpNetwork_ = nullptr;
+
+    // Per-module device parameters (FP16).
+    void* pointEncParams_ = nullptr;
+    void* dirEncParams_ = nullptr;
+    void* mlpParams_ = nullptr;
+
+    // Compacted encoding inputs (3 floats each, per compacted hit).
+    float* compactedOuterPos_ = nullptr;
+    float* compactedInnerPos_ = nullptr;
+    float* compactedDirs_ = nullptr;
+
+    // Encoding outputs (FP16, per compacted hit).
+    void* pointEncOutput1_ = nullptr;
+    void* pointEncOutput2_ = nullptr;
+    void* dirEncOutput_ = nullptr;
+
+    // Concatenated MLP input (FP32).
+    float* mlpInput_ = nullptr;
+
+    // MLP output (FP16).
     void* outputs_ = nullptr;
-    float* inputs_ = nullptr;
-    float* compactedInputs_ = nullptr;
+
+    // Compaction buffers.
     int* hitIndices_ = nullptr;
     int* hitCount_ = nullptr;
 
+    // Shell tracing buffers.
     float* outerHitPositions_ = nullptr;
     float* innerHitPositions_ = nullptr;
     float* rayDirections_ = nullptr;
     int* outerHitFlags_ = nullptr;
 
+    // Primary hit buffers.
     float* hitPositions_ = nullptr;
     float* hitNormals_ = nullptr;
     float* hitColors_ = nullptr;
     int* hitFlags_ = nullptr;
 
+    // Bounce buffers (ping-pong).
     float* bouncePositions_ = nullptr;
     float* bounceNormals_ = nullptr;
     float* bounceDirs_ = nullptr;
@@ -78,18 +106,25 @@ class RendererNeural final {
     float* bounce2Colors_ = nullptr;
     int* bounce2HitFlags_ = nullptr;
 
-    float* envDirs_ = nullptr;
-    int* envHitFlags_ = nullptr;
-
+    // Path tracing state.
     Vec3* pathThroughput_ = nullptr;
     Vec3* pathRadiance_ = nullptr;
     int* pathActive_ = nullptr;
 
     size_t bufferElements_ = 0;
     size_t accumPixels_ = 0;
-    size_t paramsBytes_ = 0;
-    uint32_t outputDims_ = 0;
-    size_t outputElemSize_ = 0;
+
+    // Per-module param sizes.
+    size_t pointEncParamsBytes_ = 0;
+    size_t dirEncParamsBytes_ = 0;
+    size_t mlpParamsBytes_ = 0;
+
+    // Module output dimensions.
+    uint32_t pointEncOutDims_ = 0;
+    uint32_t dirEncOutDims_ = 0;
+    uint32_t mlpInputDims_ = 0;
+    uint32_t mlpOutputDims_ = 0;
+    size_t mlpOutputElemSize_ = 0;
 
     RenderBasis basis_{};
     Vec3 lightDir_{};
@@ -102,12 +137,14 @@ class RendererNeural final {
     bool useNeuralQuery_ = false;
     int samplesPerPixel_ = 1;
     int bounceCount_ = 0;
+    int classicMeshIndex_ = 0;
     uint32_t accumSampleCount_ = 0;
 
     bool lastUseNeuralQuery_ = true;
     bool lastLambertView_ = false;
     int lastBounceCount_ = -1;
     int lastSamplesPerPixel_ = -1;
+    int lastClassicMeshIndex_ = -1;
     bool hasLastCamera_ = false;
     Vec3 lastCamPos_{};
     RenderBasis lastBasis_{};

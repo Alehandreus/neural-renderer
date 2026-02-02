@@ -62,7 +62,7 @@ int main(int argc, char** argv) {
 #endif
     glfwWindowHint(GLFW_RESIZABLE, GLFW_TRUE);
 
-    const int startWidth = 1080;
+    const int startWidth = 1920;
     const int startHeight = 1080;
     GLFWwindow* window = glfwCreateWindow(startWidth, startHeight, "CUDA ImGui Sphere", nullptr, nullptr);
     if (!window) {
@@ -83,10 +83,14 @@ int main(int argc, char** argv) {
 
     InputController input(window);
 
-    const char* kOriginalMeshPath = "/home/me/Downloads/sphere.obj";
-    const char* kInnerShellPath = "";
-    const char* kOuterShellPath = "/home/me/Downloads/cube.obj";
-    const char* kCheckpointPath = "/home/me/brain/mesh-mapping/checkpoints/outer_params.bin";
+    // const char* kOriginalMeshPath = "/home/me/brain/mesh-mapping/models/superdragon_orig.obj";
+    // const char* kInnerShellPath = "/home/me/brain/mesh-mapping/models/superdragon_inner_5000.obj";
+    // const char* kOuterShellPath = "/home/me/brain/mesh-mapping/models/superdragon_outer_5000.obj";
+    const char* kOriginalMeshPath = "/home/me/Downloads/chess_orig.fbx";
+    const char* kInnerShellPath = "/home/me/Downloads/chess_outer_10000.fbx";
+    const char* kOuterShellPath = "/home/me/Downloads/chess_inner_10000.fbx";
+
+    const char* kCheckpointPath = "/home/me/brain/mesh-mapping/checkpoints/run_1770028802.bin";
     const int kBounceCount = 3;
     const int kSamplesPerPixel = 1;
     const bool kNormalizeMeshes = false;
@@ -120,6 +124,38 @@ int main(int argc, char** argv) {
     std::string envError;
     if (!scene.environment().loadFromFile(kDefaultHdriPath, &envError)) {
         std::fprintf(stderr, "Failed to load HDRI '%s': %s\n", kDefaultHdriPath, envError.c_str());
+    }
+
+    // Set camera position and speed based on mesh bounds.
+    {
+        Vec3 bmin = originalMesh.boundsMin();
+        Vec3 bmax = originalMesh.boundsMax();
+        Vec3 center((bmin.x + bmax.x) * 0.5f, (bmin.y + bmax.y) * 0.5f, (bmin.z + bmax.z) * 0.5f);
+        Vec3 ext(bmax.x - bmin.x, bmax.y - bmin.y, bmax.z - bmin.z);
+        float diagonal = std::sqrt(ext.x * ext.x + ext.y * ext.y + ext.z * ext.z);
+
+        if (diagonal > 0.0f) {
+            input.setMoveSpeed(diagonal * 0.15f);
+
+            // Place camera at front-right, slightly above, far enough to see the full mesh.
+            float fovY = input.camera().fovY;  // radians
+            float dist = (diagonal * 0.5f) / std::tan(fovY * 0.5f) * 1.1f;
+            // Front-right direction: (+X, +Z), normalized (1,0,1)/sqrt(2), slight upward offset.
+            constexpr float kInvSqrt2 = 0.70710678f;
+            Vec3 camPos(
+                center.x + dist * kInvSqrt2,
+                center.y + diagonal * 0.2f,
+                center.z + dist * kInvSqrt2);
+
+            input.camera().position = camPos;
+
+            // Compute yaw/pitch to look at mesh center.
+            Vec3 forward(center.x - camPos.x, center.y - camPos.y, center.z - camPos.z);
+            float hLen = std::sqrt(forward.x * forward.x + forward.z * forward.z);
+            constexpr float kRadToDeg = 180.0f / 3.14159265358979323846f;
+            input.camera().yaw = std::atan2(forward.z, forward.x) * kRadToDeg;
+            input.camera().pitch = std::atan2(forward.y, hLen) * kRadToDeg;
+        }
     }
 
     RendererNeural renderer(scene);
@@ -165,6 +201,7 @@ int main(int argc, char** argv) {
     bool useNeuralQuery = true;
     int bounceCount = kBounceCount;
     int samplesPerPixel = kSamplesPerPixel;
+    int classicMeshIndex = 0;
     bool uiWantsMouse = false;
 
     while (!glfwWindowShouldClose(window)) {
@@ -184,6 +221,7 @@ int main(int argc, char** argv) {
         renderer.setUseNeuralQuery(useNeuralQuery);
         renderer.setBounceCount(bounceCount);
         renderer.setSamplesPerPixel(samplesPerPixel);
+        renderer.setClassicMeshIndex(classicMeshIndex);
 
         glfwGetFramebufferSize(window, &fbWidth, &fbHeight);
         if (fbWidth != renderer.width() || fbHeight != renderer.height()) {
@@ -258,8 +296,9 @@ int main(int argc, char** argv) {
         ImGui::Checkbox("Lambert (no bounces)", &lambertView);
         ImGui::InputInt("Max bounces", &bounceCount);
         ImGui::InputInt("Samples per pixel", &samplesPerPixel);
+        const char* meshNames[] = {"Original", "Inner shell", "Outer shell"};
+        ImGui::Combo("Classic mesh", &classicMeshIndex, meshNames, 3);
         ImGui::Text("Resolution: %d x %d", fbWidth, fbHeight);
-        ImGui::Text("Active mesh: %s", useNeuralQuery ? "neural (shells)" : "original");
         ImGui::Separator();
         ImGui::Text("Original: %s", originalMeshLabel.c_str());
         ImGui::Text("  triangles: %d, BVH: %d (%.2f MB)",

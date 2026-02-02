@@ -357,8 +357,6 @@ __device__ inline bool traceMesh(const Ray& ray,
 
 // ---------------------------------------------------------------------------
 // Shell tracing: for each pixel, trace outer shell then inner shell.
-// Stores outer hit position, inner hit position (or 0 if miss), ray direction,
-// and outer hit flag.
 // ---------------------------------------------------------------------------
 __global__ void traceShellsKernel(float* outerHitPositions,
                                   float* innerHitPositions,
@@ -418,7 +416,7 @@ __global__ void traceShellsKernel(float* outerHitPositions,
 }
 
 // ---------------------------------------------------------------------------
-// Compact outer shell hits: collect indices of rays that hit the outer shell.
+// Compact outer shell hits.
 // ---------------------------------------------------------------------------
 __global__ void compactInputsKernel(const int* flags,
                                     int count,
@@ -435,9 +433,10 @@ __global__ void compactInputsKernel(const int* flags,
 }
 
 // ---------------------------------------------------------------------------
-// Build 9D neural inputs for compacted hits:
-//   [normOuterPos(3), normInnerPos(3), rayDir(3)]
-// Both outer and inner positions normalized w.r.t. outer shell bounds.
+// Build 3 separate encoding input buffers for compacted hits:
+//   compactedOuterPos: normalized outer positions
+//   compactedInnerPos: normalized inner positions (same outer shell bounds)
+//   compactedDirs: directions mapped from [-1,1] to [0,1]
 // ---------------------------------------------------------------------------
 __global__ void buildNeuralInputsKernel(const float* outerHitPositions,
                                         const float* innerHitPositions,
@@ -446,14 +445,16 @@ __global__ void buildNeuralInputsKernel(const float* outerHitPositions,
                                         int hitCount,
                                         Vec3 outerMin,
                                         Vec3 outerInvExtent,
-                                        float* compactedInputs) {
+                                        float* compactedOuterPos,
+                                        float* compactedInnerPos,
+                                        float* compactedDirs) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= hitCount) {
         return;
     }
     int sampleIdx = hitIndices[idx];
     int srcBase = sampleIdx * 3;
-    int dstBase = idx * 9;
+    int dstBase = idx * 3;
 
     Vec3 outerPos(outerHitPositions[srcBase + 0],
                   outerHitPositions[srcBase + 1],
@@ -462,6 +463,7 @@ __global__ void buildNeuralInputsKernel(const float* outerHitPositions,
                   innerHitPositions[srcBase + 1],
                   innerHitPositions[srcBase + 2]);
 
+    // Normalize positions w.r.t. outer shell bounds.
     Vec3 normOuter((outerPos.x - outerMin.x) * outerInvExtent.x,
                    (outerPos.y - outerMin.y) * outerInvExtent.y,
                    (outerPos.z - outerMin.z) * outerInvExtent.z);
@@ -469,25 +471,64 @@ __global__ void buildNeuralInputsKernel(const float* outerHitPositions,
                    (innerPos.y - outerMin.y) * outerInvExtent.y,
                    (innerPos.z - outerMin.z) * outerInvExtent.z);
 
-    compactedInputs[dstBase + 0] = normOuter.x;
-    compactedInputs[dstBase + 1] = normOuter.y;
-    compactedInputs[dstBase + 2] = normOuter.z;
-    compactedInputs[dstBase + 3] = normInner.x;
-    compactedInputs[dstBase + 4] = normInner.y;
-    compactedInputs[dstBase + 5] = normInner.z;
+    compactedOuterPos[dstBase + 0] = normOuter.x;
+    compactedOuterPos[dstBase + 1] = normOuter.y;
+    compactedOuterPos[dstBase + 2] = normOuter.z;
+    compactedInnerPos[dstBase + 0] = normInner.x;
+    compactedInnerPos[dstBase + 1] = normInner.y;
+    compactedInnerPos[dstBase + 2] = normInner.z;
 
+    // Directions: map from [-1,1] to [0,1] matching Python (directions + 1) / 2.
     Vec3 dir(rayDirections[srcBase + 0],
              rayDirections[srcBase + 1],
              rayDirections[srcBase + 2]);
-    compactedInputs[dstBase + 6] = dir.x;
-    compactedInputs[dstBase + 7] = dir.y;
-    compactedInputs[dstBase + 8] = dir.z;
+    compactedDirs[dstBase + 0] = (dir.x + 1.0f) * 0.5f;
+    compactedDirs[dstBase + 1] = (dir.y + 1.0f) * 0.5f;
+    compactedDirs[dstBase + 2] = (dir.z + 1.0f) * 0.5f;
 }
 
 // ---------------------------------------------------------------------------
-// Apply neural network outputs (5D) back to full-size buffers.
+// Concatenate three FP16 encoding outputs into a single FP32 MLP input buffer.
+// tcnn C++ API forward() takes float* and handles precision internally.
+// Layout per element: [encA(dimA), encB(dimB), encC(dimC)]
+// ---------------------------------------------------------------------------
+__global__ void concatenateEncodingsKernel(const __half* encA,
+                                           uint32_t dimA,
+                                           const __half* encB,
+                                           uint32_t dimB,
+                                           const __half* encC,
+                                           uint32_t dimC,
+                                           float* output,
+                                           uint32_t totalDim,
+                                           int count) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= count) {
+        return;
+    }
+
+    int outBase = idx * totalDim;
+    int aBase = idx * dimA;
+    int bBase = idx * dimB;
+    int cBase = idx * dimC;
+
+    int offset = 0;
+    for (uint32_t i = 0; i < dimA; ++i) {
+        output[outBase + offset] = __half2float(encA[aBase + i]);
+        ++offset;
+    }
+    for (uint32_t i = 0; i < dimB; ++i) {
+        output[outBase + offset] = __half2float(encB[bBase + i]);
+        ++offset;
+    }
+    for (uint32_t i = 0; i < dimC; ++i) {
+        output[outBase + offset] = __half2float(encC[cBase + i]);
+        ++offset;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Apply neural network outputs (5D FP16) back to full-size buffers.
 // Output layout per hit: [has_intersection, distance, normal_x, normal_y, normal_z]
-// If has_intersection > 0: hitPos = outerHitPos + ray.dir * distance
 // ---------------------------------------------------------------------------
 __global__ void applyNeuralOutputKernel(const __half* outputs,
                                         const int* hitIndices,
@@ -1179,6 +1220,35 @@ size_t randomSeed() {
     return seed;
 }
 
+// Helper: allocate and initialize parameters for a module.
+void* allocAndInitParams(tcnn::cpp::Module* module, size_t* outBytes) {
+    size_t nParams = module->n_params();
+    size_t bytes = nParams * precisionBytes(module->param_precision());
+    *outBytes = bytes;
+    if (bytes == 0) {
+        return nullptr;
+    }
+
+    void* deviceParams = nullptr;
+    checkCuda(cudaMalloc(&deviceParams, bytes), "cudaMalloc module params");
+
+    float* paramsFull = nullptr;
+    size_t fullBytes = nParams * sizeof(float);
+    checkCuda(cudaMalloc(&paramsFull, fullBytes), "cudaMalloc module params full");
+
+    size_t seed = randomSeed();
+    module->initialize_params(seed, paramsFull, 1.0f);
+
+    const uint32_t count = static_cast<uint32_t>(nParams);
+    const int blockSize = 256;
+    int gridSize = static_cast<int>((count + blockSize - 1) / blockSize);
+    tcnn::cast<__half><<<gridSize, blockSize>>>(count, paramsFull, static_cast<__half*>(deviceParams));
+    checkCuda(cudaGetLastError(), "module params cast");
+    checkCuda(cudaFree(paramsFull), "cudaFree module params full");
+
+    return deviceParams;
+}
+
 }  // namespace
 
 // ===========================================================================
@@ -1193,54 +1263,81 @@ RendererNeural::RendererNeural(Scene& scene)
         return;
     }
 
-    tcnn::cpp::json encoding = {
+    // Point encoding: HashGrid matching Python config.
+    tcnn::cpp::json pointEncConfig = {
             {"otype", "HashGrid"},
             {"n_levels", 8},
-            {"n_features_per_level", 8},
-            {"log2_hashmap_size", 15},
-            {"base_resolution", 2},
-            {"per_level_scale", 2.0},
+            {"n_features_per_level", 4},
+            {"log2_hashmap_size", 14},
+            {"base_resolution", 16},
+            {"per_level_scale", 2},
             {"fixed_point_pos", false},
     };
-    tcnn::cpp::json network = {
+
+    // Direction encoding: SphericalHarmonics matching Python config.
+    tcnn::cpp::json dirEncConfig = {
+            {"otype", "SphericalHarmonics"},
+            {"degree", 4},
+    };
+
+    // MLP network matching Python config.
+    tcnn::cpp::json mlpConfig = {
             {"otype", "FullyFusedMLP"},
-            {"activation", "ReLU"},
+            {"activation", "LeakyReLU"},
             {"output_activation", "None"},
-            {"n_neurons", 64},
+            {"n_neurons", 128},
             {"n_hidden_layers", 4},
     };
 
-    network_ = tcnn::cpp::create_network_with_input_encoding(9, 5, encoding, network);
-    if (!network_) {
-        std::fprintf(stderr, "Failed to create tiny-cuda-nn network.\n");
+    // Create point encoding (3D input).
+    pointEncoding_ = tcnn::cpp::create_encoding(3, pointEncConfig, tcnn::cpp::Precision::Fp16);
+    if (!pointEncoding_) {
+        std::fprintf(stderr, "Failed to create point encoding.\n");
+        return;
+    }
+    pointEncOutDims_ = pointEncoding_->n_output_dims();
+
+    // Create direction encoding (3D input).
+    dirEncoding_ = tcnn::cpp::create_encoding(3, dirEncConfig, tcnn::cpp::Precision::Fp16);
+    if (!dirEncoding_) {
+        std::fprintf(stderr, "Failed to create direction encoding.\n");
+        delete pointEncoding_;
+        pointEncoding_ = nullptr;
+        return;
+    }
+    dirEncOutDims_ = dirEncoding_->n_output_dims();
+
+    // MLP input = point_enc * 2 (outer + inner) + dir_enc.
+    mlpInputDims_ = pointEncOutDims_ * 2 + dirEncOutDims_;
+    mlpOutputDims_ = 5;
+
+    // Create MLP network.
+    mlpNetwork_ = tcnn::cpp::create_network(mlpInputDims_, mlpOutputDims_, mlpConfig);
+    if (!mlpNetwork_) {
+        std::fprintf(stderr, "Failed to create MLP network.\n");
+        delete dirEncoding_;
+        dirEncoding_ = nullptr;
+        delete pointEncoding_;
+        pointEncoding_ = nullptr;
         return;
     }
 
-    if (network_->param_precision() != tcnn::cpp::Precision::Fp16 ||
-            network_->output_precision() != tcnn::cpp::Precision::Fp16) {
-        std::fprintf(stderr, "RendererNeural only supports FP16 networks.\n");
-        delete network_;
-        network_ = nullptr;
-        return;
-    }
+    // n_output_dims() returns padded_output_width (e.g. 16 for 5 requested outputs).
+    // We must use this for buffer allocation and output stride.
+    mlpOutputDims_ = mlpNetwork_->n_output_dims();
+    mlpOutputElemSize_ = precisionBytes(mlpNetwork_->output_precision());
 
-    outputDims_ = network_->n_output_dims();
-    outputElemSize_ = precisionBytes(network_->output_precision());
-    paramsBytes_ = network_->n_params() * precisionBytes(network_->param_precision());
-    if (paramsBytes_ > 0) {
-        checkCuda(cudaMalloc(&params_, paramsBytes_), "cudaMalloc tcnn params");
-        size_t seed = randomSeed();
-        float* paramsFull = nullptr;
-        size_t fullBytes = network_->n_params() * sizeof(float);
-        checkCuda(cudaMalloc(&paramsFull, fullBytes), "cudaMalloc tcnn params full");
-        network_->initialize_params(seed, paramsFull, 1.0f);
-        const uint32_t count = static_cast<uint32_t>(network_->n_params());
-        const int blockSize = 256;
-        int gridSize = static_cast<int>((count + blockSize - 1) / blockSize);
-        tcnn::cast<__half><<<gridSize, blockSize>>>(count, paramsFull, static_cast<__half*>(params_));
-        checkCuda(cudaGetLastError(), "tcnn params cast");
-        checkCuda(cudaFree(paramsFull), "cudaFree tcnn params full");
-    }
+    std::printf("Neural architecture: point_enc=%u, dir_enc=%u, mlp_input=%u, mlp_output=%u (requested 5)\n",
+                pointEncOutDims_, dirEncOutDims_, mlpInputDims_, mlpOutputDims_);
+
+    // Allocate and initialize parameters for each module.
+    pointEncParams_ = allocAndInitParams(pointEncoding_, &pointEncParamsBytes_);
+    dirEncParams_ = allocAndInitParams(dirEncoding_, &dirEncParamsBytes_);
+    mlpParams_ = allocAndInitParams(mlpNetwork_, &mlpParamsBytes_);
+
+    std::printf("Params: point_enc=%zu bytes, dir_enc=%zu bytes, mlp=%zu bytes, total=%zu bytes\n",
+                pointEncParamsBytes_, dirEncParamsBytes_, mlpParamsBytes_,
+                pointEncParamsBytes_ + dirEncParamsBytes_ + mlpParamsBytes_);
 }
 
 RendererNeural::~RendererNeural() {
@@ -1265,7 +1362,8 @@ void RendererNeural::setCameraBasis(const RenderBasis& basis) {
 }
 
 bool RendererNeural::loadWeightsFromFile(const std::string& path) {
-    if (!network_ || !params_ || paramsBytes_ == 0) {
+    size_t totalBytes = pointEncParamsBytes_ + dirEncParamsBytes_ + mlpParamsBytes_;
+    if (!pointEncoding_ || !mlpNetwork_ || totalBytes == 0) {
         std::fprintf(stderr, "Neural network not initialized; cannot load weights.\n");
         return false;
     }
@@ -1281,11 +1379,14 @@ bool RendererNeural::loadWeightsFromFile(const std::string& path) {
         std::fprintf(stderr, "Weights file is empty: %s\n", path.c_str());
         return false;
     }
-    if (static_cast<size_t>(size) != paramsBytes_) {
+    if (static_cast<size_t>(size) != totalBytes) {
         std::fprintf(stderr,
-                     "Weights size mismatch (got %lld bytes, expected %zu).\n",
+                     "Weights size mismatch (got %lld bytes, expected %zu = %zu + %zu + %zu).\n",
                      static_cast<long long>(size),
-                     paramsBytes_);
+                     totalBytes,
+                     pointEncParamsBytes_,
+                     dirEncParamsBytes_,
+                     mlpParamsBytes_);
         return false;
     }
 
@@ -1296,8 +1397,26 @@ bool RendererNeural::loadWeightsFromFile(const std::string& path) {
         return false;
     }
 
-    checkCuda(cudaMemcpy(params_, buffer.data(), paramsBytes_, cudaMemcpyHostToDevice),
-              "cudaMemcpy tcnn params");
+    // Layout: [point_enc_params | dir_enc_params | mlp_params]
+    size_t offset = 0;
+    if (pointEncParamsBytes_ > 0 && pointEncParams_) {
+        checkCuda(cudaMemcpy(pointEncParams_, buffer.data() + offset,
+                             pointEncParamsBytes_, cudaMemcpyHostToDevice),
+                  "cudaMemcpy point enc params");
+        offset += pointEncParamsBytes_;
+    }
+    if (dirEncParamsBytes_ > 0 && dirEncParams_) {
+        checkCuda(cudaMemcpy(dirEncParams_, buffer.data() + offset,
+                             dirEncParamsBytes_, cudaMemcpyHostToDevice),
+                  "cudaMemcpy dir enc params");
+        offset += dirEncParamsBytes_;
+    }
+    if (mlpParamsBytes_ > 0 && mlpParams_) {
+        checkCuda(cudaMemcpy(mlpParams_, buffer.data() + offset,
+                             mlpParamsBytes_, cudaMemcpyHostToDevice),
+                  "cudaMemcpy mlp params");
+    }
+
     return true;
 }
 
@@ -1321,21 +1440,22 @@ void RendererNeural::render(const Vec3& camPos, std::vector<uchar4>& hostPixels)
     Mesh& outerShell = scene_->outerShell();
     Mesh& innerShell = scene_->innerShell();
 
-    if (useNeuralQuery_) {
-        if (!outerShell.uploadToDevice() || !innerShell.uploadToDevice()) {
-            return;
-        }
-        // Also upload original mesh for bounces.
-        originalMesh.uploadToDevice();
-    } else {
-        if (!originalMesh.uploadToDevice()) {
-            return;
-        }
+    // Upload all meshes that might be needed.
+    originalMesh.uploadToDevice();
+    outerShell.uploadToDevice();
+    innerShell.uploadToDevice();
+
+    // Select mesh for non-neural rendering (0=original, 1=inner, 2=outer).
+    Mesh* classicMesh = &originalMesh;
+    if (classicMeshIndex_ == 1 && innerShell.triangleCount() > 0) {
+        classicMesh = &innerShell;
+    } else if (classicMeshIndex_ == 2 && outerShell.triangleCount() > 0) {
+        classicMesh = &outerShell;
     }
 
     EnvironmentMap& environment = scene_->environment();
     environment.uploadToDevice();
-    MeshDeviceView originalView = originalMesh.deviceView();
+    MeshDeviceView classicView = classicMesh->deviceView();
     MeshDeviceView outerView = outerShell.deviceView();
     MeshDeviceView innerView = innerShell.deviceView();
     EnvironmentDeviceView envView = environment.deviceView();
@@ -1347,7 +1467,7 @@ void RendererNeural::render(const Vec3& camPos, std::vector<uchar4>& hostPixels)
     }
     size_t elementCount = pixelCount * static_cast<size_t>(samplesPerPixel);
     size_t paddedCount = elementCount;
-    if (network_) {
+    if (mlpNetwork_) {
         size_t granularity = static_cast<size_t>(tcnn::cpp::batch_size_granularity());
         paddedCount = roundUp(elementCount, granularity);
     }
@@ -1390,13 +1510,15 @@ void RendererNeural::render(const Vec3& camPos, std::vector<uchar4>& hostPixels)
         }
     }
     if (cameraMoved || useNeuralQuery_ != lastUseNeuralQuery_ || lambertView_ != lastLambertView_ ||
-        maxBounces != lastBounceCount_ || samplesPerPixel != lastSamplesPerPixel_) {
+        maxBounces != lastBounceCount_ || samplesPerPixel != lastSamplesPerPixel_ ||
+        classicMeshIndex_ != lastClassicMeshIndex_) {
         resetAccum();
     }
     lastUseNeuralQuery_ = useNeuralQuery_;
     lastLambertView_ = lambertView_;
     lastBounceCount_ = maxBounces;
     lastSamplesPerPixel_ = samplesPerPixel;
+    lastClassicMeshIndex_ = classicMeshIndex_;
     lastCamPos_ = camPos;
     lastBasis_ = basis_;
     lastFovY_ = basis_.fovY;
@@ -1426,7 +1548,9 @@ void RendererNeural::render(const Vec3& camPos, std::vector<uchar4>& hostPixels)
     dim3 block(8, 8);
     dim3 grid((width_ + block.x - 1) / block.x, (height_ + block.y - 1) / block.y);
 
-    if (useNeuralQuery_ && network_) {
+    bool neuralReady = useNeuralQuery_ && pointEncoding_ && mlpNetwork_ &&
+                       outerShell.triangleCount() > 0;
+    if (neuralReady) {
         // --- Neural shell-based rendering pipeline ---
 
         // 1. Trace outer and inner shells.
@@ -1440,7 +1564,7 @@ void RendererNeural::render(const Vec3& camPos, std::vector<uchar4>& hostPixels)
                 innerView);
         checkCuda(cudaGetLastError(), "traceShellsKernel launch");
 
-        // Initialize hit buffers: rays that miss outer shell are environment misses.
+        // Initialize hit buffers.
         int elementCountInt = static_cast<int>(elementCount);
         checkCuda(cudaMemcpy(hitFlags_, outerHitFlags_, elementCount * sizeof(int),
                              cudaMemcpyDeviceToDevice),
@@ -1472,7 +1596,7 @@ void RendererNeural::render(const Vec3& camPos, std::vector<uchar4>& hostPixels)
             size_t granularity = static_cast<size_t>(tcnn::cpp::batch_size_granularity());
             size_t paddedHitCount = roundUp(hitCountSize, granularity);
 
-            // 3. Build 9D inputs for compacted hits.
+            // 3. Build 3 separate encoding input buffers.
             const int buildBlock = 256;
             int buildGrid = (hitCount + buildBlock - 1) / buildBlock;
             buildNeuralInputsKernel<<<buildGrid, buildBlock>>>(
@@ -1483,39 +1607,104 @@ void RendererNeural::render(const Vec3& camPos, std::vector<uchar4>& hostPixels)
                     hitCount,
                     outerMin,
                     outerInvExtent,
-                    compactedInputs_);
+                    compactedOuterPos_,
+                    compactedInnerPos_,
+                    compactedDirs_);
             checkCuda(cudaGetLastError(), "buildNeuralInputsKernel launch");
 
-            // Zero-pad tail for TCNN alignment.
+            // Zero-pad tails for TCNN alignment.
             if (paddedHitCount > hitCountSize) {
                 size_t tail = paddedHitCount - hitCountSize;
                 checkCuda(cudaMemset(
-                        compactedInputs_ + hitCountSize * 9,
-                        0,
-                        tail * 9 * sizeof(float)),
-                        "cudaMemset compacted inputs tail");
+                        compactedOuterPos_ + hitCountSize * 3,
+                        0, tail * 3 * sizeof(float)),
+                        "cudaMemset outer pos tail");
+                checkCuda(cudaMemset(
+                        compactedInnerPos_ + hitCountSize * 3,
+                        0, tail * 3 * sizeof(float)),
+                        "cudaMemset inner pos tail");
+                checkCuda(cudaMemset(
+                        compactedDirs_ + hitCountSize * 3,
+                        0, tail * 3 * sizeof(float)),
+                        "cudaMemset dirs tail");
             }
 
-            // 4. Network forward pass.
+            uint32_t batchSize = static_cast<uint32_t>(paddedHitCount);
+
+            // 4a. Point encoding: outer positions.
             {
-                tcnn::cpp::Context ctx = network_->forward(
-                    0,
-                    static_cast<uint32_t>(paddedHitCount),
-                    compactedInputs_,
-                    outputs_,
-                    params_,
-                    false
-                );
+                tcnn::cpp::Context ctx = pointEncoding_->forward(
+                    0, batchSize,
+                    compactedOuterPos_,
+                    pointEncOutput1_,
+                    pointEncParams_,
+                    false);
                 (void)ctx;
             }
 
-            // 5. Apply neural outputs.
+            // 4b. Point encoding: inner positions (same encoder, same params).
+            {
+                tcnn::cpp::Context ctx = pointEncoding_->forward(
+                    0, batchSize,
+                    compactedInnerPos_,
+                    pointEncOutput2_,
+                    pointEncParams_,
+                    false);
+                (void)ctx;
+            }
+
+            // 4c. Direction encoding.
+            {
+                tcnn::cpp::Context ctx = dirEncoding_->forward(
+                    0, batchSize,
+                    compactedDirs_,
+                    dirEncOutput_,
+                    dirEncParams_,
+                    false);
+                (void)ctx;
+            }
+
+            // 5. Concatenate FP16 encoding outputs into FP32 MLP input.
+            int concatGrid = (hitCount + buildBlock - 1) / buildBlock;
+            concatenateEncodingsKernel<<<concatGrid, buildBlock>>>(
+                    static_cast<const __half*>(pointEncOutput1_),
+                    pointEncOutDims_,
+                    static_cast<const __half*>(pointEncOutput2_),
+                    pointEncOutDims_,
+                    static_cast<const __half*>(dirEncOutput_),
+                    dirEncOutDims_,
+                    mlpInput_,
+                    mlpInputDims_,
+                    hitCount);
+            checkCuda(cudaGetLastError(), "concatenateEncodingsKernel launch");
+
+            // Zero-pad MLP input tail.
+            if (paddedHitCount > hitCountSize) {
+                size_t tail = paddedHitCount - hitCountSize;
+                checkCuda(cudaMemset(
+                        mlpInput_ + hitCountSize * mlpInputDims_,
+                        0, tail * mlpInputDims_ * sizeof(float)),
+                        "cudaMemset mlp input tail");
+            }
+
+            // 6. MLP forward pass.
+            {
+                tcnn::cpp::Context ctx = mlpNetwork_->forward(
+                    0, batchSize,
+                    mlpInput_,
+                    outputs_,
+                    mlpParams_,
+                    false);
+                (void)ctx;
+            }
+
+            // 7. Apply neural outputs.
             int applyGrid = (hitCount + buildBlock - 1) / buildBlock;
             applyNeuralOutputKernel<<<applyGrid, buildBlock>>>(
                     static_cast<const __half*>(outputs_),
                     hitIndices_,
                     hitCount,
-                    static_cast<int>(outputDims_),
+                    static_cast<int>(mlpOutputDims_),
                     outerHitPositions_,
                     rayDirections_,
                     hitPositions_,
@@ -1525,7 +1714,7 @@ void RendererNeural::render(const Vec3& camPos, std::vector<uchar4>& hostPixels)
             checkCuda(cudaGetLastError(), "applyNeuralOutputKernel launch");
         }
 
-        // 6. Path trace from neural hits using original mesh for bounces.
+        // 8. Path trace from neural hits using original mesh for bounces.
         if (!lambertView_) {
             initNeuralPathKernel<<<grid, block>>>(
                     pathThroughput_,
@@ -1545,7 +1734,7 @@ void RendererNeural::render(const Vec3& camPos, std::vector<uchar4>& hostPixels)
                         hitFlags_,
                         pathActive_,
                         params,
-                        originalView,
+                        classicView,
                         bouncePositions_,
                         bounceNormals_,
                         bounceColors_,
@@ -1584,7 +1773,7 @@ void RendererNeural::render(const Vec3& camPos, std::vector<uchar4>& hostPixels)
                             pathActive_,
                             static_cast<uint32_t>(bounce),
                             params,
-                            originalView,
+                            classicView,
                             outPositions,
                             outNormals,
                             outColors,
@@ -1637,7 +1826,7 @@ void RendererNeural::render(const Vec3& camPos, std::vector<uchar4>& hostPixels)
                 hitColors_,
                 hitFlags_,
                 params,
-                originalView);
+                classicView);
         checkCuda(cudaGetLastError(), "renderOriginalKernel launch");
 
         if (lambertView_) {
@@ -1659,7 +1848,7 @@ void RendererNeural::render(const Vec3& camPos, std::vector<uchar4>& hostPixels)
                     hitColors_,
                     hitFlags_,
                     params,
-                    originalView,
+                    classicView,
                     envView);
             checkCuda(cudaGetLastError(), "pathTraceKernel launch");
             accumSampleCount_ += static_cast<uint32_t>(samplesPerPixel);
@@ -1687,8 +1876,13 @@ void RendererNeural::release() {
     };
     freePtr(devicePixels_);
     freePtr(accum_);
-    freePtr(inputs_);
-    freePtr(compactedInputs_);
+    freePtr(compactedOuterPos_);
+    freePtr(compactedInnerPos_);
+    freePtr(compactedDirs_);
+    freePtr(pointEncOutput1_);
+    freePtr(pointEncOutput2_);
+    freePtr(dirEncOutput_);
+    freePtr(mlpInput_);
     freePtr(hitIndices_);
     freePtr(hitCount_);
     freePtr(outerHitPositions_);
@@ -1710,8 +1904,6 @@ void RendererNeural::release() {
     freePtr(bounce2Dirs_);
     freePtr(bounce2Colors_);
     freePtr(bounce2HitFlags_);
-    freePtr(envDirs_);
-    freePtr(envHitFlags_);
     freePtr(pathThroughput_);
     freePtr(pathRadiance_);
     freePtr(pathActive_);
@@ -1722,15 +1914,29 @@ void RendererNeural::release() {
 }
 
 void RendererNeural::releaseNetwork() {
-    if (params_) {
-        cudaFree(params_);
-        params_ = nullptr;
-    }
-    delete network_;
-    network_ = nullptr;
-    paramsBytes_ = 0;
-    outputDims_ = 0;
-    outputElemSize_ = 0;
+    auto freePtr = [](auto*& ptr) {
+        if (ptr) {
+            cudaFree(ptr);
+            ptr = nullptr;
+        }
+    };
+    freePtr(pointEncParams_);
+    freePtr(dirEncParams_);
+    freePtr(mlpParams_);
+    delete pointEncoding_;
+    pointEncoding_ = nullptr;
+    delete dirEncoding_;
+    dirEncoding_ = nullptr;
+    delete mlpNetwork_;
+    mlpNetwork_ = nullptr;
+    pointEncParamsBytes_ = 0;
+    dirEncParamsBytes_ = 0;
+    mlpParamsBytes_ = 0;
+    pointEncOutDims_ = 0;
+    dirEncOutDims_ = 0;
+    mlpInputDims_ = 0;
+    mlpOutputDims_ = 0;
+    mlpOutputElemSize_ = 0;
 }
 
 bool RendererNeural::ensureNetworkBuffers(size_t elementCount) {
@@ -1740,7 +1946,8 @@ bool RendererNeural::ensureNetworkBuffers(size_t elementCount) {
     if (elementCount <= bufferElements_ &&
             hitPositions_ && hitNormals_ && hitColors_ && hitFlags_ &&
             outerHitPositions_ && innerHitPositions_ && rayDirections_ && outerHitFlags_ &&
-            compactedInputs_ && hitIndices_ && hitCount_ &&
+            compactedOuterPos_ && compactedInnerPos_ && compactedDirs_ &&
+            hitIndices_ && hitCount_ &&
             bouncePositions_ && bounceNormals_ && bounceDirs_ && bounceColors_ && bounceHitFlags_ &&
             bounce2Positions_ && bounce2Normals_ && bounce2Dirs_ && bounce2Colors_ && bounce2HitFlags_ &&
             pathThroughput_ && pathRadiance_ && pathActive_) {
@@ -1754,8 +1961,13 @@ bool RendererNeural::ensureNetworkBuffers(size_t elementCount) {
             ptr = nullptr;
         }
     };
-    freePtr(inputs_);
-    freePtr(compactedInputs_);
+    freePtr(compactedOuterPos_);
+    freePtr(compactedInnerPos_);
+    freePtr(compactedDirs_);
+    freePtr(pointEncOutput1_);
+    freePtr(pointEncOutput2_);
+    freePtr(dirEncOutput_);
+    freePtr(mlpInput_);
     freePtr(hitIndices_);
     freePtr(hitCount_);
     freePtr(outerHitPositions_);
@@ -1777,8 +1989,6 @@ bool RendererNeural::ensureNetworkBuffers(size_t elementCount) {
     freePtr(bounce2Dirs_);
     freePtr(bounce2Colors_);
     freePtr(bounce2HitFlags_);
-    freePtr(envDirs_);
-    freePtr(envHitFlags_);
     freePtr(pathThroughput_);
     freePtr(pathRadiance_);
     freePtr(pathActive_);
@@ -1792,18 +2002,39 @@ bool RendererNeural::ensureNetworkBuffers(size_t elementCount) {
     checkCuda(cudaMalloc(&rayDirections_, vec3Bytes), "cudaMalloc rayDirections");
     checkCuda(cudaMalloc(&outerHitFlags_, intBytes), "cudaMalloc outerHitFlags");
 
-    // Neural input/output buffers (9D inputs).
-    checkCuda(cudaMalloc(&compactedInputs_, elementCount * 9 * sizeof(float)),
-              "cudaMalloc compactedInputs");
+    // Encoding input buffers (3 floats each per element).
+    checkCuda(cudaMalloc(&compactedOuterPos_, vec3Bytes), "cudaMalloc compactedOuterPos");
+    checkCuda(cudaMalloc(&compactedInnerPos_, vec3Bytes), "cudaMalloc compactedInnerPos");
+    checkCuda(cudaMalloc(&compactedDirs_, vec3Bytes), "cudaMalloc compactedDirs");
+
+    // Encoding output buffers (FP16).
+    if (pointEncOutDims_ > 0) {
+        size_t encOutBytes = elementCount * pointEncOutDims_ * sizeof(__half);
+        checkCuda(cudaMalloc(&pointEncOutput1_, encOutBytes), "cudaMalloc pointEncOutput1");
+        checkCuda(cudaMalloc(&pointEncOutput2_, encOutBytes), "cudaMalloc pointEncOutput2");
+    }
+    if (dirEncOutDims_ > 0) {
+        size_t dirEncOutBytes = elementCount * dirEncOutDims_ * sizeof(__half);
+        checkCuda(cudaMalloc(&dirEncOutput_, dirEncOutBytes), "cudaMalloc dirEncOutput");
+    }
+
+    // MLP input (FP32 concatenated encodings).
+    if (mlpInputDims_ > 0) {
+        checkCuda(cudaMalloc(&mlpInput_, elementCount * mlpInputDims_ * sizeof(float)),
+                  "cudaMalloc mlpInput");
+    }
+
+    // Compaction buffers.
     checkCuda(cudaMalloc(&hitIndices_, intBytes), "cudaMalloc hitIndices");
     checkCuda(cudaMalloc(&hitCount_, sizeof(int)), "cudaMalloc hitCount");
 
-    size_t outputBytes = elementCount * static_cast<size_t>(outputDims_) * outputElemSize_;
-    if (outputBytes > 0) {
+    // MLP output (FP16).
+    if (mlpOutputDims_ > 0 && mlpOutputElemSize_ > 0) {
+        size_t outputBytes = elementCount * mlpOutputDims_ * mlpOutputElemSize_;
         checkCuda(cudaMalloc(&outputs_, outputBytes), "cudaMalloc outputs");
     }
 
-    // Primary hit buffers (used by both neural and original paths).
+    // Primary hit buffers.
     checkCuda(cudaMalloc(&hitPositions_, vec3Bytes), "cudaMalloc hitPositions");
     checkCuda(cudaMalloc(&hitNormals_, vec3Bytes), "cudaMalloc hitNormals");
     checkCuda(cudaMalloc(&hitColors_, vec3Bytes), "cudaMalloc hitColors");
@@ -1821,9 +2052,6 @@ bool RendererNeural::ensureNetworkBuffers(size_t elementCount) {
     checkCuda(cudaMalloc(&bounce2Colors_, vec3Bytes), "cudaMalloc bounce2Colors");
     checkCuda(cudaMalloc(&bounce2Dirs_, vec3Bytes), "cudaMalloc bounce2Dirs");
     checkCuda(cudaMalloc(&bounce2HitFlags_, intBytes), "cudaMalloc bounce2HitFlags");
-
-    checkCuda(cudaMalloc(&envDirs_, vec3Bytes), "cudaMalloc envDirs");
-    checkCuda(cudaMalloc(&envHitFlags_, intBytes), "cudaMalloc envHitFlags");
 
     // Path state.
     checkCuda(cudaMalloc(&pathThroughput_, elementCount * sizeof(Vec3)), "cudaMalloc pathThroughput");
