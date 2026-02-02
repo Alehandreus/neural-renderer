@@ -35,6 +35,7 @@ class RendererNeural final {
     void setLambertView(bool enabled) { lambertView_ = enabled; }
     void setClassicMeshIndex(int index) { classicMeshIndex_ = index; }
     int classicMeshIndex() const { return classicMeshIndex_; }
+    void resetSamples() { resetAccum(); }
 
     int samplesPerPixel() const { return samplesPerPixel_; }
     int bounceCount() const { return bounceCount_; }

@@ -10,6 +10,7 @@
 #include <vector>
 
 #include <GLFW/glfw3.h>
+#include <nfd.h>
 
 #include "imgui.h"
 #include "backends/imgui_impl_glfw.h"
@@ -82,21 +83,36 @@ int main(int argc, char** argv) {
     ImGui_ImplGlfw_InitForOpenGL(window, true);
     ImGui_ImplOpenGL3_Init("#version 330");
 
+    if (NFD_Init() != NFD_OKAY) {
+        std::fprintf(stderr, "Failed to initialize NFD: %s\n", NFD_GetError());
+        ImGui_ImplOpenGL3_Shutdown();
+        ImGui_ImplGlfw_Shutdown();
+        ImGui::DestroyContext();
+        glfwDestroyWindow(window);
+        glfwTerminate();
+        return 1;
+    }
+
     InputController input(window);
 
     // const char* kOriginalMeshPath = "/home/me/brain/mesh-mapping/models/superdragon_orig.obj";
     // const char* kInnerShellPath = "/home/me/brain/mesh-mapping/models/superdragon_inner_5000.obj";
     // const char* kOuterShellPath = "/home/me/brain/mesh-mapping/models/superdragon_outer_5000.obj";
 
-    const char* kOriginalMeshPath = "/home/me/Downloads/chess_orig.fbx";
-    const char* kInnerShellPath = "/home/me/Downloads/chess_inner_10000.fbx";
-    const char* kOuterShellPath = "/home/me/Downloads/chess_outer_10000.fbx";
+    // const char* kOriginalMeshPath = "/home/me/Downloads/chess_orig.fbx";
+    // const char* kInnerShellPath = "/home/me/Downloads/chess_inner_10000.fbx";
+    // const char* kOuterShellPath = "/home/me/Downloads/chess_outer_10000.fbx";
+
+    // const char* kOriginalMeshPath = "/home/me/Downloads/statuette_orig.fbx";
+    const char* kOriginalMeshPath = "/home/me/Downloads/statuette_orig.fbx";
+    const char* kInnerShellPath = "/home/me/Downloads/statuette_inner_10000.fbx";
+    const char* kOuterShellPath = "/home/me/Downloads/statuette_outer_10000.fbx";
 
     // const char* kOriginalMeshPath = "/home/me/Downloads/sphere_orig.obj";
     // const char* kInnerShellPath = "/home/me/Downloads/sphere_inner.obj";
     // const char* kOuterShellPath = "/home/me/Downloads/sphere_outer.obj";
 
-    const char* kCheckpointPath = "/home/me/brain/mesh-mapping/checkpoints/sphere_debug2.bin";
+    const char* kCheckpointPath = "/home/me/brain/mesh-mapping/checkpoints/run_1770040187.bin";
     const int kBounceCount = 3;
     const int kSamplesPerPixel = 1;
     const bool kNormalizeMeshes = false;
@@ -305,27 +321,36 @@ int main(int argc, char** argv) {
         const char* meshNames[] = {"Original", "Inner shell", "Outer shell"};
         ImGui::Combo("Classic mesh", &classicMeshIndex, meshNames, 3);
         if (ImGui::Button("Export camera to JSON")) {
-            const char* exportPath = "camera.json";
-            FILE* f = std::fopen(exportPath, "w");
-            if (f) {
-                // Generate filename from timestamp.
-                auto now = std::time(nullptr);
-                char timestamp[64];
-                std::strftime(timestamp, sizeof(timestamp), "%Y%m%d_%H%M%S", std::localtime(&now));
-                std::string filename = std::string("view_") + timestamp;
+            nfdchar_t* outPath = nullptr;
+            nfdfilteritem_t filters[1] = {{"JSON", "json"}};
+            nfdresult_t result = NFD_SaveDialog(&outPath, filters, 1, nullptr, "camera.json");
+            if (result == NFD_OKAY) {
+                FILE* f = std::fopen(outPath, "w");
+                if (f) {
+                    // Generate filename from timestamp.
+                    auto now = std::time(nullptr);
+                    char timestamp[64];
+                    std::strftime(timestamp, sizeof(timestamp), "%Y%m%d_%H%M%S", std::localtime(&now));
+                    std::string filename = std::string("view_") + timestamp;
 
-                std::fprintf(f, "{\n");
-                std::fprintf(f, "  \"filename\": \"%s\",\n", filename.c_str());
-                std::fprintf(f, "  \"position\": [%.6f, %.6f, %.6f],\n",
-                             camera.position.x, camera.position.y, camera.position.z);
-                std::fprintf(f, "  \"yaw\": %.6f,\n", camera.yaw);
-                std::fprintf(f, "  \"pitch\": %.6f,\n", camera.pitch);
-                std::fprintf(f, "  \"fovY\": %.6f\n", camera.fovY);
-                std::fprintf(f, "}\n");
-                std::fclose(f);
-                std::printf("Camera exported to %s (filename: %s)\n", exportPath, filename.c_str());
+                    std::fprintf(f, "{\n");
+                    std::fprintf(f, "  \"filename\": \"%s\",\n", filename.c_str());
+                    std::fprintf(f, "  \"position\": [%.6f, %.6f, %.6f],\n",
+                                 camera.position.x, camera.position.y, camera.position.z);
+                    std::fprintf(f, "  \"yaw\": %.6f,\n", camera.yaw);
+                    std::fprintf(f, "  \"pitch\": %.6f,\n", camera.pitch);
+                    std::fprintf(f, "  \"fovY\": %.6f\n", camera.fovY);
+                    std::fprintf(f, "}\n");
+                    std::fclose(f);
+                    std::printf("Camera exported to %s (filename: %s)\n", outPath, filename.c_str());
+                } else {
+                    std::fprintf(stderr, "Failed to open %s for writing\n", outPath);
+                }
+                NFD_FreePath(outPath);
+            } else if (result == NFD_CANCEL) {
+                std::printf("Camera export cancelled\n");
             } else {
-                std::fprintf(stderr, "Failed to open %s for writing\n", exportPath);
+                std::fprintf(stderr, "Error opening save dialog: %s\n", NFD_GetError());
             }
         }
         ImGui::Text("Resolution: %d x %d", fbWidth, fbHeight);
@@ -367,6 +392,8 @@ int main(int argc, char** argv) {
     }
 
     glDeleteTextures(1, &texture);
+
+    NFD_Quit();
 
     ImGui_ImplOpenGL3_Shutdown();
     ImGui_ImplGlfw_Shutdown();

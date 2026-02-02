@@ -20,17 +20,22 @@
 // Configuration (hardcoded paths).
 namespace {
 
-const char* kOriginalMeshPath = "/home/me/Downloads/chess_orig.fbx";
-const char* kInnerShellPath = "/home/me/Downloads/chess_inner_10000.fbx";
-const char* kOuterShellPath = "/home/me/Downloads/chess_outer_10000.fbx";
-const char* kCheckpointPath = "/home/me/brain/mesh-mapping/checkpoints/sphere_debug2.bin";
-const char* kCameraPath = "camera.json";
+// const char* kOriginalMeshPath = "/home/me/Downloads/chess_orig.fbx";
+// const char* kInnerShellPath = "/home/me/Downloads/chess_inner_10000.fbx";
+// const char* kOuterShellPath = "/home/me/Downloads/chess_outer_10000.fbx";
+
+const char* kOriginalMeshPath = "/home/me/Downloads/statuette_orig.fbx";
+const char* kInnerShellPath = "/home/me/Downloads/statuette_inner_10000.fbx";
+const char* kOuterShellPath = "/home/me/Downloads/statuette_outer_10000.fbx";
+
+const char* kCheckpointPath = "/home/me/brain/mesh-mapping/checkpoints/run_1770040187.bin";
+const char* kCameraPath = "/home/me/brain/mesh-mapping/cuda-rendering/statuette.json";
 const char* kDefaultHdriPath = "/home/me/Downloads/lilienstein_4k.hdr";
 
 const int kWidth = 1920;
 const int kHeight = 1080;
 const int kTotalSamples = 4096;
-const int kBatchSize = 12;  // Render in batches to avoid timeout.
+const int kBatchSize = 16;  // Render in batches to avoid timeout.
 const int kBounceCount = 3;
 
 const char* kOutputFolder = "comparison_output";
@@ -344,6 +349,7 @@ int main() {
         while (remainingSamples > 0) {
             int batchSamples = std::min(remainingSamples, kBatchSize);
             renderer.setSamplesPerPixel(batchSamples);
+            renderer.resetSamples();  // Reset accumulation before each batch.
 
             std::vector<uchar4> batchPixels(pixelCount);
             renderer.render(camera.position, batchPixels);
@@ -393,6 +399,7 @@ int main() {
         while (remainingSamples > 0) {
             int batchSamples = std::min(remainingSamples, kBatchSize);
             renderer.setSamplesPerPixel(batchSamples);
+            renderer.resetSamples();  // Reset accumulation before each batch.
 
             std::vector<uchar4> batchPixels(pixelCount);
             renderer.render(camera.position, batchPixels);

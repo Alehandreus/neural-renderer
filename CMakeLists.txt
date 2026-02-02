@@ -89,6 +89,13 @@ if (NOT stb_POPULATED)
     FetchContent_Populate(stb)
 endif()
 
+FetchContent_Declare(
+    nfd
+    GIT_REPOSITORY https://github.com/btzy/nativefiledialog-extended.git
+    GIT_TAG v1.1.1
+)
+FetchContent_MakeAvailable(nfd)
+
 # FLIP library
 set(FLIP_LIBRARY ON CACHE BOOL "" FORCE)
 add_subdirectory(ext/flip-cuda)
@@ -137,7 +144,7 @@ target_include_directories(imgui_renderer PRIVATE
     ${tinyexr_SOURCE_DIR}/deps/miniz
     ${stb_SOURCE_DIR}
 )
-target_link_libraries(imgui_renderer PRIVATE imgui glfw OpenGL::GL bvh tiny-cuda-nn)
+target_link_libraries(imgui_renderer PRIVATE imgui glfw OpenGL::GL bvh tiny-cuda-nn nfd)
 if (TARGET assimp::assimp)
     target_link_libraries(imgui_renderer PRIVATE assimp::assimp)
 else()

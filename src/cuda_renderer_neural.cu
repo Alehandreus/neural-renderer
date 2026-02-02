@@ -1269,7 +1269,7 @@ RendererNeural::RendererNeural(Scene& scene)
             {"otype", "HashGrid"},
             {"n_levels", 8},
             {"n_features_per_level", 4},
-            {"log2_hashmap_size", 14},
+            {"log2_hashmap_size", 16},
             {"base_resolution", 16},
             {"per_level_scale", 2},
             {"fixed_point_pos", false},
