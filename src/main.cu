@@ -16,6 +16,7 @@
 #include "backends/imgui_impl_glfw.h"
 #include "backends/imgui_impl_opengl3.h"
 
+#include "config_loader.h"
 #include "cuda_renderer_neural.h"
 #include "input_controller.h"
 #include "mesh_loader.h"
@@ -27,7 +28,7 @@ void glfwErrorCallback(int error, const char* description) {
     std::fprintf(stderr, "GLFW error %d: %s\n", error, description);
 }
 
-bool loadMesh(const char* path, Mesh* mesh, const char* label, bool normalize, bool nearestTex) {
+bool loadMesh(const char* path, Mesh* mesh, const char* label, bool normalize, bool nearestTex, float scale = 1.0f) {
     if (!path || path[0] == '\0') return false;
     std::string loadError;
     std::filesystem::path meshPath(path);
@@ -37,9 +38,9 @@ bool loadMesh(const char* path, Mesh* mesh, const char* label, bool normalize, b
     }
     bool loaded = false;
     if (ext == ".gltf" || ext == ".glb") {
-        loaded = LoadTexturedGltfFromFile(path, mesh, &loadError, normalize, nearestTex);
+        loaded = LoadTexturedGltfFromFile(path, mesh, &loadError, normalize, nearestTex, scale);
     } else {
-        loaded = LoadMeshFromFile(path, mesh, &loadError, normalize);
+        loaded = LoadMeshFromFile(path, mesh, &loadError, normalize, scale);
     }
     if (!loaded) {
         std::fprintf(stderr, "Failed to load %s mesh '%s': %s\n", label, path, loadError.c_str());
@@ -95,29 +96,24 @@ int main(int argc, char** argv) {
 
     InputController input(window);
 
-    // const char* kOriginalMeshPath = "/home/me/brain/mesh-mapping/models/superdragon_orig.obj";
-    // const char* kInnerShellPath = "/home/me/brain/mesh-mapping/models/superdragon_inner_5000.obj";
-    // const char* kOuterShellPath = "/home/me/brain/mesh-mapping/models/superdragon_outer_5000.obj";
+    // Load configuration
+    const char* kDefaultConfigPath = "configs/chess.json";
+    const char* configPath = (argc > 1) ? argv[1] : kDefaultConfigPath;
 
-    // const char* kOriginalMeshPath = "/home/me/Downloads/chess_orig.fbx";
-    // const char* kInnerShellPath = "/home/me/Downloads/chess_inner_10000.fbx";
-    // const char* kOuterShellPath = "/home/me/Downloads/chess_outer_10000.fbx";
+    RendererConfig config;
+    std::string configError;
+    if (!LoadConfigFromFile(configPath, &config, &configError)) {
+        std::fprintf(stderr, "Failed to load config: %s\n", configError.c_str());
+        ImGui_ImplOpenGL3_Shutdown();
+        ImGui_ImplGlfw_Shutdown();
+        ImGui::DestroyContext();
+        glfwDestroyWindow(window);
+        glfwTerminate();
+        return 1;
+    }
 
-    // const char* kOriginalMeshPath = "/home/me/Downloads/statuette_orig.fbx";
-    const char* kOriginalMeshPath = "/home/me/Downloads/statuette_orig.fbx";
-    const char* kInnerShellPath = "/home/me/Downloads/statuette_inner_10000.fbx";
-    const char* kOuterShellPath = "/home/me/Downloads/statuette_outer_10000.fbx";
-
-    // const char* kOriginalMeshPath = "/home/me/Downloads/sphere_orig.obj";
-    // const char* kInnerShellPath = "/home/me/Downloads/sphere_inner.obj";
-    // const char* kOuterShellPath = "/home/me/Downloads/sphere_outer.obj";
-
-    const char* kCheckpointPath = "/home/me/brain/mesh-mapping/checkpoints/run_1770040187.bin";
     const int kBounceCount = 3;
     const int kSamplesPerPixel = 1;
-    const bool kNormalizeMeshes = false;
-    const bool kNearestTextureSampling = true;
-    const char* kDefaultHdriPath = "/home/me/Downloads/lilienstein_4k.hdr";
 
     Scene scene;
     Mesh& originalMesh = scene.originalMesh();
@@ -128,55 +124,50 @@ int main(int argc, char** argv) {
     std::string innerShellLabel = "(none)";
     std::string outerShellLabel = "(none)";
 
-    if (loadMesh(kOriginalMeshPath, &originalMesh, "original", kNormalizeMeshes, kNearestTextureSampling)) {
-        originalMeshLabel = kOriginalMeshPath;
+    if (!config.original_mesh.path.empty() && loadMesh(config.original_mesh.path.c_str(), &originalMesh, "original",
+                                                        config.rendering.normalize_meshes,
+                                                        config.rendering.nearest_texture_sampling,
+                                                        config.original_mesh.scale)) {
+        originalMeshLabel = config.original_mesh.path;
     }
     if (originalMesh.triangleCount() == 0) {
         GenerateUvSphere(&originalMesh, 48, 96, 1.0f);
     }
 
-    if (loadMesh(kInnerShellPath, &innerShell, "inner shell", kNormalizeMeshes, false)) {
-        innerShellLabel = kInnerShellPath;
+    if (!config.inner_shell.path.empty() && loadMesh(config.inner_shell.path.c_str(), &innerShell, "inner shell",
+                                                      config.rendering.normalize_meshes, false,
+                                                      config.inner_shell.scale)) {
+        innerShellLabel = config.inner_shell.path;
     }
 
-    if (loadMesh(kOuterShellPath, &outerShell, "outer shell", kNormalizeMeshes, false)) {
-        outerShellLabel = kOuterShellPath;
+    if (!config.outer_shell.path.empty() && loadMesh(config.outer_shell.path.c_str(), &outerShell, "outer shell",
+                                                      config.rendering.normalize_meshes, false,
+                                                      config.outer_shell.scale)) {
+        outerShellLabel = config.outer_shell.path;
     }
 
     std::string envError;
-    if (!scene.environment().loadFromFile(kDefaultHdriPath, &envError)) {
-        std::fprintf(stderr, "Failed to load HDRI '%s': %s\n", kDefaultHdriPath, envError.c_str());
+    if (!config.environment.hdri_path.empty() && !scene.environment().loadFromFile(config.environment.hdri_path.c_str(), &envError)) {
+        std::fprintf(stderr, "Failed to load HDRI '%s': %s\n", config.environment.hdri_path.c_str(), envError.c_str());
     }
 
-    // Set camera position and speed based on mesh bounds.
+    // Set camera from config matrix
     {
+        Vec3 camPos;
+        float camYaw, camPitch;
+        MatrixToCameraState(config.camera.matrix, &camPos, &camYaw, &camPitch);
+        input.camera().position = camPos;
+        input.camera().yaw = camYaw;
+        input.camera().pitch = camPitch;
+        input.camera().fovY = config.camera.yfov;
+
+        // Set camera movement speed based on mesh bounds
         Vec3 bmin = originalMesh.boundsMin();
         Vec3 bmax = originalMesh.boundsMax();
-        Vec3 center((bmin.x + bmax.x) * 0.5f, (bmin.y + bmax.y) * 0.5f, (bmin.z + bmax.z) * 0.5f);
         Vec3 ext(bmax.x - bmin.x, bmax.y - bmin.y, bmax.z - bmin.z);
         float diagonal = std::sqrt(ext.x * ext.x + ext.y * ext.y + ext.z * ext.z);
-
         if (diagonal > 0.0f) {
             input.setMoveSpeed(diagonal * 0.15f);
-
-            // Place camera at front-right, slightly above, far enough to see the full mesh.
-            float fovY = input.camera().fovY;  // radians
-            float dist = (diagonal * 0.5f) / std::tan(fovY * 0.5f) * 1.1f;
-            // Front-right direction: (+X, +Z), normalized (1,0,1)/sqrt(2), slight upward offset.
-            constexpr float kInvSqrt2 = 0.70710678f;
-            Vec3 camPos(
-                center.x + dist * kInvSqrt2,
-                center.y + diagonal * 0.2f,
-                center.z + dist * kInvSqrt2);
-
-            input.camera().position = camPos;
-
-            // Compute yaw/pitch to look at mesh center.
-            Vec3 forward(center.x - camPos.x, center.y - camPos.y, center.z - camPos.z);
-            float hLen = std::sqrt(forward.x * forward.x + forward.z * forward.z);
-            constexpr float kRadToDeg = 180.0f / 3.14159265358979323846f;
-            input.camera().yaw = std::atan2(forward.z, forward.x) * kRadToDeg;
-            input.camera().pitch = std::atan2(forward.y, hLen) * kRadToDeg;
         }
     }
 
@@ -185,8 +176,8 @@ int main(int argc, char** argv) {
     renderer.setUseNeuralQuery(false);
     renderer.setBounceCount(kBounceCount);
     renderer.setSamplesPerPixel(kSamplesPerPixel);
-    if (kCheckpointPath && kCheckpointPath[0] != '\0') {
-        loaded = renderer.loadWeightsFromFile(kCheckpointPath);
+    if (!config.checkpoint_path.empty()) {
+        loaded = renderer.loadWeightsFromFile(config.checkpoint_path.c_str());
     }
     if (loaded) {
         std::printf("Neural parameters loaded from file.\n");
@@ -220,10 +211,11 @@ int main(int argc, char** argv) {
 
     double lastTime = glfwGetTime();
     bool lambertView = false;
-    bool useNeuralQuery = true;
+    bool useNeuralQuery = false;
     int bounceCount = kBounceCount;
     int samplesPerPixel = kSamplesPerPixel;
     int classicMeshIndex = 0;
+    float envmapRotation = config.environment.rotation;
     bool uiWantsMouse = false;
 
     while (!glfwWindowShouldClose(window)) {
@@ -244,6 +236,7 @@ int main(int argc, char** argv) {
         renderer.setBounceCount(bounceCount);
         renderer.setSamplesPerPixel(samplesPerPixel);
         renderer.setClassicMeshIndex(classicMeshIndex);
+        renderer.setEnvmapRotation(envmapRotation);
 
         glfwGetFramebufferSize(window, &fbWidth, &fbHeight);
         if (fbWidth != renderer.width() || fbHeight != renderer.height()) {
@@ -320,6 +313,22 @@ int main(int argc, char** argv) {
         ImGui::InputInt("Samples per pixel", &samplesPerPixel);
         const char* meshNames[] = {"Original", "Inner shell", "Outer shell"};
         ImGui::Combo("Classic mesh", &classicMeshIndex, meshNames, 3);
+        ImGui::DragFloat("Envmap rotation", &envmapRotation, 1.0f, 0.0f, 360.0f, "%.1f deg");
+        float fovDeg = camera.fovY * (180.0f / 3.14159265f);
+        if (ImGui::SliderFloat("FOV", &fovDeg, 10.0f, 120.0f, "%.1f deg")) {
+            input.camera().fovY = fovDeg * (3.14159265f / 180.0f);
+        }
+        if (ImGui::TreeNode("Camera matrix")) {
+            float matrix[16];
+            CameraStateToMatrix(camera.position, camera.yaw, camera.pitch, matrix);
+            ImGui::Text("pos: %.3f, %.3f, %.3f", camera.position.x, camera.position.y, camera.position.z);
+            ImGui::Text("yaw: %.3f, pitch: %.3f", camera.yaw, camera.pitch);
+            for (int row = 0; row < 4; row++) {
+                ImGui::Text("[%6.3f %6.3f %6.3f %6.3f]",
+                    matrix[row], matrix[4 + row], matrix[8 + row], matrix[12 + row]);
+            }
+            ImGui::TreePop();
+        }
         if (ImGui::Button("Export camera to JSON")) {
             nfdchar_t* outPath = nullptr;
             nfdfilteritem_t filters[1] = {{"JSON", "json"}};
@@ -327,22 +336,25 @@ int main(int argc, char** argv) {
             if (result == NFD_OKAY) {
                 FILE* f = std::fopen(outPath, "w");
                 if (f) {
-                    // Generate filename from timestamp.
-                    auto now = std::time(nullptr);
-                    char timestamp[64];
-                    std::strftime(timestamp, sizeof(timestamp), "%Y%m%d_%H%M%S", std::localtime(&now));
-                    std::string filename = std::string("view_") + timestamp;
+                    // Convert camera state to matrix format
+                    float matrix[16];
+                    CameraStateToMatrix(camera.position, camera.yaw, camera.pitch, matrix);
 
                     std::fprintf(f, "{\n");
-                    std::fprintf(f, "  \"filename\": \"%s\",\n", filename.c_str());
-                    std::fprintf(f, "  \"position\": [%.6f, %.6f, %.6f],\n",
-                                 camera.position.x, camera.position.y, camera.position.z);
-                    std::fprintf(f, "  \"yaw\": %.6f,\n", camera.yaw);
-                    std::fprintf(f, "  \"pitch\": %.6f,\n", camera.pitch);
-                    std::fprintf(f, "  \"fovY\": %.6f\n", camera.fovY);
+                    std::fprintf(f, "  \"camera\": {\n");
+                    std::fprintf(f, "    \"matrix\": [\n");
+                    for (int i = 0; i < 4; i++) {
+                        std::fprintf(f, "      %.10f,\n", matrix[i * 4 + 0]);
+                        std::fprintf(f, "      %.10f,\n", matrix[i * 4 + 1]);
+                        std::fprintf(f, "      %.10f,\n", matrix[i * 4 + 2]);
+                        std::fprintf(f, "      %.10f%s\n", matrix[i * 4 + 3], (i < 3) ? "," : "");
+                    }
+                    std::fprintf(f, "    ],\n");
+                    std::fprintf(f, "    \"yfov\": %.10f\n", camera.fovY);
+                    std::fprintf(f, "  }\n");
                     std::fprintf(f, "}\n");
                     std::fclose(f);
-                    std::printf("Camera exported to %s (filename: %s)\n", outPath, filename.c_str());
+                    std::printf("Camera exported to %s\n", outPath);
                 } else {
                     std::fprintf(stderr, "Failed to open %s for writing\n", outPath);
                 }

@@ -119,6 +119,8 @@ find_package(OpenGL REQUIRED)
 
 add_executable(imgui_renderer
     src/bvh_data.h
+    src/config_loader.cpp
+    src/config_loader.h
     src/cuda_renderer_neural.cu
     src/cuda_renderer_neural.h
     src/input_controller.cpp
@@ -154,6 +156,8 @@ endif()
 # Evaluation tool (ground truth vs neural comparison with PSNR and FLIP)
 add_executable(evaluate
     src/bvh_data.h
+    src/config_loader.cpp
+    src/config_loader.h
     src/cuda_renderer_neural.cu
     src/cuda_renderer_neural.h
     src/main_comparison.cu
@@ -184,4 +188,15 @@ if (TARGET assimp::assimp)
 else()
     target_link_libraries(evaluate PRIVATE assimp)
 endif()
+
+# Image comparison tool (PSNR and FLIP between two existing images)
+add_executable(compare_images
+    src/main_compare_images.cu
+)
+target_include_directories(compare_images PRIVATE
+    ${stb_SOURCE_DIR}
+    ext/flip-cuda
+    ext/flip-cuda/common
+)
+target_link_libraries(compare_images PRIVATE flip-cuda)
 

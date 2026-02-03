@@ -127,6 +127,18 @@ __device__ inline Vec3 sampleTextureDevice(const TextureDeviceView* textures,
 
 __device__ inline Vec3 sampleEnvironment(EnvironmentDeviceView env, Vec3 dir) {
     if (env.pixels && env.width > 0 && env.height > 0) {
+        // Apply rotation around Y axis
+        if (env.rotation != 0.0f) {
+            const float kDegToRad = 3.14159265358979323846f / 180.0f;
+            float angle = env.rotation * kDegToRad;
+            float cosA = cosf(angle);
+            float sinA = sinf(angle);
+            float newX = dir.x * cosA + dir.z * sinA;
+            float newZ = -dir.x * sinA + dir.z * cosA;
+            dir.x = newX;
+            dir.z = newZ;
+        }
+
         const float kInvTwoPi = 0.15915494309189535f;
         const float kInvPi = 0.3183098861837907f;
         float u = 0.5f + atan2f(dir.z, dir.x) * kInvTwoPi;
@@ -1269,7 +1281,7 @@ RendererNeural::RendererNeural(Scene& scene)
             {"otype", "HashGrid"},
             {"n_levels", 8},
             {"n_features_per_level", 4},
-            {"log2_hashmap_size", 16},
+            {"log2_hashmap_size", 14},
             {"base_resolution", 16},
             {"per_level_scale", 2},
             {"fixed_point_pos", false},
@@ -1460,6 +1472,7 @@ void RendererNeural::render(const Vec3& camPos, std::vector<uchar4>& hostPixels)
     MeshDeviceView outerView = outerShell.deviceView();
     MeshDeviceView innerView = innerShell.deviceView();
     EnvironmentDeviceView envView = environment.deviceView();
+    envView.rotation = envmapRotation_ - 90.0f;  // Convert from nbvh convention
 
     size_t pixelCount = static_cast<size_t>(width_) * static_cast<size_t>(height_);
     int samplesPerPixel = samplesPerPixel_;
@@ -1512,7 +1525,7 @@ void RendererNeural::render(const Vec3& camPos, std::vector<uchar4>& hostPixels)
     }
     if (cameraMoved || useNeuralQuery_ != lastUseNeuralQuery_ || lambertView_ != lastLambertView_ ||
         maxBounces != lastBounceCount_ || samplesPerPixel != lastSamplesPerPixel_ ||
-        classicMeshIndex_ != lastClassicMeshIndex_) {
+        classicMeshIndex_ != lastClassicMeshIndex_ || envmapRotation_ != lastEnvmapRotation_) {
         resetAccum();
     }
     lastUseNeuralQuery_ = useNeuralQuery_;
@@ -1520,6 +1533,7 @@ void RendererNeural::render(const Vec3& camPos, std::vector<uchar4>& hostPixels)
     lastBounceCount_ = maxBounces;
     lastSamplesPerPixel_ = samplesPerPixel;
     lastClassicMeshIndex_ = classicMeshIndex_;
+    lastEnvmapRotation_ = envmapRotation_;
     lastCamPos_ = camPos;
     lastBasis_ = basis_;
     lastFovY_ = basis_.fovY;

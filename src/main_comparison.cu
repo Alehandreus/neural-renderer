@@ -7,6 +7,7 @@
 
 #include "FLIP.h"
 
+#include "config_loader.h"
 #include "cuda_renderer_neural.h"
 #include "input_controller.h"
 #include "mesh.h"
@@ -17,25 +18,13 @@
 #define STB_IMAGE_WRITE_IMPLEMENTATION
 #include "stb_image_write.h"
 
-// Configuration (hardcoded paths).
+// Configuration.
 namespace {
-
-// const char* kOriginalMeshPath = "/home/me/Downloads/chess_orig.fbx";
-// const char* kInnerShellPath = "/home/me/Downloads/chess_inner_10000.fbx";
-// const char* kOuterShellPath = "/home/me/Downloads/chess_outer_10000.fbx";
-
-const char* kOriginalMeshPath = "/home/me/Downloads/statuette_orig.fbx";
-const char* kInnerShellPath = "/home/me/Downloads/statuette_inner_10000.fbx";
-const char* kOuterShellPath = "/home/me/Downloads/statuette_outer_10000.fbx";
-
-const char* kCheckpointPath = "/home/me/brain/mesh-mapping/checkpoints/run_1770040187.bin";
-const char* kCameraPath = "/home/me/brain/mesh-mapping/cuda-rendering/statuette.json";
-const char* kDefaultHdriPath = "/home/me/Downloads/lilienstein_4k.hdr";
 
 const int kWidth = 1920;
 const int kHeight = 1080;
-const int kTotalSamples = 4096;
-const int kBatchSize = 16;  // Render in batches to avoid timeout.
+const int kTotalSamples = 2048;
+const int kBatchSize = 8;  // Render in batches to avoid timeout.
 const int kBounceCount = 3;
 
 const char* kOutputFolder = "comparison_output";
@@ -51,7 +40,7 @@ void ensureDirectory(const char* path) {
 }
 
 // Helper to load mesh (same as main.cu).
-bool loadMesh(const char* path, Mesh* mesh, const char* label, bool normalize, bool nearestTex) {
+bool loadMesh(const char* path, Mesh* mesh, const char* label, bool normalize, bool nearestTex, float scale = 1.0f) {
     if (!path || path[0] == '\0') return false;
     std::string loadError;
     std::filesystem::path meshPath(path);
@@ -61,9 +50,9 @@ bool loadMesh(const char* path, Mesh* mesh, const char* label, bool normalize, b
     }
     bool loaded = false;
     if (ext == ".gltf" || ext == ".glb") {
-        loaded = LoadTexturedGltfFromFile(path, mesh, &loadError, normalize, nearestTex);
+        loaded = LoadTexturedGltfFromFile(path, mesh, &loadError, normalize, nearestTex, scale);
     } else {
-        loaded = LoadMeshFromFile(path, mesh, &loadError, normalize);
+        loaded = LoadMeshFromFile(path, mesh, &loadError, normalize, scale);
     }
     if (!loaded) {
         std::fprintf(stderr, "Failed to load %s mesh '%s': %s\n", label, path, loadError.c_str());
@@ -73,44 +62,6 @@ bool loadMesh(const char* path, Mesh* mesh, const char* label, bool normalize, b
 
 // Forward declarations.
 bool savePng(const char* path, const std::vector<uchar4>& pixels, int width, int height);
-
-// Load camera from JSON.
-bool loadCameraFromJson(const char* path, CameraState& camera) {
-    FILE* f = std::fopen(path, "r");
-    if (!f) {
-        std::fprintf(stderr, "Failed to open camera file: %s\n", path);
-        return false;
-    }
-
-    // Simple JSON parser for our specific format.
-    char line[256];
-    bool posFound = false;
-    bool yawFound = false;
-    bool pitchFound = false;
-    bool fovFound = false;
-
-    while (std::fgets(line, sizeof(line), f)) {
-        if (std::sscanf(line, "  \"position\": [%f, %f, %f]",
-                        &camera.position.x, &camera.position.y, &camera.position.z) == 3) {
-            posFound = true;
-        } else if (std::sscanf(line, "  \"yaw\": %f", &camera.yaw) == 1) {
-            yawFound = true;
-        } else if (std::sscanf(line, "  \"pitch\": %f", &camera.pitch) == 1) {
-            pitchFound = true;
-        } else if (std::sscanf(line, "  \"fovY\": %f", &camera.fovY) == 1) {
-            fovFound = true;
-        }
-    }
-
-    std::fclose(f);
-
-    if (!posFound || !yawFound || !pitchFound || !fovFound) {
-        std::fprintf(stderr, "Incomplete camera data in %s\n", path);
-        return false;
-    }
-
-    return true;
-}
 
 // Compute camera basis from yaw/pitch.
 void computeCameraBasis(const CameraState& camera, RenderBasis& basis) {
@@ -161,6 +112,7 @@ float computeFlip(const std::vector<uchar4>& ref, const std::vector<uchar4>& tes
     FLIP::image<float> errorMapFLIP(width, height, 0.0f);
 
     // Convert uchar4 to FLIP::color3 (normalize to [0,1]).
+    // Rendered images are already in sRGB space (encodeSrgb applied in renderer).
     for (int y = 0; y < height; ++y) {
         for (int x = 0; x < width; ++x) {
             int idx = y * width + x;
@@ -175,9 +127,8 @@ float computeFlip(const std::vector<uchar4>& ref, const std::vector<uchar4>& tes
         }
     }
 
-    // Convert linear RGB to sRGB.
-    reference.LinearRGB2sRGB();
-    testImage.LinearRGB2sRGB();
+    // Images from renderer are already in sRGB space.
+    // DO NOT call LinearRGB2sRGB() - that would apply sRGB curve twice!
 
     // Calculate PPD.
     flipOptions.PPD = calculatePPD(flipOptions.monitorDistance, flipOptions.monitorResolutionX, flipOptions.monitorWidth);
@@ -265,18 +216,27 @@ bool savePng(const char* path, const std::vector<uchar4>& pixels, int width, int
     return true;
 }
 
-int main() {
+int main(int argc, char** argv) {
     std::printf("=== Comparison Renderer ===\n");
+
+    // Load configuration.
+    const char* kDefaultConfigPath = "configs/chess.json";
+    const char* configPath = (argc > 1) ? argv[1] : kDefaultConfigPath;
+
+    RendererConfig config;
+    std::string configError;
+    if (!LoadConfigFromFile(configPath, &config, &configError)) {
+        std::fprintf(stderr, "Failed to load config: %s\n", configError.c_str());
+        return 1;
+    }
 
     // Create output directory.
     ensureDirectory(kOutputFolder);
 
-    // Load camera.
+    // Extract camera from config.
     CameraState camera{};
-    if (!loadCameraFromJson(kCameraPath, camera)) {
-        std::fprintf(stderr, "Failed to load camera from %s\n", kCameraPath);
-        return 1;
-    }
+    MatrixToCameraState(config.camera.matrix, &camera.position, &camera.yaw, &camera.pitch);
+    camera.fovY = config.camera.yfov;
     std::printf("Loaded camera: pos=(%.2f, %.2f, %.2f), yaw=%.2f, pitch=%.2f, fovY=%.2f\n",
                 camera.position.x, camera.position.y, camera.position.z,
                 camera.yaw, camera.pitch, camera.fovY);
@@ -287,34 +247,35 @@ int main() {
     Mesh& innerShell = scene.innerShell();
     Mesh& outerShell = scene.outerShell();
 
-    const bool kNormalize = false;
-    const bool kNearestSampling = true;
-
-    if (!loadMesh(kOriginalMeshPath, &originalMesh, "original", kNormalize, kNearestSampling)) {
-        std::fprintf(stderr, "Failed to load original mesh: %s\n", kOriginalMeshPath);
+    if (!loadMesh(config.original_mesh.path.c_str(), &originalMesh, "original",
+                  config.rendering.normalize_meshes, config.rendering.nearest_texture_sampling,
+                  config.original_mesh.scale)) {
+        std::fprintf(stderr, "Failed to load original mesh: %s\n", config.original_mesh.path.c_str());
         return 1;
     }
     std::printf("Loaded original mesh: %d triangles\n", originalMesh.triangleCount());
 
-    if (!loadMesh(kInnerShellPath, &innerShell, "inner shell", kNormalize, false)) {
-        std::fprintf(stderr, "Failed to load inner shell: %s\n", kInnerShellPath);
+    if (!loadMesh(config.inner_shell.path.c_str(), &innerShell, "inner shell",
+                  config.rendering.normalize_meshes, false, config.inner_shell.scale)) {
+        std::fprintf(stderr, "Failed to load inner shell: %s\n", config.inner_shell.path.c_str());
         return 1;
     }
     std::printf("Loaded inner shell: %d triangles\n", innerShell.triangleCount());
 
-    if (!loadMesh(kOuterShellPath, &outerShell, "outer shell", kNormalize, false)) {
-        std::fprintf(stderr, "Failed to load outer shell: %s\n", kOuterShellPath);
+    if (!loadMesh(config.outer_shell.path.c_str(), &outerShell, "outer shell",
+                  config.rendering.normalize_meshes, false, config.outer_shell.scale)) {
+        std::fprintf(stderr, "Failed to load outer shell: %s\n", config.outer_shell.path.c_str());
         return 1;
     }
     std::printf("Loaded outer shell: %d triangles\n", outerShell.triangleCount());
 
     // Load environment.
     std::string envError;
-    if (!scene.environment().loadFromFile(kDefaultHdriPath, &envError)) {
-        std::fprintf(stderr, "Failed to load HDRI '%s': %s\n", kDefaultHdriPath, envError.c_str());
+    if (!scene.environment().loadFromFile(config.environment.hdri_path.c_str(), &envError)) {
+        std::fprintf(stderr, "Failed to load HDRI '%s': %s\n", config.environment.hdri_path.c_str(), envError.c_str());
         return 1;
     }
-    std::printf("Loaded environment: %s\n", kDefaultHdriPath);
+    std::printf("Loaded environment: %s\n", config.environment.hdri_path.c_str());
 
     // Create renderer.
     RendererNeural renderer(scene);
@@ -323,11 +284,11 @@ int main() {
     renderer.setLambertView(false);
 
     // Load checkpoint.
-    if (!renderer.loadWeightsFromFile(kCheckpointPath)) {
-        std::fprintf(stderr, "Failed to load checkpoint: %s\n", kCheckpointPath);
+    if (!renderer.loadWeightsFromFile(config.checkpoint_path.c_str())) {
+        std::fprintf(stderr, "Failed to load checkpoint: %s\n", config.checkpoint_path.c_str());
         return 1;
     }
-    std::printf("Loaded checkpoint: %s\n", kCheckpointPath);
+    std::printf("Loaded checkpoint: %s\n", config.checkpoint_path.c_str());
 
     // Compute camera basis.
     RenderBasis basis;
@@ -349,7 +310,7 @@ int main() {
         while (remainingSamples > 0) {
             int batchSamples = std::min(remainingSamples, kBatchSize);
             renderer.setSamplesPerPixel(batchSamples);
-            renderer.resetSamples();  // Reset accumulation before each batch.
+            // renderer.resetSamples();  // Reset accumulation before each batch.
 
             std::vector<uchar4> batchPixels(pixelCount);
             renderer.render(camera.position, batchPixels);
@@ -399,7 +360,7 @@ int main() {
         while (remainingSamples > 0) {
             int batchSamples = std::min(remainingSamples, kBatchSize);
             renderer.setSamplesPerPixel(batchSamples);
-            renderer.resetSamples();  // Reset accumulation before each batch.
+            // renderer.resetSamples();  // Reset accumulation before each batch.
 
             std::vector<uchar4> batchPixels(pixelCount);
             renderer.render(camera.position, batchPixels);

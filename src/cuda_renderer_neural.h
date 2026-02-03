@@ -35,6 +35,8 @@ class RendererNeural final {
     void setLambertView(bool enabled) { lambertView_ = enabled; }
     void setClassicMeshIndex(int index) { classicMeshIndex_ = index; }
     int classicMeshIndex() const { return classicMeshIndex_; }
+    void setEnvmapRotation(float degrees) { envmapRotation_ = degrees; }
+    float envmapRotation() const { return envmapRotation_; }
     void resetSamples() { resetAccum(); }
 
     int samplesPerPixel() const { return samplesPerPixel_; }
@@ -139,6 +141,7 @@ class RendererNeural final {
     int samplesPerPixel_ = 1;
     int bounceCount_ = 0;
     int classicMeshIndex_ = 0;
+    float envmapRotation_ = 0.0f;
     uint32_t accumSampleCount_ = 0;
 
     bool lastUseNeuralQuery_ = true;
@@ -146,6 +149,7 @@ class RendererNeural final {
     int lastBounceCount_ = -1;
     int lastSamplesPerPixel_ = -1;
     int lastClassicMeshIndex_ = -1;
+    float lastEnvmapRotation_ = 0.0f;
     bool hasLastCamera_ = false;
     Vec3 lastCamPos_{};
     RenderBasis lastBasis_{};

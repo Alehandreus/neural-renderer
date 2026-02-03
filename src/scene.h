@@ -11,6 +11,7 @@ struct EnvironmentDeviceView {
     const Vec3* pixels = nullptr;
     int width = 0;
     int height = 0;
+    float rotation = 0.0f;  // Rotation in degrees around Y axis
 };
 
 class EnvironmentMap {

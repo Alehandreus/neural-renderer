@@ -102,6 +102,18 @@ void normalizeTriangles(std::vector<Triangle>& triangles) {
     }
 }
 
+void scaleTriangles(std::vector<Triangle>& triangles, float scale) {
+    if (triangles.empty() || scale == 1.0f) {
+        return;
+    }
+
+    for (Triangle& tri : triangles) {
+        tri.v0 = tri.v0 * scale;
+        tri.v1 = tri.v1 * scale;
+        tri.v2 = tri.v2 * scale;
+    }
+}
+
 bool loadImageFromFile(const std::filesystem::path& path, ImageData* outImage, std::string* error) {
     int width = 0;
     int height = 0;
@@ -214,7 +226,8 @@ Vec3 sampleTexture(const ImageData& image, float u, float v) {
 bool LoadMeshFromFile(const std::string& path,
                       Mesh* outMesh,
                       std::string* error,
-                      bool normalize) {
+                      bool normalize,
+                      float scale) {
     if (!outMesh) {
         if (error) {
             *error = "Output mesh pointer is null.";
@@ -307,6 +320,9 @@ bool LoadMeshFromFile(const std::string& path,
     if (normalize) {
         normalizeTriangles(triangles);
     }
+    if (scale != 1.0f) {
+        scaleTriangles(triangles, scale);
+    }
     outMesh->setTriangles(std::move(triangles));
     outMesh->setTextures({});
     outMesh->setTextureNearest(false);
@@ -317,7 +333,8 @@ bool LoadTexturedGltfFromFile(const std::string& path,
                               Mesh* outMesh,
                               std::string* error,
                               bool normalize,
-                              bool nearestFilter) {
+                              bool nearestFilter,
+                              float scale) {
     if (!outMesh) {
         if (error) {
             *error = "Output mesh pointer is null.";
@@ -492,6 +509,9 @@ bool LoadTexturedGltfFromFile(const std::string& path,
 
     if (normalize) {
         normalizeTriangles(triangles);
+    }
+    if (scale != 1.0f) {
+        scaleTriangles(triangles, scale);
     }
     std::vector<MeshTexture> meshTextures;
     meshTextures.reserve(textures.size());

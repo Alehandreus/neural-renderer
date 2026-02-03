@@ -46,7 +46,8 @@ class InputController {
     CameraState camera_{};
     CameraBasis basis_{};
     MouseLookState mouseState_{};
-    float moveSpeed_ = 30000.0f;
+    // float moveSpeed_ = 30000.0f;
+    float moveSpeed_ = 1.0f;
     bool mouseCaptured_ = true;
     bool escWasDown_ = false;
     bool clickWasDown_ = false;
