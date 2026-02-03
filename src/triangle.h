@@ -40,7 +40,7 @@ __host__ __device__ inline Triangle makeTriangle(Vec3 v0, Vec3 v1, Vec3 v2) {
 }
 
 __host__ __device__ inline HitInfo intersectTriangle(const Ray& ray, const Triangle& tri) {
-    const float kEpsilon = 1e-6f;
+    const float kEpsilon = 1e-8f;
     Vec3 edge1 = tri.v1 - tri.v0;
     Vec3 edge2 = tri.v2 - tri.v0;
     Vec3 pvec = cross(ray.direction, edge2);

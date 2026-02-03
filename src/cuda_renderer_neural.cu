@@ -30,6 +30,7 @@ struct RenderParams {
     float fovY;
     float materialReflectiveness;
     float maxRadiance;
+    float sceneScale;
     int maxBounces;
     int width;
     int height;
@@ -235,7 +236,7 @@ __device__ inline bool intersectAabb(const Ray& ray,
                                      const Vec3& boundsMax,
                                      float tMax,
                                      float* outTNear) {
-    const float kAabbEpsilon = 1e-5f;
+    const float kAabbEpsilon = 1e-8f;
     Vec3 minB(boundsMin.x - kAabbEpsilon, boundsMin.y - kAabbEpsilon, boundsMin.z - kAabbEpsilon);
     Vec3 maxB(boundsMax.x + kAabbEpsilon, boundsMax.y + kAabbEpsilon, boundsMax.z + kAabbEpsilon);
 
@@ -745,7 +746,8 @@ __global__ void pathTraceKernel(uchar4* output,
                 bounceDir = sampleHemisphereCosine(normal, rng);
             }
 
-            ray = Ray(hitPos + normal * 1e-3f, bounceDir);
+            float rayOffset = params.sceneScale * 1e-8f;
+            ray = Ray(hitPos + normal * rayOffset, bounceDir);
             HitInfo bounceHit{false, 0.0f, Vec3(), Vec3(), Vec2(), -1, -1};
             hit = traceMesh(ray, mesh, &bounceHit);
             if (!hit) {
@@ -982,7 +984,8 @@ __global__ void renderBounceKernel(const float* hitPositions,
         bounceDirs[base + 1] = bounceDir.y;
         bounceDirs[base + 2] = bounceDir.z;
 
-        Ray bounceRay(hitPos + normal * 1e-3f, bounceDir);
+        float rayOffset = params.sceneScale * 1e-5f;
+        Ray bounceRay(hitPos + normal * rayOffset, bounceDir);
         HitInfo bounceHit{false, 0.0f, Vec3(), Vec3(), Vec2(), -1, -1};
         bool hit = traceMesh(bounceRay, mesh, &bounceHit);
         if (hit) {
@@ -1097,7 +1100,8 @@ __global__ void renderBounceFromStateKernel(const float* inPositions,
         outDirs[base + 1] = bounceDir.y;
         outDirs[base + 2] = bounceDir.z;
 
-        Ray bounceRay(hitPos + normal * 1e-3f, bounceDir);
+        float rayOffset = params.sceneScale * 1e-5f;
+        Ray bounceRay(hitPos + normal * rayOffset, bounceDir);
         HitInfo bounceHit{false, 0.0f, Vec3(), Vec3(), Vec2(), -1, -1};
         bool hit = traceMesh(bounceRay, mesh, &bounceHit);
         if (hit) {
@@ -1501,6 +1505,23 @@ void RendererNeural::render(const Vec3& camPos, std::vector<uchar4>& hostPixels)
             outerExtent.y != 0.0f ? 1.0f / outerExtent.y : 0.0f,
             outerExtent.z != 0.0f ? 1.0f / outerExtent.z : 0.0f);
 
+    // Calculate scene scale from the classic mesh bounds for scale-adaptive epsilons.
+    Vec3 sceneMin = classicMesh->boundsMin();
+    Vec3 sceneMax = classicMesh->boundsMax();
+    Vec3 sceneExtent = sceneMax - sceneMin;
+    sceneScale_ = sqrtf(sceneExtent.x * sceneExtent.x +
+                        sceneExtent.y * sceneExtent.y +
+                        sceneExtent.z * sceneExtent.z);
+    if (sceneScale_ < 1e-6f) {
+        sceneScale_ = 1.0f;  // Fallback for invalid bounds.
+    }
+    static bool printedOnce = false;
+    if (!printedOnce) {
+        printf("Scene scale: %.6f (extent: %.6f, %.6f, %.6f)\n",
+               sceneScale_, sceneExtent.x, sceneExtent.y, sceneExtent.z);
+        printedOnce = true;
+    }
+
     // Camera change detection.
     bool cameraMoved = !hasLastCamera_;
     const float kEps = 1e-4f;
@@ -1553,6 +1574,7 @@ void RendererNeural::render(const Vec3& camPos, std::vector<uchar4>& hostPixels)
     params.fovY = basis_.fovY;
     params.materialReflectiveness = material.reflectiveness;
     params.maxRadiance = 20.0f;
+    params.sceneScale = sceneScale_;
     params.maxBounces = maxBounces;
     params.width = width_;
     params.height = height_;

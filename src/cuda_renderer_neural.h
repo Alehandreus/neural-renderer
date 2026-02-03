@@ -154,4 +154,5 @@ class RendererNeural final {
     Vec3 lastCamPos_{};
     RenderBasis lastBasis_{};
     float lastFovY_ = 0.0f;
+    float sceneScale_ = 1.0f;
 };
