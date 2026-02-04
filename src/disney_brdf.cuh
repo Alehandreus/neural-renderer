@@ -266,7 +266,11 @@ __device__ inline Vec3 disney_sample(const Material& mat,
                                      float* pdf_out) {
     // Simple lobe selection based on material properties
     float diffuse_weight = (1.0f - mat.metallic) * (1.0f - mat.specular_transmission);
-    float specular_weight = 1.0f;
+
+    // float specular_weight = 1.0f;
+    float F0 = 0.08f * mat.specular;
+    float specular_weight = F0 + (1.0f - F0) * mat.metallic;
+
     float total_weight = diffuse_weight + specular_weight;
 
     float diffuse_prob = diffuse_weight / total_weight;
