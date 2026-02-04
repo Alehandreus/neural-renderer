@@ -276,25 +276,47 @@ __device__ inline Vec3 disney_sample(const Material& mat,
     float diffuse_prob = diffuse_weight / total_weight;
 
     Vec3 wi;
+    float pdf_diffuse, pdf_specular;
+
     if (u3 < diffuse_prob) {
         // Sample diffuse lobe (cosine-weighted hemisphere)
         wi = sample_cosine_hemisphere(n, u1, u2);
-        if (pdf_out) {
-            float n_dot_i = fmaxf(0.0f, dot(n, wi));
-            *pdf_out = n_dot_i * INV_PI * diffuse_prob;
-        }
+        float n_dot_i = fmaxf(0.0f, dot(n, wi));
+        pdf_diffuse = n_dot_i * INV_PI;
+
+        // Compute specular PDF for the same direction (needed for mixture PDF)
+        float alpha = fmaxf(0.001f, mat.roughness * mat.roughness);
+        Vec3 h = normalize(wi + wo);
+        float n_dot_h = fmaxf(0.0f, dot(n, h));
+        float h_dot_o = fmaxf(0.0001f, dot(h, wo));
+        float D = gtr_2(n_dot_h, alpha);
+        pdf_specular = D * n_dot_h / (4.0f * h_dot_o);
     } else {
         // Sample specular lobe (GGX)
         float alpha = fmaxf(0.001f, mat.roughness * mat.roughness);
         Vec3 h = sample_ggx(n, alpha, u1, u2);
         wi = normalize(wo * -1.0f + h * (2.0f * dot(wo, h)));
 
-        if (pdf_out) {
-            float n_dot_h = fmaxf(0.0f, dot(n, h));
-            float h_dot_o = fmaxf(0.0f, dot(h, wo));
-            float D = gtr_2(n_dot_h, alpha);
-            *pdf_out = (D * n_dot_h / (4.0f * h_dot_o)) * (1.0f - diffuse_prob);
+        // Validate hemisphere - specular reflection should be above surface
+        if (dot(wi, n) <= 0.0f) {
+            if (pdf_out) *pdf_out = 0.0f;
+            return wi;  // Invalid sample, will be rejected by path tracer
         }
+
+        // Compute specular PDF
+        float n_dot_h = fmaxf(0.0f, dot(n, h));
+        float h_dot_o = fmaxf(0.0001f, dot(h, wo));
+        float D = gtr_2(n_dot_h, alpha);
+        pdf_specular = D * n_dot_h / (4.0f * h_dot_o);
+
+        // Compute diffuse PDF for the same direction (needed for mixture PDF)
+        float n_dot_i = fmaxf(0.0f, dot(n, wi));
+        pdf_diffuse = n_dot_i * INV_PI;
+    }
+
+    // Return mixture PDF (both lobes could have generated this direction)
+    if (pdf_out) {
+        *pdf_out = pdf_diffuse * diffuse_prob + pdf_specular * (1.0f - diffuse_prob);
     }
 
     return wi;
@@ -310,7 +332,8 @@ __device__ inline float disney_pdf(const Material& mat,
     }
 
     float diffuse_weight = (1.0f - mat.metallic) * (1.0f - mat.specular_transmission);
-    float specular_weight = 1.0f;
+    float F0 = 0.08f * mat.specular;
+    float specular_weight = F0 + (1.0f - F0) * mat.metallic;
     float total_weight = diffuse_weight + specular_weight;
 
     float diffuse_prob = diffuse_weight / total_weight;
@@ -323,7 +346,7 @@ __device__ inline float disney_pdf(const Material& mat,
     // Specular PDF
     Vec3 h = normalize(wi + wo);
     float n_dot_h = fmaxf(0.0f, dot(n, h));
-    float h_dot_o = fmaxf(0.0f, dot(h, wo));
+    float h_dot_o = fmaxf(0.0001f, dot(h, wo));  // Avoid division by zero
     float alpha = fmaxf(0.001f, mat.roughness * mat.roughness);
     float D = gtr_2(n_dot_h, alpha);
     float pdf_specular = D * n_dot_h / (4.0f * h_dot_o);

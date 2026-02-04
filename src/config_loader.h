@@ -24,6 +24,19 @@ struct RenderingConfig {
     bool nearest_texture_sampling = true;
 };
 
+struct MaterialConfig {
+    Vec3 base_color{1.0f, 1.0f, 1.0f};
+    float roughness = 1.0f;
+    float metallic = 0.0f;
+    float specular = 0.0f;
+    float specular_tint = 0.0f;
+    float anisotropy = 0.0f;
+    float sheen = 0.0f;
+    float sheen_tint = 0.0f;
+    float clearcoat = 0.0f;
+    float clearcoat_gloss = 0.0f;
+};
+
 struct RendererConfig {
     MeshConfig original_mesh;
     MeshConfig inner_shell;
@@ -32,6 +45,7 @@ struct RendererConfig {
     EnvironmentConfig environment;
     CameraConfig camera;
     RenderingConfig rendering;
+    MaterialConfig material;
 };
 
 // Load config from JSON file

@@ -54,6 +54,9 @@ public:
     Vec3 boundsMin() const { return boundsMin_; }
     Vec3 boundsMax() const { return boundsMax_; }
 
+    bool hasVertexColors() const;
+    void overrideVertexColors(Vec3 color);
+
     bool uploadToDevice();
     MeshDeviceView deviceView() const {
         return MeshDeviceView{deviceTriangles_, deviceCount_, deviceNodes_, deviceNodeCount_,

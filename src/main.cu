@@ -15,6 +15,7 @@
 #include "imgui.h"
 #include "backends/imgui_impl_glfw.h"
 #include "backends/imgui_impl_opengl3.h"
+#include "stb_image_write.h"
 
 #include "config_loader.h"
 #include "cuda_renderer_neural.h"
@@ -146,12 +147,33 @@ int main(int argc, char** argv) {
         outerShellLabel = config.outer_shell.path;
     }
 
+    // Check if mesh has vertex colors, if not use material color from config
+    if (!originalMesh.hasVertexColors()) {
+        std::printf("Mesh has no vertex colors - using material.base_color from config: (%.3f, %.3f, %.3f)\n",
+                    config.material.base_color.x, config.material.base_color.y, config.material.base_color.z);
+        originalMesh.overrideVertexColors(config.material.base_color);
+    } else {
+        std::printf("Mesh has vertex colors - using vertex colors from mesh file\n");
+    }
+
     std::string envError;
     if (!config.environment.hdri_path.empty() && !scene.environment().loadFromFile(config.environment.hdri_path.c_str(), &envError)) {
         std::fprintf(stderr, "Failed to load HDRI '%s': %s\n", config.environment.hdri_path.c_str(), envError.c_str());
     }
     scene.environment().setRotation(config.environment.rotation);
     scene.environment().setStrength(config.environment.strength);
+
+    // Apply material config to scene
+    scene.material().base_color = config.material.base_color;
+    scene.material().roughness = config.material.roughness;
+    scene.material().metallic = config.material.metallic;
+    scene.material().specular = config.material.specular;
+    scene.material().specular_tint = config.material.specular_tint;
+    scene.material().anisotropy = config.material.anisotropy;
+    scene.material().sheen = config.material.sheen;
+    scene.material().sheen_tint = config.material.sheen_tint;
+    scene.material().clearcoat = config.material.clearcoat;
+    scene.material().clearcoat_gloss = config.material.clearcoat_gloss;
 
     // Set camera from config matrix
     {
@@ -320,6 +342,20 @@ int main(int argc, char** argv) {
         if (ImGui::SliderFloat("FOV", &fovDeg, 10.0f, 120.0f, "%.1f deg")) {
             input.camera().fovY = fovDeg * (3.14159265f / 180.0f);
         }
+        if (ImGui::TreeNode("Material properties")) {
+            Material& mat = scene.material();
+            ImGui::ColorEdit3("Base color", &mat.base_color.x);
+            ImGui::SliderFloat("Roughness", &mat.roughness, 0.0f, 1.0f);
+            ImGui::SliderFloat("Metallic", &mat.metallic, 0.0f, 1.0f);
+            ImGui::SliderFloat("Specular", &mat.specular, 0.0f, 1.0f);
+            ImGui::SliderFloat("Specular tint", &mat.specular_tint, 0.0f, 1.0f);
+            ImGui::SliderFloat("Anisotropy", &mat.anisotropy, 0.0f, 1.0f);
+            ImGui::SliderFloat("Sheen", &mat.sheen, 0.0f, 1.0f);
+            ImGui::SliderFloat("Sheen tint", &mat.sheen_tint, 0.0f, 1.0f);
+            ImGui::SliderFloat("Clearcoat", &mat.clearcoat, 0.0f, 1.0f);
+            ImGui::SliderFloat("Clearcoat gloss", &mat.clearcoat_gloss, 0.0f, 1.0f);
+            ImGui::TreePop();
+        }
         if (ImGui::TreeNode("Camera matrix")) {
             float matrix[16];
             CameraStateToMatrix(camera.position, camera.yaw, camera.pitch, matrix);
@@ -363,6 +399,25 @@ int main(int argc, char** argv) {
                 NFD_FreePath(outPath);
             } else if (result == NFD_CANCEL) {
                 std::printf("Camera export cancelled\n");
+            } else {
+                std::fprintf(stderr, "Error opening save dialog: %s\n", NFD_GetError());
+            }
+        }
+        if (ImGui::Button("Save rendering to image")) {
+            nfdchar_t* outPath = nullptr;
+            nfdfilteritem_t filters[1] = {{"PNG Image", "png"}};
+            nfdresult_t result = NFD_SaveDialog(&outPath, filters, 1, nullptr, "render.png");
+            if (result == NFD_OKAY) {
+                // Save the current rendering as PNG
+                int success = stbi_write_png(outPath, fbWidth, fbHeight, 4, hostPixels.data(), fbWidth * 4);
+                if (success) {
+                    std::printf("Image saved to %s\n", outPath);
+                } else {
+                    std::fprintf(stderr, "Failed to save image to %s\n", outPath);
+                }
+                NFD_FreePath(outPath);
+            } else if (result == NFD_CANCEL) {
+                std::printf("Image save cancelled\n");
             } else {
                 std::fprintf(stderr, "Error opening save dialog: %s\n", NFD_GetError());
             }

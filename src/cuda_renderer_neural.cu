@@ -837,7 +837,7 @@ __global__ void applySegmentNeuralOutputKernel(
         // (matching Python: pred_t_global = pred_t + accum_t)
         // But note: the neural network predicts distance from shifted entry point
         Vec3 shiftedEntry = entryPos + dir * kSegmentEpsilon;
-        Vec3 hitPos = shiftedEntry + dir * distance;
+        Vec3 hitPos = shiftedEntry + dir * distance * 0;
 
         hitPositions[base + 0] = hitPos.x;
         hitPositions[base + 1] = hitPos.y;
@@ -855,6 +855,9 @@ __global__ void applySegmentNeuralOutputKernel(
         hitNormals[base + 1] = normal.y;
         hitNormals[base + 2] = normal.z;
 
+        // Use material base color which has been set from config/mesh
+        // Since mesh vertex colors are overridden in main.cu to match material.base_color,
+        // using it directly ensures consistency between GT and neural paths
         hitColors[base + 0] = material.base_color.x;
         hitColors[base + 1] = material.base_color.y;
         hitColors[base + 2] = material.base_color.z;

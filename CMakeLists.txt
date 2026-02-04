@@ -137,6 +137,7 @@ add_executable(imgui_renderer
     src/scene.cu
     src/scene.h
     src/stb_image.cpp
+    src/stb_image_write.cpp
     src/tinyexr.cpp
     src/triangle.h
     src/vec3.h

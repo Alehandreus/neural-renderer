@@ -82,6 +82,27 @@ bool LoadConfigFromFile(const char* configPath, RendererConfig* config, std::str
             config->rendering.nearest_texture_sampling = render.value("nearest_texture_sampling", true);
         }
 
+        // Parse material settings
+        if (j.contains("material")) {
+            auto& mat = j["material"];
+
+            if (mat.contains("base_color") && mat["base_color"].is_array() && mat["base_color"].size() == 3) {
+                config->material.base_color.x = mat["base_color"][0].get<float>();
+                config->material.base_color.y = mat["base_color"][1].get<float>();
+                config->material.base_color.z = mat["base_color"][2].get<float>();
+            }
+
+            config->material.roughness = mat.value("roughness", 1.0f);
+            config->material.metallic = mat.value("metallic", 0.0f);
+            config->material.specular = mat.value("specular", 0.0f);
+            config->material.specular_tint = mat.value("specular_tint", 0.0f);
+            config->material.anisotropy = mat.value("anisotropy", 0.0f);
+            config->material.sheen = mat.value("sheen", 0.0f);
+            config->material.sheen_tint = mat.value("sheen_tint", 0.0f);
+            config->material.clearcoat = mat.value("clearcoat", 0.0f);
+            config->material.clearcoat_gloss = mat.value("clearcoat_gloss", 0.0f);
+        }
+
     } catch (const std::exception& e) {
         *error = std::string("Error parsing config: ") + e.what();
         return false;
