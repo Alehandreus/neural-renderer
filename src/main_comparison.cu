@@ -220,7 +220,7 @@ int main(int argc, char** argv) {
     std::printf("=== Comparison Renderer ===\n");
 
     // Load configuration.
-    const char* kDefaultConfigPath = "configs/chess.json";
+    const char* kDefaultConfigPath = "configs/statuette.json";
     const char* configPath = (argc > 1) ? argv[1] : kDefaultConfigPath;
 
     RendererConfig config;

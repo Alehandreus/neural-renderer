@@ -263,7 +263,7 @@ __device__ inline bool intersectAabb(const Ray& ray,
                                      const Vec3& boundsMax,
                                      float tMax,
                                      float* outTNear) {
-    const float kAabbEpsilon = 1e-8f;
+    const float kAabbEpsilon = 1e-10f;
     Vec3 minB(boundsMin.x - kAabbEpsilon, boundsMin.y - kAabbEpsilon, boundsMin.z - kAabbEpsilon);
     Vec3 maxB(boundsMax.x + kAabbEpsilon, boundsMax.y + kAabbEpsilon, boundsMax.z + kAabbEpsilon);
 
@@ -588,7 +588,7 @@ __global__ void traceShellsKernel(float* outerHitPositions,
 // Multi-segment constants.
 // ---------------------------------------------------------------------------
 constexpr int kMaxSegmentIterations = 10;
-constexpr float kSegmentEpsilon = 1e-8f;
+constexpr float kSegmentEpsilon = 1e-10f;
 
 // ---------------------------------------------------------------------------
 // Initial outer shell entry tracing for multi-segment method.
@@ -705,7 +705,8 @@ __global__ void traceSegmentExitsKernel(
 
     // Exit position is the nearer of outer_exit or inner_enter
     // (matching Python: inner_apply = x_inner_mask & (x_inner_t < x_outer_exit_t))
-    bool innerBeforeOuter = hitInner && (innerT < exitT) && (innerT > 0.0f);
+    // Note: Python allows negative inner_t (allow_negative=True) so we don't check > 0
+    bool innerBeforeOuter = hitInner && (innerT < exitT);
     Vec3 exitPos;
     if (innerBeforeOuter) {
         exitPos = shiftedEntry + dir * innerT;
@@ -824,8 +825,8 @@ __global__ void applySegmentNeuralOutputKernel(
 
     // Check if inner shell hit before outer exit - forces intersection
     // (matching Python: pred_intersection_mask[x_inner_mask & (x_inner_t < x_outer_exit_t)] = True)
+    // Note: Python allows negative inner_t (allow_negative=True) so we don't check > 0
     bool innerHitBeforeExit = (innerHitFlags[sampleIdx] != 0) &&
-                               (innerEnterT[sampleIdx] > 0.0f) &&
                                (innerEnterT[sampleIdx] < outerExitT[sampleIdx]);
 
     bool foundIntersection = neuralHit || innerHitBeforeExit;
@@ -914,25 +915,25 @@ __global__ void prepareNextIterationKernel(
     // So we check: can re-enter outer shell OR hit inner shell
     bool canContinue = hitReentry || (innerHitFlags[sampleIdx] != 0);
 
-    if (canContinue && hitReentry) {
+    if (canContinue) {
+        // Get re-entry distance (0 if no re-entry found, matching Python behavior
+        // where x_outer_enter_t_new may be 0 or invalid for non-hits)
+        float reentryDist = hitReentry ? reentry.distance : 0.0f;
+
         // Update entry position for next iteration
-        Vec3 newEntry = shiftedExit + dir * reentry.distance;
+        // (matching Python: x_outer_enter_new = x_outer_exit + ds_left * x_outer_enter_t_new)
+        Vec3 newEntry = shiftedExit + dir * reentryDist;
         entryPositions[base + 0] = newEntry.x;
         entryPositions[base + 1] = newEntry.y;
         entryPositions[base + 2] = newEntry.z;
 
         // Update accumulated distance
         // (matching Python: accum_t = accum_t + x_outer_exit_t + x_outer_enter_t_new)
-        accumT[sampleIdx] = accumT[sampleIdx] + outerExitT[sampleIdx] + reentry.distance + 2.0f * kSegmentEpsilon;
-        newEntryT[sampleIdx] = reentry.distance;
+        accumT[sampleIdx] = accumT[sampleIdx] + outerExitT[sampleIdx] + reentryDist + 2.0f * kSegmentEpsilon;
+        newEntryT[sampleIdx] = reentryDist;
         activeFlags[sampleIdx] = 1;
-    } else if (canContinue && (innerHitFlags[sampleIdx] != 0)) {
-        // Hit inner shell but can't re-enter outer shell
-        // This case should have been handled by applySegmentNeuralOutputKernel
-        // (inner hit forces intersection), but keep ray active if somehow missed
-        activeFlags[sampleIdx] = 0;  // Terminate - should have found intersection
     } else {
-        // Ray escapes - no more segments
+        // Ray escapes - no more segments (no re-entry AND no inner shell hit)
         activeFlags[sampleIdx] = 0;
     }
 }
@@ -1288,7 +1289,7 @@ __global__ void pathTraceKernel(uchar4* output,
             }
 
             // Trace next ray
-            float rayOffset = params.sceneScale * 1e-4f;
+            float rayOffset = params.sceneScale * 1e-6f;
             ray = Ray(hitPos + normal * rayOffset, wi);
             HitInfo bounceHit{false, 0.0f, Vec3(), Vec3(), Vec2(), -1, -1, -1};
             hit = traceMesh(ray, mesh, &bounceHit);
@@ -1525,7 +1526,7 @@ __global__ void renderBounceKernel(const float* hitPositions,
         bounceDirs[base + 1] = bounceDir.y;
         bounceDirs[base + 2] = bounceDir.z;
 
-        float rayOffset = params.sceneScale * 1e-5f;
+        float rayOffset = params.sceneScale * 1e-6f;
         Ray bounceRay(hitPos + normal * rayOffset, bounceDir);
         HitInfo bounceHit{false, 0.0f, Vec3(), Vec3(), Vec2(), -1, -1};
         bool hit = traceMesh(bounceRay, mesh, &bounceHit);
@@ -1825,7 +1826,7 @@ RendererNeural::RendererNeural(Scene& scene)
             {"otype", "HashGrid"},
             {"n_levels", 8},
             {"n_features_per_level", 4},
-            {"log2_hashmap_size", 14},
+            {"log2_hashmap_size", 16},
             {"base_resolution", 16},
             {"per_level_scale", 2},
             {"fixed_point_pos", false},
