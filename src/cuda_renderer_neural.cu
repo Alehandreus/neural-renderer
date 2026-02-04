@@ -39,6 +39,21 @@ struct RenderParams {
     uint32_t sampleOffset;
 };
 
+// Intersection mode for path tracing
+enum IntersectionMode {
+    GT_MESH,   // Ground truth mesh intersection
+    NEURAL     // Neural network intersection
+};
+
+// Hit data structure returned by intersection kernels
+struct HitData {
+    bool hit;           // Whether ray hit anything
+    Vec3 position;      // Hit position in world space
+    Vec3 normal;        // Surface normal at hit point
+    Vec3 albedo;        // Surface color/albedo (texture-modulated)
+    float distance;     // Distance to hit (for ray offsetting)
+};
+
 __device__ inline float clampf(float v, float lo, float hi) {
     return fminf(fmaxf(v, lo), hi);
 }
@@ -238,6 +253,14 @@ __device__ inline void buildTangentSpace(Vec3 normal, Vec3* tangent, Vec3* bitan
     Vec3 up = fabsf(normal.z) < 0.999f ? Vec3(0.0f, 0.0f, 1.0f) : Vec3(1.0f, 0.0f, 0.0f);
     *tangent = normalize(cross(up, normal));
     *bitangent = cross(normal, *tangent);
+}
+
+// Helper function: Sample environment map with radiance clamping
+__forceinline__ __device__ Vec3 sampleEnvironmentWithClamp(EnvironmentDeviceView env,
+                                                            Vec3 direction,
+                                                            float maxRadiance) {
+    Vec3 envLight = sampleEnvironment(env, direction);
+    return clampRadiance(envLight, maxRadiance);
 }
 
 __device__ inline Ray generatePrimaryRay(int x, int y, const RenderParams& params, uint32_t& rng) {
@@ -522,6 +545,255 @@ __device__ inline bool traceMesh(const Ray& ray,
         *outHit = bestHit;
     }
     return bestHit.hit;
+}
+
+// ---------------------------------------------------------------------------
+// Unified Intersection Kernels
+// ---------------------------------------------------------------------------
+
+// Device function: Trace a single ray against GT mesh and return HitData
+__forceinline__ __device__ HitData traceRayGT(const Ray& ray,
+                                               MeshDeviceView mesh,
+                                               const Material& material) {
+    HitData result;
+    HitInfo hitInfo{false, 0.0f, Vec3(), Vec3(), Vec2(), -1, -1};
+    bool hit = traceMesh(ray, mesh, &hitInfo);
+
+    result.hit = hit;
+    if (hit) {
+        result.position = ray.at(hitInfo.distance);
+        result.normal = hitInfo.normal;
+        result.albedo = hitInfo.color;  // Already texture-modulated by traceMesh
+        result.distance = hitInfo.distance;
+    } else {
+        result.position = Vec3(0.0f, 0.0f, 0.0f);
+        result.normal = Vec3(0.0f, 0.0f, 0.0f);
+        result.albedo = Vec3(0.0f, 0.0f, 0.0f);
+        result.distance = 0.0f;
+    }
+
+    return result;
+}
+
+// Device function: Unified ray intersection wrapper
+// NOTE: Currently uses GT mesh for both modes. Neural inference for arbitrary rays
+// would require significant architectural changes (batched host-side inference).
+// For bounce rays, using GT mesh provides accurate lighting even in neural mode.
+__forceinline__ __device__ HitData traceRayIntersection(const Ray& ray,
+                                                         IntersectionMode mode,
+                                                         MeshDeviceView mesh,
+                                                         const Material& material) {
+    // For now, both modes use GT mesh tracing
+    // TODO: Implement neural network intersection for bounce rays if needed
+    return traceRayGT(ray, mesh, material);
+}
+
+// Kernel: Intersect primary rays with ground truth mesh
+__global__ void intersectGroundTruthKernel(float* hitPositions,
+                                           float* hitNormals,
+                                           float* hitColors,
+                                           int* hitFlags,
+                                           RenderParams params,
+                                           MeshDeviceView mesh) {
+    int x = blockIdx.x * blockDim.x + threadIdx.x;
+    int y = blockIdx.y * blockDim.y + threadIdx.y;
+    if (x >= params.width || y >= params.height) {
+        return;
+    }
+
+    int pixelIdx = y * params.width + x;
+    for (int s = 0; s < params.samplesPerPixel; ++s) {
+        int sampleIdx = pixelIdx + s * params.pixelCount;
+        int base = sampleIdx * 3;
+        uint32_t rng = initRng(pixelIdx, params.sampleOffset, s);
+        Ray ray = generatePrimaryRay(x, y, params, rng);
+
+        HitData hit = traceRayGT(ray, mesh, params.material);
+
+        if (hit.hit) {
+            hitPositions[base + 0] = hit.position.x;
+            hitPositions[base + 1] = hit.position.y;
+            hitPositions[base + 2] = hit.position.z;
+            hitNormals[base + 0] = hit.normal.x;
+            hitNormals[base + 1] = hit.normal.y;
+            hitNormals[base + 2] = hit.normal.z;
+            hitColors[base + 0] = hit.albedo.x;
+            hitColors[base + 1] = hit.albedo.y;
+            hitColors[base + 2] = hit.albedo.z;
+            hitFlags[sampleIdx] = 1;
+        } else {
+            hitPositions[base + 0] = 0.0f;
+            hitPositions[base + 1] = 0.0f;
+            hitPositions[base + 2] = 0.0f;
+            hitNormals[base + 0] = 0.0f;
+            hitNormals[base + 1] = 0.0f;
+            hitNormals[base + 2] = 0.0f;
+            hitColors[base + 0] = 0.0f;
+            hitColors[base + 1] = 0.0f;
+            hitColors[base + 2] = 0.0f;
+            hitFlags[sampleIdx] = 0;
+        }
+    }
+}
+
+// Unified path tracing kernel (works for both GT and neural intersection modes)
+__global__ void unifiedPathTraceKernel(uchar4* output,
+                                       Vec3* accum,
+                                       const float* hitPositions,
+                                       const float* hitNormals,
+                                       const float* hitColors,
+                                       const int* hitFlags,
+                                       RenderParams params,
+                                       MeshDeviceView mesh,
+                                       EnvironmentDeviceView env,
+                                       IntersectionMode intersectionMode) {
+    int x = blockIdx.x * blockDim.x + threadIdx.x;
+    int y = blockIdx.y * blockDim.y + threadIdx.y;
+    if (x >= params.width || y >= params.height) {
+        return;
+    }
+
+    int pixelIdx = y * params.width + x;
+    Vec3 sum(0.0f, 0.0f, 0.0f);
+    if (params.samplesPerPixel <= 0 || params.pixelCount <= 0) {
+        return;
+    }
+
+    for (int s = 0; s < params.samplesPerPixel; ++s) {
+        int sampleIdx = pixelIdx + s * params.pixelCount;
+        uint32_t rng = initRng(pixelIdx, params.sampleOffset, s);
+        Ray primaryRay = generatePrimaryRay(x, y, params, rng);
+        Vec3 radiance(0.0f, 0.0f, 0.0f);
+        Vec3 throughput(1.0f, 1.0f, 1.0f);
+
+        // Load primary hit data
+        bool hit = hitFlags[sampleIdx] != 0;
+        Vec3 hitPos;
+        Vec3 normal;
+        Vec3 albedo(1.0f, 1.0f, 1.0f);
+        if (hit) {
+            hitPos = Vec3(
+                    hitPositions[sampleIdx * 3 + 0],
+                    hitPositions[sampleIdx * 3 + 1],
+                    hitPositions[sampleIdx * 3 + 2]);
+            normal = Vec3(
+                    hitNormals[sampleIdx * 3 + 0],
+                    hitNormals[sampleIdx * 3 + 1],
+                    hitNormals[sampleIdx * 3 + 2]);
+            albedo = Vec3(
+                    hitColors[sampleIdx * 3 + 0],
+                    hitColors[sampleIdx * 3 + 1],
+                    hitColors[sampleIdx * 3 + 2]);
+        }
+
+        Ray ray = primaryRay;
+        int maxBounces = params.maxBounces;
+        if (maxBounces < 0) {
+            maxBounces = 0;
+        }
+
+        // Path tracing loop
+        for (int bounce = 0; bounce <= maxBounces; ++bounce) {
+            if (!hit) {
+                // Ray missed - sample environment
+                Vec3 envLight = sampleEnvironmentWithClamp(env, ray.direction, params.maxRadiance);
+                radiance += mul(throughput, envLight);
+                break;
+            }
+            if (bounce == maxBounces) {
+                break;
+            }
+
+            // Normalize normal
+            float nlen = length(normal);
+            if (nlen > 0.0f) {
+                normal = normal / nlen;
+            } else {
+                normal = Vec3(0.0f, 1.0f, 0.0f);
+            }
+
+            // Check for back-facing hit
+            if (dot(normal, ray.direction) > 0.0f) {
+                radiance = Vec3(0.0f, 0.0f, 0.0f);
+                break;
+            }
+
+            // Build tangent space for anisotropic materials
+            Vec3 tangent, bitangent;
+            buildTangentSpace(normal, &tangent, &bitangent);
+
+            // Create material with texture-modulated base color
+            Material surfaceMat = params.material;
+            surfaceMat.base_color = mul(surfaceMat.base_color, albedo);
+
+            // Sample Disney BRDF for bounce direction
+            Vec3 wo = ray.direction * -1.0f;
+            float u1 = rand01(rng);
+            float u2 = rand01(rng);
+            float u3 = rand01(rng);
+            float pdf;
+            Vec3 wi = disney_sample(surfaceMat, normal, wo, u1, u2, u3, &pdf);
+
+            if (pdf <= 0.0f) {
+                break;
+            }
+
+            // Evaluate Disney BRDF
+            Vec3 f = disney_eval(surfaceMat, normal, wo, wi, tangent, bitangent);
+
+            // Update throughput with BRDF, cosine term, and PDF
+            float cos_theta = fmaxf(0.0f, dot(normal, wi));
+            if (cos_theta > 0.0f) {
+                throughput = mul(throughput, f * (cos_theta / pdf));
+            } else {
+                break;
+            }
+
+            // Russian roulette path termination (after 3 bounces)
+            if (bounce > 3) {
+                float q = fmaxf(0.05f, 1.0f - fmaxf(throughput.x, fmaxf(throughput.y, throughput.z)));
+                if (rand01(rng) < q) {
+                    break;
+                }
+                throughput = throughput * (1.0f / (1.0f - q));
+            }
+
+            // Trace bounce ray using unified intersection
+            float rayOffset = params.sceneScale * 1e-6f;
+            ray = Ray(hitPos + normal * rayOffset, wi);
+            HitData bounceHit = traceRayIntersection(ray, intersectionMode, mesh, params.material);
+
+            hit = bounceHit.hit;
+            if (!hit) {
+                // Bounce ray missed - sample environment
+                Vec3 envLight = sampleEnvironmentWithClamp(env, ray.direction, params.maxRadiance);
+                radiance += mul(throughput, envLight);
+                break;
+            }
+
+            // Update ray state for next bounce
+            hitPos = bounceHit.position;
+            normal = bounceHit.normal;
+            albedo = bounceHit.albedo;
+        }
+
+        sum += radiance;
+    }
+
+    // Accumulate and output
+    Vec3 prev = accum[pixelIdx];
+    Vec3 newSum = prev + sum;
+    accum[pixelIdx] = newSum;
+    float invSamples = 1.0f / static_cast<float>(params.sampleOffset + params.samplesPerPixel);
+    Vec3 color = newSum * invSamples;
+
+    color = encodeSrgb(color);
+
+    output[pixelIdx] = make_uchar4(
+            static_cast<unsigned char>(color.x * 255.0f),
+            static_cast<unsigned char>(color.y * 255.0f),
+            static_cast<unsigned char>(color.z * 255.0f),
+            255);
 }
 
 // ---------------------------------------------------------------------------
@@ -1120,57 +1392,6 @@ __global__ void applyNeuralOutputKernel(const __half* outputs,
         hitColors[srcBase + 1] = 0.0f;
         hitColors[srcBase + 2] = 0.0f;
         hitFlags[sampleIdx] = 0;
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Primary ray tracing for original mesh (non-neural path).
-// ---------------------------------------------------------------------------
-__global__ void renderOriginalKernel(float* hitPositions,
-                                     float* hitNormals,
-                                     float* hitColors,
-                                     int* hitFlags,
-                                     RenderParams params,
-                                     MeshDeviceView mesh) {
-    int x = blockIdx.x * blockDim.x + threadIdx.x;
-    int y = blockIdx.y * blockDim.y + threadIdx.y;
-    if (x >= params.width || y >= params.height) {
-        return;
-    }
-
-    int pixelIdx = y * params.width + x;
-    for (int s = 0; s < params.samplesPerPixel; ++s) {
-        int sampleIdx = pixelIdx + s * params.pixelCount;
-        int base = sampleIdx * 3;
-        uint32_t rng = initRng(pixelIdx, params.sampleOffset, s);
-        Ray ray = generatePrimaryRay(x, y, params, rng);
-
-        HitInfo bestHit{false, 0.0f, Vec3(), Vec3(), Vec2(), -1, -1};
-        bool hit = traceMesh(ray, mesh, &bestHit);
-        if (hit) {
-            Vec3 hitPos = ray.at(bestHit.distance);
-            hitPositions[base + 0] = hitPos.x;
-            hitPositions[base + 1] = hitPos.y;
-            hitPositions[base + 2] = hitPos.z;
-            hitNormals[base + 0] = bestHit.normal.x;
-            hitNormals[base + 1] = bestHit.normal.y;
-            hitNormals[base + 2] = bestHit.normal.z;
-            hitColors[base + 0] = bestHit.color.x;
-            hitColors[base + 1] = bestHit.color.y;
-            hitColors[base + 2] = bestHit.color.z;
-            hitFlags[sampleIdx] = 1;
-        } else {
-            hitPositions[base + 0] = 0.0f;
-            hitPositions[base + 1] = 0.0f;
-            hitPositions[base + 2] = 0.0f;
-            hitNormals[base + 0] = 0.0f;
-            hitNormals[base + 1] = 0.0f;
-            hitNormals[base + 2] = 0.0f;
-            hitColors[base + 0] = 0.0f;
-            hitColors[base + 1] = 0.0f;
-            hitColors[base + 2] = 0.0f;
-            hitFlags[sampleIdx] = 0;
-        }
     }
 }
 
@@ -2330,9 +2551,26 @@ void RendererNeural::render(const Vec3& camPos, std::vector<uchar4>& hostPixels)
                       "cudaMemcpy activeCount");
         }
 
-        // 4. Path trace from neural hits using original mesh for bounces.
+        // 4. Path trace from neural hits using unified path tracer.
         // (Step numbers continue from multi-segment iteration above)
         if (!lambertView_) {
+            // Use unified path tracing kernel (replaces initNeuralPathKernel, renderBounceKernel,
+            // integrateNeuralBounceKernel, and finalizeNeuralPathKernel)
+            unifiedPathTraceKernel<<<grid, block>>>(
+                    devicePixels_,
+                    accum_,
+                    hitPositions_,
+                    hitNormals_,
+                    hitColors_,
+                    hitFlags_,
+                    params,
+                    classicView,
+                    envView,
+                    NEURAL);
+            checkCuda(cudaGetLastError(), "unifiedPathTraceKernel launch");
+            accumSampleCount_ += static_cast<uint32_t>(samplesPerPixel);
+
+            /* OLD CODE - TO BE REMOVED IN PHASE 6
             initNeuralPathKernel<<<grid, block>>>(
                     pathThroughput_,
                     pathRadiance_,
@@ -2424,6 +2662,7 @@ void RendererNeural::render(const Vec3& camPos, std::vector<uchar4>& hostPixels)
                     params);
             checkCuda(cudaGetLastError(), "finalizeNeuralPathKernel launch");
             accumSampleCount_ += static_cast<uint32_t>(samplesPerPixel);
+            */  // END OLD CODE
         } else {
             lambertKernel<<<grid, block>>>(
                     devicePixels_,
@@ -2436,15 +2675,15 @@ void RendererNeural::render(const Vec3& camPos, std::vector<uchar4>& hostPixels)
             accumSampleCount_ = 0;
         }
     } else {
-        // --- Standard original mesh path tracing ---
-        renderOriginalKernel<<<grid, block>>>(
+        // --- Ground truth mesh path tracing (unified kernels) ---
+        intersectGroundTruthKernel<<<grid, block>>>(
                 hitPositions_,
                 hitNormals_,
                 hitColors_,
                 hitFlags_,
                 params,
                 classicView);
-        checkCuda(cudaGetLastError(), "renderOriginalKernel launch");
+        checkCuda(cudaGetLastError(), "intersectGroundTruthKernel launch");
 
         if (lambertView_) {
             lambertKernel<<<grid, block>>>(
@@ -2457,7 +2696,7 @@ void RendererNeural::render(const Vec3& camPos, std::vector<uchar4>& hostPixels)
             checkCuda(cudaGetLastError(), "lambertKernel launch");
             accumSampleCount_ = 0;
         } else {
-            pathTraceKernel<<<grid, block>>>(
+            unifiedPathTraceKernel<<<grid, block>>>(
                     devicePixels_,
                     accum_,
                     hitPositions_,
@@ -2466,8 +2705,9 @@ void RendererNeural::render(const Vec3& camPos, std::vector<uchar4>& hostPixels)
                     hitFlags_,
                     params,
                     classicView,
-                    envView);
-            checkCuda(cudaGetLastError(), "pathTraceKernel launch");
+                    envView,
+                    GT_MESH);
+            checkCuda(cudaGetLastError(), "unifiedPathTraceKernel launch");
             accumSampleCount_ += static_cast<uint32_t>(samplesPerPixel);
         }
     }
