@@ -636,17 +636,280 @@ __global__ void intersectGroundTruthKernel(float* hitPositions,
     }
 }
 
-// Unified path tracing kernel (works for both GT and neural intersection modes)
-__global__ void unifiedPathTraceKernel(uchar4* output,
-                                       Vec3* accum,
-                                       const float* hitPositions,
-                                       const float* hitNormals,
-                                       const float* hitColors,
-                                       const int* hitFlags,
-                                       RenderParams params,
-                                       MeshDeviceView mesh,
-                                       EnvironmentDeviceView env,
-                                       IntersectionMode intersectionMode) {
+// ---------------------------------------------------------------------------
+// Wavefront Path Tracing Kernels (Shared between GT and Neural)
+// ---------------------------------------------------------------------------
+
+// Initialize path state from primary hits
+__global__ void initializePathStateKernel(Vec3* throughput,
+                                          Vec3* radiance,
+                                          int* active,
+                                          const int* hitFlags,
+                                          const float* hitNormals,
+                                          const float* hitColors,
+                                          RenderParams params,
+                                          EnvironmentDeviceView env) {
+    int x = blockIdx.x * blockDim.x + threadIdx.x;
+    int y = blockIdx.y * blockDim.y + threadIdx.y;
+    if (x >= params.width || y >= params.height) {
+        return;
+    }
+
+    int pixelIdx = y * params.width + x;
+    for (int s = 0; s < params.samplesPerPixel; ++s) {
+        int sampleIdx = pixelIdx + s * params.pixelCount;
+        uint32_t rng = initRng(pixelIdx, params.sampleOffset, s);
+        Ray primaryRay = generatePrimaryRay(x, y, params, rng);
+
+        Vec3 sampleRadiance(0.0f, 0.0f, 0.0f);
+        Vec3 sampleThroughput(1.0f, 1.0f, 1.0f);
+        int isActive = 0;
+
+        if (hitFlags[sampleIdx]) {
+            int base = sampleIdx * 3;
+            Vec3 normal(hitNormals[base + 0], hitNormals[base + 1], hitNormals[base + 2]);
+            float nlen = length(normal);
+            if (nlen > 0.0f) {
+                normal = normal / nlen;
+            } else {
+                normal = Vec3(0.0f, 1.0f, 0.0f);
+            }
+            if (dot(normal, primaryRay.direction) > 0.0f) {
+                throughput[sampleIdx] = Vec3(0.0f, 0.0f, 0.0f);
+                radiance[sampleIdx] = Vec3(0.0f, 0.0f, 0.0f);
+                active[sampleIdx] = 0;
+                continue;
+            }
+            sampleThroughput = Vec3(hitColors[base + 0], hitColors[base + 1], hitColors[base + 2]);
+            isActive = 1;
+        } else {
+            Vec3 envLight = sampleEnvironmentWithClamp(env, primaryRay.direction, params.maxRadiance);
+            sampleRadiance = envLight;
+        }
+
+        throughput[sampleIdx] = sampleThroughput;
+        radiance[sampleIdx] = sampleRadiance;
+        active[sampleIdx] = isActive;
+    }
+}
+
+// Sample bounce directions using Disney BRDF (shared kernel)
+__global__ void sampleBounceDirectionsKernel(const float* hitPositions,
+                                             const float* hitNormals,
+                                             const float* hitColors,
+                                             const int* hitFlags,
+                                             int* pathActive,
+                                             RenderParams params,
+                                             float* bounceOrigins,      // Output
+                                             float* bounceDirections,   // Output
+                                             float* bouncePdfs,         // Output
+                                             float* bounceBRDFs) {      // Output (f * cos / pdf)
+    int x = blockIdx.x * blockDim.x + threadIdx.x;
+    int y = blockIdx.y * blockDim.y + threadIdx.y;
+    if (x >= params.width || y >= params.height) {
+        return;
+    }
+
+    int pixelIdx = y * params.width + x;
+    for (int s = 0; s < params.samplesPerPixel; ++s) {
+        int sampleIdx = pixelIdx + s * params.pixelCount;
+        int base = sampleIdx * 3;
+
+        if (!hitFlags[sampleIdx] || (pathActive && !pathActive[sampleIdx])) {
+            bounceOrigins[base + 0] = 0.0f;
+            bounceOrigins[base + 1] = 0.0f;
+            bounceOrigins[base + 2] = 0.0f;
+            bounceDirections[base + 0] = 0.0f;
+            bounceDirections[base + 1] = 0.0f;
+            bounceDirections[base + 2] = 0.0f;
+            bouncePdfs[sampleIdx] = 0.0f;
+            bounceBRDFs[base + 0] = 0.0f;
+            bounceBRDFs[base + 1] = 0.0f;
+            bounceBRDFs[base + 2] = 0.0f;
+            continue;
+        }
+
+        uint32_t rng = initRng(pixelIdx, params.sampleOffset, s);
+        Ray primaryRay = generatePrimaryRay(x, y, params, rng);
+
+        Vec3 hitPos(hitPositions[base + 0], hitPositions[base + 1], hitPositions[base + 2]);
+        Vec3 normal(hitNormals[base + 0], hitNormals[base + 1], hitNormals[base + 2]);
+        Vec3 albedo(hitColors[base + 0], hitColors[base + 1], hitColors[base + 2]);
+
+        // Normalize normal
+        float nlen = length(normal);
+        if (nlen > 0.0f) {
+            normal = normal / nlen;
+        } else {
+            normal = Vec3(0.0f, 1.0f, 0.0f);
+        }
+
+        // Check for back-facing hit
+        if (dot(normal, primaryRay.direction) > 0.0f) {
+            if (pathActive) pathActive[sampleIdx] = 0;
+            bouncePdfs[sampleIdx] = 0.0f;
+            continue;
+        }
+
+        // Build tangent space
+        Vec3 tangent, bitangent;
+        buildTangentSpace(normal, &tangent, &bitangent);
+
+        // Create material with texture-modulated base color
+        Material surfaceMat = params.material;
+        surfaceMat.base_color = mul(surfaceMat.base_color, albedo);
+
+        // Sample Disney BRDF for bounce direction
+        Vec3 wo = primaryRay.direction * -1.0f;
+        float u1 = rand01(rng);
+        float u2 = rand01(rng);
+        float u3 = rand01(rng);
+        float pdf;
+        Vec3 wi = disney_sample(surfaceMat, normal, wo, u1, u2, u3, &pdf);
+
+        if (pdf <= 0.0f) {
+            if (pathActive) pathActive[sampleIdx] = 0;
+            bouncePdfs[sampleIdx] = 0.0f;
+            continue;
+        }
+
+        // Evaluate Disney BRDF
+        Vec3 f = disney_eval(surfaceMat, normal, wo, wi, tangent, bitangent);
+
+        // Compute BRDF weight (f * cos / pdf)
+        float cos_theta = fmaxf(0.0f, dot(normal, wi));
+        Vec3 brdfWeight = f * (cos_theta / pdf);
+
+        // Output bounce ray
+        float rayOffset = params.sceneScale * 1e-6f;
+        Vec3 origin = hitPos + normal * rayOffset;
+
+        bounceOrigins[base + 0] = origin.x;
+        bounceOrigins[base + 1] = origin.y;
+        bounceOrigins[base + 2] = origin.z;
+        bounceDirections[base + 0] = wi.x;
+        bounceDirections[base + 1] = wi.y;
+        bounceDirections[base + 2] = wi.z;
+        bouncePdfs[sampleIdx] = pdf;
+        bounceBRDFs[base + 0] = brdfWeight.x;
+        bounceBRDFs[base + 1] = brdfWeight.y;
+        bounceBRDFs[base + 2] = brdfWeight.z;
+    }
+}
+
+// Trace bounce rays against GT mesh (GT mode only)
+__global__ void traceGroundTruthBouncesKernel(const float* bounceOrigins,
+                                              const float* bounceDirections,
+                                              const float* bouncePdfs,
+                                              MeshDeviceView mesh,
+                                              RenderParams params,
+                                              float* bounceHitPositions,   // Output
+                                              float* bounceHitNormals,     // Output
+                                              float* bounceHitColors,      // Output
+                                              int* bounceHitFlags) {       // Output
+    int x = blockIdx.x * blockDim.x + threadIdx.x;
+    int y = blockIdx.y * blockDim.y + threadIdx.y;
+    if (x >= params.width || y >= params.height) {
+        return;
+    }
+
+    int pixelIdx = y * params.width + x;
+    for (int s = 0; s < params.samplesPerPixel; ++s) {
+        int sampleIdx = pixelIdx + s * params.pixelCount;
+        int base = sampleIdx * 3;
+
+        if (bouncePdfs[sampleIdx] <= 0.0f) {
+            bounceHitFlags[sampleIdx] = 0;
+            continue;
+        }
+
+        Vec3 origin(bounceOrigins[base + 0], bounceOrigins[base + 1], bounceOrigins[base + 2]);
+        Vec3 direction(bounceDirections[base + 0], bounceDirections[base + 1], bounceDirections[base + 2]);
+        Ray bounceRay(origin, direction);
+
+        HitInfo hitInfo{false, 0.0f, Vec3(), Vec3(), Vec2(), -1, -1};
+        bool hit = traceMesh(bounceRay, mesh, &hitInfo);
+
+        if (hit) {
+            Vec3 hitPos = bounceRay.at(hitInfo.distance);
+            bounceHitPositions[base + 0] = hitPos.x;
+            bounceHitPositions[base + 1] = hitPos.y;
+            bounceHitPositions[base + 2] = hitPos.z;
+            bounceHitNormals[base + 0] = hitInfo.normal.x;
+            bounceHitNormals[base + 1] = hitInfo.normal.y;
+            bounceHitNormals[base + 2] = hitInfo.normal.z;
+            bounceHitColors[base + 0] = hitInfo.color.x;
+            bounceHitColors[base + 1] = hitInfo.color.y;
+            bounceHitColors[base + 2] = hitInfo.color.z;
+            bounceHitFlags[sampleIdx] = 1;
+        } else {
+            bounceHitFlags[sampleIdx] = 0;
+        }
+    }
+}
+
+// Integrate bounce results and update path state (shared kernel)
+__global__ void integrateBounceKernel(Vec3* throughput,
+                                      Vec3* radiance,
+                                      int* active,
+                                      const int* bounceHitFlags,
+                                      const float* bounceDirections,
+                                      const float* bounceBRDFs,
+                                      int bounceIndex,
+                                      RenderParams params,
+                                      EnvironmentDeviceView env) {
+    int x = blockIdx.x * blockDim.x + threadIdx.x;
+    int y = blockIdx.y * blockDim.y + threadIdx.y;
+    if (x >= params.width || y >= params.height) {
+        return;
+    }
+
+    int pixelIdx = y * params.width + x;
+    for (int s = 0; s < params.samplesPerPixel; ++s) {
+        int sampleIdx = pixelIdx + s * params.pixelCount;
+        if (!active[sampleIdx]) {
+            continue;
+        }
+
+        int base = sampleIdx * 3;
+
+        if (!bounceHitFlags[sampleIdx]) {
+            // Ray missed - sample environment and terminate
+            Vec3 envDir(bounceDirections[base + 0], bounceDirections[base + 1], bounceDirections[base + 2]);
+            Vec3 envLight = sampleEnvironmentWithClamp(env, envDir, params.maxRadiance);
+            radiance[sampleIdx] = radiance[sampleIdx] + mul(throughput[sampleIdx], envLight);
+            active[sampleIdx] = 0;
+            continue;
+        }
+
+        if (bounceIndex >= params.maxBounces) {
+            active[sampleIdx] = 0;
+            continue;
+        }
+
+        // Update throughput with BRDF weight
+        Vec3 brdfWeight(bounceBRDFs[base + 0], bounceBRDFs[base + 1], bounceBRDFs[base + 2]);
+        throughput[sampleIdx] = mul(throughput[sampleIdx], brdfWeight);
+
+        // Russian roulette path termination (after 3 bounces)
+        if (bounceIndex > 3) {
+            Vec3 tp = throughput[sampleIdx];
+            float q = fmaxf(0.05f, 1.0f - fmaxf(tp.x, fmaxf(tp.y, tp.z)));
+            uint32_t rng = initRng(pixelIdx, params.sampleOffset + bounceIndex, s);
+            if (rand01(rng) < q) {
+                active[sampleIdx] = 0;
+                continue;
+            }
+            throughput[sampleIdx] = tp * (1.0f / (1.0f - q));
+        }
+    }
+}
+
+// Finalize and output (shared kernel)
+__global__ void finalizePathTracingKernel(uchar4* output,
+                                          Vec3* accum,
+                                          const Vec3* radiance,
+                                          RenderParams params) {
     int x = blockIdx.x * blockDim.x + threadIdx.x;
     int y = blockIdx.y * blockDim.y + threadIdx.y;
     if (x >= params.width || y >= params.height) {
@@ -655,132 +918,12 @@ __global__ void unifiedPathTraceKernel(uchar4* output,
 
     int pixelIdx = y * params.width + x;
     Vec3 sum(0.0f, 0.0f, 0.0f);
-    if (params.samplesPerPixel <= 0 || params.pixelCount <= 0) {
-        return;
-    }
 
     for (int s = 0; s < params.samplesPerPixel; ++s) {
         int sampleIdx = pixelIdx + s * params.pixelCount;
-        uint32_t rng = initRng(pixelIdx, params.sampleOffset, s);
-        Ray primaryRay = generatePrimaryRay(x, y, params, rng);
-        Vec3 radiance(0.0f, 0.0f, 0.0f);
-        Vec3 throughput(1.0f, 1.0f, 1.0f);
-
-        // Load primary hit data
-        bool hit = hitFlags[sampleIdx] != 0;
-        Vec3 hitPos;
-        Vec3 normal;
-        Vec3 albedo(1.0f, 1.0f, 1.0f);
-        if (hit) {
-            hitPos = Vec3(
-                    hitPositions[sampleIdx * 3 + 0],
-                    hitPositions[sampleIdx * 3 + 1],
-                    hitPositions[sampleIdx * 3 + 2]);
-            normal = Vec3(
-                    hitNormals[sampleIdx * 3 + 0],
-                    hitNormals[sampleIdx * 3 + 1],
-                    hitNormals[sampleIdx * 3 + 2]);
-            albedo = Vec3(
-                    hitColors[sampleIdx * 3 + 0],
-                    hitColors[sampleIdx * 3 + 1],
-                    hitColors[sampleIdx * 3 + 2]);
-        }
-
-        Ray ray = primaryRay;
-        int maxBounces = params.maxBounces;
-        if (maxBounces < 0) {
-            maxBounces = 0;
-        }
-
-        // Path tracing loop
-        for (int bounce = 0; bounce <= maxBounces; ++bounce) {
-            if (!hit) {
-                // Ray missed - sample environment
-                Vec3 envLight = sampleEnvironmentWithClamp(env, ray.direction, params.maxRadiance);
-                radiance += mul(throughput, envLight);
-                break;
-            }
-            if (bounce == maxBounces) {
-                break;
-            }
-
-            // Normalize normal
-            float nlen = length(normal);
-            if (nlen > 0.0f) {
-                normal = normal / nlen;
-            } else {
-                normal = Vec3(0.0f, 1.0f, 0.0f);
-            }
-
-            // Check for back-facing hit
-            if (dot(normal, ray.direction) > 0.0f) {
-                radiance = Vec3(0.0f, 0.0f, 0.0f);
-                break;
-            }
-
-            // Build tangent space for anisotropic materials
-            Vec3 tangent, bitangent;
-            buildTangentSpace(normal, &tangent, &bitangent);
-
-            // Create material with texture-modulated base color
-            Material surfaceMat = params.material;
-            surfaceMat.base_color = mul(surfaceMat.base_color, albedo);
-
-            // Sample Disney BRDF for bounce direction
-            Vec3 wo = ray.direction * -1.0f;
-            float u1 = rand01(rng);
-            float u2 = rand01(rng);
-            float u3 = rand01(rng);
-            float pdf;
-            Vec3 wi = disney_sample(surfaceMat, normal, wo, u1, u2, u3, &pdf);
-
-            if (pdf <= 0.0f) {
-                break;
-            }
-
-            // Evaluate Disney BRDF
-            Vec3 f = disney_eval(surfaceMat, normal, wo, wi, tangent, bitangent);
-
-            // Update throughput with BRDF, cosine term, and PDF
-            float cos_theta = fmaxf(0.0f, dot(normal, wi));
-            if (cos_theta > 0.0f) {
-                throughput = mul(throughput, f * (cos_theta / pdf));
-            } else {
-                break;
-            }
-
-            // Russian roulette path termination (after 3 bounces)
-            if (bounce > 3) {
-                float q = fmaxf(0.05f, 1.0f - fmaxf(throughput.x, fmaxf(throughput.y, throughput.z)));
-                if (rand01(rng) < q) {
-                    break;
-                }
-                throughput = throughput * (1.0f / (1.0f - q));
-            }
-
-            // Trace bounce ray using unified intersection
-            float rayOffset = params.sceneScale * 1e-6f;
-            ray = Ray(hitPos + normal * rayOffset, wi);
-            HitData bounceHit = traceRayIntersection(ray, intersectionMode, mesh, params.material);
-
-            hit = bounceHit.hit;
-            if (!hit) {
-                // Bounce ray missed - sample environment
-                Vec3 envLight = sampleEnvironmentWithClamp(env, ray.direction, params.maxRadiance);
-                radiance += mul(throughput, envLight);
-                break;
-            }
-
-            // Update ray state for next bounce
-            hitPos = bounceHit.position;
-            normal = bounceHit.normal;
-            albedo = bounceHit.albedo;
-        }
-
-        sum += radiance;
+        sum += radiance[sampleIdx];
     }
 
-    // Accumulate and output
     Vec3 prev = accum[pixelIdx];
     Vec3 newSum = prev + sum;
     accum[pixelIdx] = newSum;
@@ -796,7 +939,6 @@ __global__ void unifiedPathTraceKernel(uchar4* output,
             255);
 }
 
-// ---------------------------------------------------------------------------
 // Shell tracing: for each pixel, trace outer shell then inner shell.
 // ---------------------------------------------------------------------------
 __global__ void traceShellsKernel(float* outerHitPositions,
@@ -2551,27 +2693,11 @@ void RendererNeural::render(const Vec3& camPos, std::vector<uchar4>& hostPixels)
                       "cudaMemcpy activeCount");
         }
 
-        // 4. Path trace from neural hits using unified path tracer.
+        // 4. Path trace from neural hits using wavefront architecture.
         // (Step numbers continue from multi-segment iteration above)
         if (!lambertView_) {
-            // Use unified path tracing kernel (replaces initNeuralPathKernel, renderBounceKernel,
-            // integrateNeuralBounceKernel, and finalizeNeuralPathKernel)
-            unifiedPathTraceKernel<<<grid, block>>>(
-                    devicePixels_,
-                    accum_,
-                    hitPositions_,
-                    hitNormals_,
-                    hitColors_,
-                    hitFlags_,
-                    params,
-                    classicView,
-                    envView,
-                    NEURAL);
-            checkCuda(cudaGetLastError(), "unifiedPathTraceKernel launch");
-            accumSampleCount_ += static_cast<uint32_t>(samplesPerPixel);
-
-            /* OLD CODE - TO BE REMOVED IN PHASE 6
-            initNeuralPathKernel<<<grid, block>>>(
+            // Initialize path state from neural primary hits
+            initializePathStateKernel<<<grid, block>>>(
                     pathThroughput_,
                     pathRadiance_,
                     pathActive_,
@@ -2580,89 +2706,72 @@ void RendererNeural::render(const Vec3& camPos, std::vector<uchar4>& hostPixels)
                     hitColors_,
                     params,
                     envView);
-            checkCuda(cudaGetLastError(), "initNeuralPathKernel launch");
+            checkCuda(cudaGetLastError(), "initializePathStateKernel launch");
 
-            if (maxBounces > 0) {
-                renderBounceKernel<<<grid, block>>>(
-                        hitPositions_,
-                        hitNormals_,
-                        hitFlags_,
+            // Wavefront bounce loop for neural mode
+            // Neural bounces trace against outer shell (not original mesh)
+            float* currentHitPos = hitPositions_;
+            float* currentHitNormals = hitNormals_;
+            float* currentHitColors = hitColors_;
+            int* currentHitFlags = hitFlags_;
+
+            for (int bounce = 1; bounce <= maxBounces; ++bounce) {
+                // Sample bounce directions (Disney BRDF - shared with GT)
+                sampleBounceDirectionsKernel<<<grid, block>>>(
+                        currentHitPos,
+                        currentHitNormals,
+                        currentHitColors,
+                        currentHitFlags,
                         pathActive_,
                         params,
-                        classicView,
+                        bounceOrigins_,
+                        bounceDirections_,
+                        bouncePdfs_,
+                        bounceBRDFs_);
+                checkCuda(cudaGetLastError(), "sampleBounceDirectionsKernel launch");
+
+                // Trace bounce rays against outer shell (NOT original mesh!)
+                traceGroundTruthBouncesKernel<<<grid, block>>>(
+                        bounceOrigins_,
+                        bounceDirections_,
+                        bouncePdfs_,
+                        outerView,  // Use outer shell for neural mode
+                        params,
                         bouncePositions_,
                         bounceNormals_,
                         bounceColors_,
-                        bounceHitFlags_,
-                        bounceDirs_);
-                checkCuda(cudaGetLastError(), "renderBounceKernel launch");
+                        bounceHitFlags_);
+                checkCuda(cudaGetLastError(), "traceGroundTruthBouncesKernel launch");
 
-                integrateNeuralBounceKernel<<<grid, block>>>(
+                // Integrate bounce results (shared with GT)
+                integrateBounceKernel<<<grid, block>>>(
                         pathThroughput_,
                         pathRadiance_,
                         pathActive_,
                         bounceHitFlags_,
-                        bounceColors_,
-                        bounceDirs_,
-                        1,
+                        bounceDirections_,
+                        bounceBRDFs_,
+                        bounce,
                         params,
                         envView);
-                checkCuda(cudaGetLastError(), "integrateNeuralBounceKernel launch");
+                checkCuda(cudaGetLastError(), "integrateBounceKernel launch");
 
-                float* inPositions = bouncePositions_;
-                float* inNormals = bounceNormals_;
-                int* inFlags = bounceHitFlags_;
-                float* inDirs = bounceDirs_;
-                float* outPositions = bounce2Positions_;
-                float* outNormals = bounce2Normals_;
-                float* outColors = bounce2Colors_;
-                int* outFlags = bounce2HitFlags_;
-                float* outDirs = bounce2Dirs_;
-
-                for (int bounce = 2; bounce <= maxBounces; ++bounce) {
-                    renderBounceFromStateKernel<<<grid, block>>>(
-                            inPositions,
-                            inNormals,
-                            inFlags,
-                            inDirs,
-                            pathActive_,
-                            static_cast<uint32_t>(bounce),
-                            params,
-                            classicView,
-                            outPositions,
-                            outNormals,
-                            outColors,
-                            outFlags,
-                            outDirs);
-                    checkCuda(cudaGetLastError(), "renderBounceFromStateKernel launch");
-
-                    integrateNeuralBounceKernel<<<grid, block>>>(
-                            pathThroughput_,
-                            pathRadiance_,
-                            pathActive_,
-                            outFlags,
-                            outColors,
-                            outDirs,
-                            bounce,
-                            params,
-                            envView);
-                    checkCuda(cudaGetLastError(), "integrateNeuralBounceKernel launch");
-
-                    std::swap(inPositions, outPositions);
-                    std::swap(inNormals, outNormals);
-                    std::swap(inFlags, outFlags);
-                    std::swap(inDirs, outDirs);
-                }
+                // Swap buffers for next bounce
+                currentHitPos = bouncePositions_;
+                currentHitNormals = bounceNormals_;
+                currentHitColors = bounceColors_;
+                currentHitFlags = bounceHitFlags_;
             }
 
-            finalizeNeuralPathKernel<<<grid, block>>>(
+            // Finalize and output
+            finalizePathTracingKernel<<<grid, block>>>(
                     devicePixels_,
                     accum_,
                     pathRadiance_,
                     params);
-            checkCuda(cudaGetLastError(), "finalizeNeuralPathKernel launch");
+            checkCuda(cudaGetLastError(), "finalizePathTracingKernel launch");
             accumSampleCount_ += static_cast<uint32_t>(samplesPerPixel);
-            */  // END OLD CODE
+
         } else {
             lambertKernel<<<grid, block>>>(
                     devicePixels_,
@@ -2675,7 +2784,8 @@ void RendererNeural::render(const Vec3& camPos, std::vector<uchar4>& hostPixels)
             accumSampleCount_ = 0;
         }
     } else {
-        // --- Ground truth mesh path tracing (unified kernels) ---
+        // --- Ground truth mesh path tracing (wavefront architecture) ---
+        // 1. Trace primary rays
         intersectGroundTruthKernel<<<grid, block>>>(
                 hitPositions_,
                 hitNormals_,
@@ -2696,18 +2806,79 @@ void RendererNeural::render(const Vec3& camPos, std::vector<uchar4>& hostPixels)
             checkCuda(cudaGetLastError(), "lambertKernel launch");
             accumSampleCount_ = 0;
         } else {
-            unifiedPathTraceKernel<<<grid, block>>>(
-                    devicePixels_,
-                    accum_,
-                    hitPositions_,
+            // 2. Initialize path state
+            initializePathStateKernel<<<grid, block>>>(
+                    pathThroughput_,
+                    pathRadiance_,
+                    pathActive_,
+                    hitFlags_,
                     hitNormals_,
                     hitColors_,
-                    hitFlags_,
                     params,
-                    classicView,
-                    envView,
-                    GT_MESH);
-            checkCuda(cudaGetLastError(), "unifiedPathTraceKernel launch");
+                    envView);
+            checkCuda(cudaGetLastError(), "initializePathStateKernel launch");
+
+            // 3. Wavefront bounce loop
+            float* currentHitPos = hitPositions_;
+            float* currentHitNormals = hitNormals_;
+            float* currentHitColors = hitColors_;
+            int* currentHitFlags = hitFlags_;
+
+            for (int bounce = 1; bounce <= maxBounces; ++bounce) {
+                // Sample bounce directions (Disney BRDF)
+                sampleBounceDirectionsKernel<<<grid, block>>>(
+                        currentHitPos,
+                        currentHitNormals,
+                        currentHitColors,
+                        currentHitFlags,
+                        pathActive_,
+                        params,
+                        bounceOrigins_,
+                        bounceDirections_,
+                        bouncePdfs_,
+                        bounceBRDFs_);
+                checkCuda(cudaGetLastError(), "sampleBounceDirectionsKernel launch");
+
+                // Trace bounce rays against GT mesh
+                traceGroundTruthBouncesKernel<<<grid, block>>>(
+                        bounceOrigins_,
+                        bounceDirections_,
+                        bouncePdfs_,
+                        classicView,
+                        params,
+                        bouncePositions_,
+                        bounceNormals_,
+                        bounceColors_,
+                        bounceHitFlags_);
+                checkCuda(cudaGetLastError(), "traceGroundTruthBouncesKernel launch");
+
+                // Integrate bounce results
+                integrateBounceKernel<<<grid, block>>>(
+                        pathThroughput_,
+                        pathRadiance_,
+                        pathActive_,
+                        bounceHitFlags_,
+                        bounceDirections_,
+                        bounceBRDFs_,
+                        bounce,
+                        params,
+                        envView);
+                checkCuda(cudaGetLastError(), "integrateBounceKernel launch");
+
+                // Swap buffers for next bounce
+                currentHitPos = bouncePositions_;
+                currentHitNormals = bounceNormals_;
+                currentHitColors = bounceColors_;
+                currentHitFlags = bounceHitFlags_;
+            }
+
+            // 4. Finalize and output
+            finalizePathTracingKernel<<<grid, block>>>(
+                    devicePixels_,
+                    accum_,
+                    pathRadiance_,
+                    params);
+            checkCuda(cudaGetLastError(), "finalizePathTracingKernel launch");
             accumSampleCount_ += static_cast<uint32_t>(samplesPerPixel);
         }
     }
@@ -2764,6 +2935,10 @@ void RendererNeural::release() {
     freePtr(pathThroughput_);
     freePtr(pathRadiance_);
     freePtr(pathActive_);
+    freePtr(bounceOrigins_);
+    freePtr(bounceDirections_);
+    freePtr(bouncePdfs_);
+    freePtr(bounceBRDFs_);
     freePtr(rayActiveFlags_);
     freePtr(accumT_);
     freePtr(currentEntryPos_);
@@ -2858,6 +3033,10 @@ bool RendererNeural::ensureNetworkBuffers(size_t elementCount) {
     freePtr(pathThroughput_);
     freePtr(pathRadiance_);
     freePtr(pathActive_);
+    freePtr(bounceOrigins_);
+    freePtr(bounceDirections_);
+    freePtr(bouncePdfs_);
+    freePtr(bounceBRDFs_);
     freePtr(rayActiveFlags_);
     freePtr(accumT_);
     freePtr(currentEntryPos_);
@@ -2930,6 +3109,12 @@ bool RendererNeural::ensureNetworkBuffers(size_t elementCount) {
     checkCuda(cudaMalloc(&pathThroughput_, elementCount * sizeof(Vec3)), "cudaMalloc pathThroughput");
     checkCuda(cudaMalloc(&pathRadiance_, elementCount * sizeof(Vec3)), "cudaMalloc pathRadiance");
     checkCuda(cudaMalloc(&pathActive_, intBytes), "cudaMalloc pathActive");
+
+    // Wavefront buffers.
+    checkCuda(cudaMalloc(&bounceOrigins_, vec3Bytes), "cudaMalloc bounceOrigins");
+    checkCuda(cudaMalloc(&bounceDirections_, vec3Bytes), "cudaMalloc bounceDirections");
+    checkCuda(cudaMalloc(&bouncePdfs_, elementCount * sizeof(float)), "cudaMalloc bouncePdfs");
+    checkCuda(cudaMalloc(&bounceBRDFs_, vec3Bytes), "cudaMalloc bounceBRDFs");
 
     // Multi-segment iteration state buffers.
     checkCuda(cudaMalloc(&rayActiveFlags_, intBytes), "cudaMalloc rayActiveFlags");

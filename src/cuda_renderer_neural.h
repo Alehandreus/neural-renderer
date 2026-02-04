@@ -114,6 +114,12 @@ class RendererNeural final {
     Vec3* pathRadiance_ = nullptr;
     int* pathActive_ = nullptr;
 
+    // Wavefront path tracing buffers.
+    float* bounceOrigins_ = nullptr;      // 3 floats per sample (ray origins)
+    float* bounceDirections_ = nullptr;   // 3 floats per sample (ray directions)
+    float* bouncePdfs_ = nullptr;         // 1 float per sample (BRDF PDF)
+    float* bounceBRDFs_ = nullptr;        // 3 floats per sample (BRDF weight: f*cos/pdf)
+
     // Multi-segment iteration state buffers.
     int* rayActiveFlags_ = nullptr;      // 1 if ray still needs processing
     float* accumT_ = nullptr;            // Accumulated distance along ray
