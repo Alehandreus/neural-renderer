@@ -213,7 +213,7 @@ int main(int argc, char** argv) {
 
     double lastTime = glfwGetTime();
     bool lambertView = false;
-    bool useNeuralQuery = false;
+    bool useNeuralQuery = true;
     int bounceCount = kBounceCount;
     int samplesPerPixel = kSamplesPerPixel;
     int classicMeshIndex = 0;

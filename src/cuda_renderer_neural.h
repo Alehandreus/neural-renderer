@@ -114,6 +114,15 @@ class RendererNeural final {
     Vec3* pathRadiance_ = nullptr;
     int* pathActive_ = nullptr;
 
+    // Multi-segment iteration state buffers.
+    int* rayActiveFlags_ = nullptr;      // 1 if ray still needs processing
+    float* accumT_ = nullptr;            // Accumulated distance along ray
+    float* currentEntryPos_ = nullptr;   // Current segment entry position (3 floats per ray)
+    float* outerExitT_ = nullptr;        // Distance to outer shell exit
+    float* innerEnterT_ = nullptr;       // Distance to inner shell enter
+    int* innerHitFlags_ = nullptr;       // Whether inner shell was hit in segment
+    float* segmentExitPos_ = nullptr;    // Segment exit position (3 floats per ray)
+
     size_t bufferElements_ = 0;
     size_t accumPixels_ = 0;
 

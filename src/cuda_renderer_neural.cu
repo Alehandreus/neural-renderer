@@ -291,6 +291,131 @@ __device__ inline bool intersectAabb(const Ray& ray,
     return true;
 }
 
+// TraceMode controls which triangle faces are considered for intersection.
+// FORWARD_ONLY: Only faces facing the camera (normal dot direction < 0) - for shell entry
+// BACKWARD_ONLY: Only faces facing away (normal dot direction > 0) - for shell exit
+// ANY: All faces regardless of orientation
+// ALLOW_NEGATIVE: Also accept hits with t < 0 (behind ray origin)
+enum class TraceMode {
+    ANY,
+    FORWARD_ONLY,
+    BACKWARD_ONLY,
+};
+
+__device__ inline bool traceMeshWithMode(const Ray& ray,
+                                         MeshDeviceView mesh,
+                                         HitInfo* outHit,
+                                         TraceMode mode,
+                                         bool allowNegative = false) {
+    if (mesh.nodeCount <= 0 || mesh.triangleCount <= 0) {
+        return false;
+    }
+
+    HitInfo bestHit{false, 0.0f, Vec3(), Vec3(), Vec2(), -1, -1};
+    float closestT = 1e30f;
+    float minT = allowNegative ? -1e30f : 0.0f;
+    Vec3 invDir(
+        1.0f / ray.direction.x,
+        1.0f / ray.direction.y,
+        1.0f / ray.direction.z);
+
+    constexpr int kMaxStack = 256;
+    int stack[kMaxStack];
+    int stackSize = 0;
+    stack[stackSize++] = 0;
+
+    while (stackSize > 0) {
+        int nodeIndex = stack[--stackSize];
+        if (nodeIndex < 0 || nodeIndex >= mesh.nodeCount) {
+            continue;
+        }
+
+        const BvhNode node = mesh.nodes[nodeIndex];
+        float nodeTNear = 0.0f;
+        if (!intersectAabb(ray, invDir, node.boundsMin, node.boundsMax, closestT, &nodeTNear)) {
+            continue;
+        }
+
+        if (node.isLeaf) {
+            int start = node.first;
+            int end = start + node.count;
+            for (int i = start; i < end; ++i) {
+                const Triangle& tri = mesh.triangles[i];
+                float facingDot = dot(tri.normal, ray.direction);
+
+                // Apply trace mode filter
+                if (mode == TraceMode::FORWARD_ONLY && facingDot >= 0.0f) {
+                    continue;  // Skip back-facing triangles
+                }
+                if (mode == TraceMode::BACKWARD_ONLY && facingDot <= 0.0f) {
+                    continue;  // Skip front-facing triangles
+                }
+
+                HitInfo hit = intersectTriangle(ray, tri);
+                if (hit.hit && hit.distance > minT && hit.distance < closestT) {
+                    closestT = hit.distance;
+                    bestHit = hit;
+                    bestHit.triIndex = i;
+                }
+            }
+        } else {
+            int left = node.left;
+            int right = node.right;
+            float leftNear = 0.0f;
+            float rightNear = 0.0f;
+            bool hitLeft = false;
+            bool hitRight = false;
+            if (left >= 0 && left < mesh.nodeCount) {
+                const BvhNode leftNode = mesh.nodes[left];
+                hitLeft = intersectAabb(ray, invDir, leftNode.boundsMin, leftNode.boundsMax, closestT, &leftNear);
+            }
+            if (right >= 0 && right < mesh.nodeCount) {
+                const BvhNode rightNode = mesh.nodes[right];
+                hitRight = intersectAabb(ray, invDir, rightNode.boundsMin, rightNode.boundsMax, closestT, &rightNear);
+            }
+
+            if (hitLeft && hitRight) {
+                int first = left;
+                int second = right;
+                if (rightNear < leftNear) {
+                    first = right;
+                    second = left;
+                }
+                if (stackSize < kMaxStack) {
+                    stack[stackSize++] = second;
+                }
+                if (stackSize < kMaxStack) {
+                    stack[stackSize++] = first;
+                }
+            } else if (hitLeft) {
+                if (stackSize < kMaxStack) {
+                    stack[stackSize++] = left;
+                }
+            } else if (hitRight) {
+                if (stackSize < kMaxStack) {
+                    stack[stackSize++] = right;
+                }
+            }
+        }
+    }
+
+    if (bestHit.hit) {
+        // Sample base color texture
+        Vec3 texColor = sampleTextureDevice(
+            mesh.textures,
+            mesh.textureCount,
+            bestHit.texId,
+            bestHit.uv.x,
+            bestHit.uv.y,
+            mesh.textureNearest != 0);
+        bestHit.color = mul(bestHit.color, texColor);
+    }
+    if (outHit) {
+        *outHit = bestHit;
+    }
+    return bestHit.hit;
+}
+
 __device__ inline bool traceMesh(const Ray& ray,
                                  MeshDeviceView mesh,
                                  HitInfo* outHit,
@@ -456,6 +581,359 @@ __global__ void traceShellsKernel(float* outerHitPositions,
             innerHitPositions[base + 2] = 0.0f;
             outerHitFlags[sampleIdx] = 0;
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Multi-segment constants.
+// ---------------------------------------------------------------------------
+constexpr int kMaxSegmentIterations = 10;
+constexpr float kSegmentEpsilon = 1e-8f;
+
+// ---------------------------------------------------------------------------
+// Initial outer shell entry tracing for multi-segment method.
+// ---------------------------------------------------------------------------
+__global__ void traceOuterShellEntryKernel(
+        float* entryPositions,
+        float* entryT,
+        float* rayDirections,
+        int* activeFlags,
+        float* accumT,
+        RenderParams params,
+        MeshDeviceView outerShell) {
+    int x = blockIdx.x * blockDim.x + threadIdx.x;
+    int y = blockIdx.y * blockDim.y + threadIdx.y;
+    if (x >= params.width || y >= params.height) {
+        return;
+    }
+
+    int pixelIdx = y * params.width + x;
+    for (int s = 0; s < params.samplesPerPixel; ++s) {
+        int sampleIdx = pixelIdx + s * params.pixelCount;
+        int base = sampleIdx * 3;
+        uint32_t rng = initRng(pixelIdx, params.sampleOffset, s);
+        Ray ray = generatePrimaryRay(x, y, params, rng);
+
+        // Store ray direction
+        rayDirections[base + 0] = ray.direction.x;
+        rayDirections[base + 1] = ray.direction.y;
+        rayDirections[base + 2] = ray.direction.z;
+
+        // Trace outer shell entry (FORWARD_ONLY: allow_backward=false, allow_forward=true)
+        HitInfo outerHit{false, 0.0f, Vec3(), Vec3(), Vec2(), -1, -1};
+        bool hitOuter = traceMeshWithMode(ray, outerShell, &outerHit, TraceMode::FORWARD_ONLY, false);
+
+        if (hitOuter) {
+            Vec3 entryPos = ray.at(outerHit.distance);
+            entryPositions[base + 0] = entryPos.x;
+            entryPositions[base + 1] = entryPos.y;
+            entryPositions[base + 2] = entryPos.z;
+            entryT[sampleIdx] = outerHit.distance;
+            activeFlags[sampleIdx] = 1;
+            accumT[sampleIdx] = outerHit.distance;
+        } else {
+            entryPositions[base + 0] = 0.0f;
+            entryPositions[base + 1] = 0.0f;
+            entryPositions[base + 2] = 0.0f;
+            entryT[sampleIdx] = 0.0f;
+            activeFlags[sampleIdx] = 0;
+            accumT[sampleIdx] = 0.0f;
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Trace segment exits: outer shell backward and inner shell forward.
+// Computes exit position as min(outer_exit, inner_enter).
+// ---------------------------------------------------------------------------
+__global__ void traceSegmentExitsKernel(
+        const float* entryPositions,
+        const float* rayDirections,
+        const int* hitIndices,
+        int hitCount,
+        MeshDeviceView outerShell,
+        MeshDeviceView innerShell,
+        float* exitPositions,
+        float* outerExitT,
+        float* innerEnterT,
+        int* innerHitFlags) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= hitCount) {
+        return;
+    }
+
+    int sampleIdx = hitIndices[idx];
+    int base = sampleIdx * 3;
+
+    Vec3 entryPos(entryPositions[base + 0],
+                  entryPositions[base + 1],
+                  entryPositions[base + 2]);
+    Vec3 dir(rayDirections[base + 0],
+             rayDirections[base + 1],
+             rayDirections[base + 2]);
+
+    // Shift entry point into shell by epsilon (matching Python: x_outer_enter + ds_left * eps)
+    Vec3 shiftedEntry = entryPos + dir * kSegmentEpsilon;
+    Ray ray(shiftedEntry, dir);
+
+    // Trace outer shell EXIT (BACKWARD_ONLY: allow_backward=true, allow_forward=false)
+    HitInfo outerExit{false, 0.0f, Vec3(), Vec3(), Vec2(), -1, -1};
+    bool hitOuterExit = traceMeshWithMode(ray, outerShell, &outerExit, TraceMode::BACKWARD_ONLY, false);
+
+    float exitT;
+    if (hitOuterExit) {
+        exitT = outerExit.distance;
+    } else {
+        // Fallback: minimal segment (matching Python: x_outer_exit_t[~mask] = 1e-8)
+        exitT = kSegmentEpsilon;
+    }
+    outerExitT[sampleIdx] = exitT;
+
+    // Trace inner shell (ANY mode, allow_negative=True as in Python)
+    HitInfo innerHit{false, 0.0f, Vec3(), Vec3(), Vec2(), -1, -1};
+    bool hitInner = traceMeshWithMode(ray, innerShell, &innerHit, TraceMode::ANY, true);
+
+    float innerT;
+    if (hitInner) {
+        innerT = innerHit.distance;
+        innerHitFlags[sampleIdx] = 1;
+    } else {
+        innerT = 1e30f;  // No inner hit
+        innerHitFlags[sampleIdx] = 0;
+    }
+    innerEnterT[sampleIdx] = innerT;
+
+    // Exit position is the nearer of outer_exit or inner_enter
+    // (matching Python: inner_apply = x_inner_mask & (x_inner_t < x_outer_exit_t))
+    bool innerBeforeOuter = hitInner && (innerT < exitT) && (innerT > 0.0f);
+    Vec3 exitPos;
+    if (innerBeforeOuter) {
+        exitPos = shiftedEntry + dir * innerT;
+    } else {
+        exitPos = shiftedEntry + dir * exitT;
+    }
+
+    exitPositions[base + 0] = exitPos.x;
+    exitPositions[base + 1] = exitPos.y;
+    exitPositions[base + 2] = exitPos.z;
+}
+
+// ---------------------------------------------------------------------------
+// Build normalized neural network inputs for current segment.
+// ---------------------------------------------------------------------------
+__global__ void buildSegmentNeuralInputsKernel(
+        const float* entryPositions,
+        const float* exitPositions,
+        const float* rayDirections,
+        const int* hitIndices,
+        int hitCount,
+        Vec3 outerMin,
+        Vec3 outerInvExtent,
+        float* compactedEntryPos,
+        float* compactedExitPos,
+        float* compactedDirs) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= hitCount) {
+        return;
+    }
+
+    int sampleIdx = hitIndices[idx];
+    int srcBase = sampleIdx * 3;
+    int dstBase = idx * 3;
+
+    // Shift entry by epsilon before normalization (matching Python)
+    Vec3 entryPos(entryPositions[srcBase + 0],
+                  entryPositions[srcBase + 1],
+                  entryPositions[srcBase + 2]);
+    Vec3 dir(rayDirections[srcBase + 0],
+             rayDirections[srcBase + 1],
+             rayDirections[srcBase + 2]);
+    Vec3 shiftedEntry = entryPos + dir * kSegmentEpsilon;
+
+    Vec3 exitPos(exitPositions[srcBase + 0],
+                 exitPositions[srcBase + 1],
+                 exitPositions[srcBase + 2]);
+
+    // Normalize positions w.r.t. outer shell bounds
+    Vec3 normEntry((shiftedEntry.x - outerMin.x) * outerInvExtent.x,
+                   (shiftedEntry.y - outerMin.y) * outerInvExtent.y,
+                   (shiftedEntry.z - outerMin.z) * outerInvExtent.z);
+    Vec3 normExit((exitPos.x - outerMin.x) * outerInvExtent.x,
+                  (exitPos.y - outerMin.y) * outerInvExtent.y,
+                  (exitPos.z - outerMin.z) * outerInvExtent.z);
+
+    compactedEntryPos[dstBase + 0] = normEntry.x;
+    compactedEntryPos[dstBase + 1] = normEntry.y;
+    compactedEntryPos[dstBase + 2] = normEntry.z;
+    compactedExitPos[dstBase + 0] = normExit.x;
+    compactedExitPos[dstBase + 1] = normExit.y;
+    compactedExitPos[dstBase + 2] = normExit.z;
+
+    // Directions: map from [-1,1] to [0,1] (matching Python: (directions + 1) / 2)
+    compactedDirs[dstBase + 0] = (dir.x + 1.0f) * 0.5f;
+    compactedDirs[dstBase + 1] = (dir.y + 1.0f) * 0.5f;
+    compactedDirs[dstBase + 2] = (dir.z + 1.0f) * 0.5f;
+}
+
+// ---------------------------------------------------------------------------
+// Apply neural network outputs and update ray state.
+// Handles: intersection found, inner shell forces intersection.
+// ---------------------------------------------------------------------------
+__global__ void applySegmentNeuralOutputKernel(
+        const __half* outputs,
+        int outputStride,
+        const int* hitIndices,
+        int hitCount,
+        const float* entryPositions,
+        const float* rayDirections,
+        const float* accumT,
+        const int* innerHitFlags,
+        const float* innerEnterT,
+        const float* outerExitT,
+        float* hitPositions,
+        float* hitNormals,
+        float* hitColors,
+        int* hitFlags,
+        int* activeFlags,
+        Material material) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= hitCount) {
+        return;
+    }
+
+    int sampleIdx = hitIndices[idx];
+    int base = sampleIdx * 3;
+    int outBase = idx * outputStride;
+
+    float hasIntersection = __half2float(outputs[outBase + 0]);
+    float distance = __half2float(outputs[outBase + 1]);
+    float nx = __half2float(outputs[outBase + 2]);
+    float ny = __half2float(outputs[outBase + 3]);
+    float nz = __half2float(outputs[outBase + 4]);
+
+    Vec3 entryPos(entryPositions[base + 0],
+                  entryPositions[base + 1],
+                  entryPositions[base + 2]);
+    Vec3 dir(rayDirections[base + 0],
+             rayDirections[base + 1],
+             rayDirections[base + 2]);
+
+    // Check if neural network predicts intersection
+    // (matching Python: pred_intersection_mask = (pred_intersection >= 0))
+    bool neuralHit = (hasIntersection >= 0.0f);
+
+    // Check if inner shell hit before outer exit - forces intersection
+    // (matching Python: pred_intersection_mask[x_inner_mask & (x_inner_t < x_outer_exit_t)] = True)
+    bool innerHitBeforeExit = (innerHitFlags[sampleIdx] != 0) &&
+                               (innerEnterT[sampleIdx] > 0.0f) &&
+                               (innerEnterT[sampleIdx] < outerExitT[sampleIdx]);
+
+    bool foundIntersection = neuralHit || innerHitBeforeExit;
+
+    if (foundIntersection) {
+        // Compute final hit position
+        // The entry position is at accumT from camera, plus predicted distance from entry
+        // (matching Python: pred_t_global = pred_t + accum_t)
+        // But note: the neural network predicts distance from shifted entry point
+        Vec3 shiftedEntry = entryPos + dir * kSegmentEpsilon;
+        Vec3 hitPos = shiftedEntry + dir * distance;
+
+        hitPositions[base + 0] = hitPos.x;
+        hitPositions[base + 1] = hitPos.y;
+        hitPositions[base + 2] = hitPos.z;
+
+        // Normalize and store normal
+        Vec3 normal(nx, ny, nz);
+        float nlen = length(normal);
+        if (nlen > 1e-6f) {
+            normal = normal / nlen;
+        } else {
+            normal = Vec3(0.0f, 1.0f, 0.0f);
+        }
+        hitNormals[base + 0] = normal.x;
+        hitNormals[base + 1] = normal.y;
+        hitNormals[base + 2] = normal.z;
+
+        hitColors[base + 0] = material.base_color.x;
+        hitColors[base + 1] = material.base_color.y;
+        hitColors[base + 2] = material.base_color.z;
+
+        hitFlags[sampleIdx] = 1;
+        activeFlags[sampleIdx] = 0;  // Ray done
+    }
+    // If no intersection found, activeFlags remains 1 (will be updated by prepareNextIterationKernel)
+}
+
+// ---------------------------------------------------------------------------
+// Prepare for next iteration: trace outer shell re-entry and update state.
+// Implements: mask_for_remaining_rays = ~pred_intersection_mask & (x_outer_enter_mask_new | x_inner_mask)
+// ---------------------------------------------------------------------------
+__global__ void prepareNextIterationKernel(
+        const float* exitPositions,
+        const float* outerExitT,
+        const float* rayDirections,
+        const int* innerHitFlags,
+        const int* hitIndices,
+        int hitCount,
+        MeshDeviceView outerShell,
+        float* entryPositions,
+        int* activeFlags,
+        float* accumT,
+        float* newEntryT) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= hitCount) {
+        return;
+    }
+
+    int sampleIdx = hitIndices[idx];
+
+    // Skip if ray already found intersection (activeFlags was set to 0)
+    if (activeFlags[sampleIdx] == 0) {
+        return;
+    }
+
+    int base = sampleIdx * 3;
+    Vec3 exitPos(exitPositions[base + 0],
+                 exitPositions[base + 1],
+                 exitPositions[base + 2]);
+    Vec3 dir(rayDirections[base + 0],
+             rayDirections[base + 1],
+             rayDirections[base + 2]);
+
+    // Shift exit point outward by epsilon (matching Python: x_outer_exit + ds_left * eps)
+    Vec3 shiftedExit = exitPos + dir * kSegmentEpsilon;
+    Ray ray(shiftedExit, dir);
+
+    // Trace outer shell for re-entry (FORWARD_ONLY)
+    HitInfo reentry{false, 0.0f, Vec3(), Vec3(), Vec2(), -1, -1};
+    bool hitReentry = traceMeshWithMode(ray, outerShell, &reentry, TraceMode::FORWARD_ONLY, false);
+
+    // Remaining rays condition (matching Python):
+    // mask_for_remaining_rays = ~pred_intersection_mask & (x_outer_enter_mask_new | x_inner_mask)
+    // At this point, activeFlags[sampleIdx] == 1 means no intersection was found
+    // So we check: can re-enter outer shell OR hit inner shell
+    bool canContinue = hitReentry || (innerHitFlags[sampleIdx] != 0);
+
+    if (canContinue && hitReentry) {
+        // Update entry position for next iteration
+        Vec3 newEntry = shiftedExit + dir * reentry.distance;
+        entryPositions[base + 0] = newEntry.x;
+        entryPositions[base + 1] = newEntry.y;
+        entryPositions[base + 2] = newEntry.z;
+
+        // Update accumulated distance
+        // (matching Python: accum_t = accum_t + x_outer_exit_t + x_outer_enter_t_new)
+        accumT[sampleIdx] = accumT[sampleIdx] + outerExitT[sampleIdx] + reentry.distance + 2.0f * kSegmentEpsilon;
+        newEntryT[sampleIdx] = reentry.distance;
+        activeFlags[sampleIdx] = 1;
+    } else if (canContinue && (innerHitFlags[sampleIdx] != 0)) {
+        // Hit inner shell but can't re-enter outer shell
+        // This case should have been handled by applySegmentNeuralOutputKernel
+        // (inner hit forces intersection), but keep ray active if somehow missed
+        activeFlags[sampleIdx] = 0;  // Terminate - should have found intersection
+    } else {
+        // Ray escapes - no more segments
+        activeFlags[sampleIdx] = 0;
     }
 }
 
@@ -1649,87 +2127,93 @@ void RendererNeural::render(const Vec3& camPos, std::vector<uchar4>& hostPixels)
     bool neuralReady = useNeuralQuery_ && pointEncoding_ && mlpNetwork_ &&
                        outerShell.triangleCount() > 0;
     if (neuralReady) {
-        // --- Neural shell-based rendering pipeline ---
+        // --- Multi-segment iterative neural rendering pipeline ---
 
-        // 1. Trace outer and inner shells.
-        traceShellsKernel<<<grid, block>>>(
-                outerHitPositions_,
-                innerHitPositions_,
-                rayDirections_,
-                outerHitFlags_,
-                params,
-                outerView,
-                innerView);
-        checkCuda(cudaGetLastError(), "traceShellsKernel launch");
-
-        // Initialize hit buffers.
         int elementCountInt = static_cast<int>(elementCount);
-        checkCuda(cudaMemcpy(hitFlags_, outerHitFlags_, elementCount * sizeof(int),
-                             cudaMemcpyDeviceToDevice),
-                  "cudaMemcpy hitFlags from outerHitFlags");
-        checkCuda(cudaMemset(hitPositions_, 0, elementCount * 3 * sizeof(float)),
-                  "cudaMemset hitPositions");
-        checkCuda(cudaMemset(hitNormals_, 0, elementCount * 3 * sizeof(float)),
-                  "cudaMemset hitNormals");
-        checkCuda(cudaMemset(hitColors_, 0, elementCount * 3 * sizeof(float)),
-                  "cudaMemset hitColors");
-
-        // 2. Compact outer shell hits.
         const int compactBlock = 256;
         int compactGrid = static_cast<int>((elementCount + compactBlock - 1) / compactBlock);
+
+        // Initialize result buffers (no intersections yet).
+        checkCuda(cudaMemset(hitFlags_, 0, elementCount * sizeof(int)), "cudaMemset hitFlags");
+        checkCuda(cudaMemset(hitPositions_, 0, elementCount * 3 * sizeof(float)), "cudaMemset hitPositions");
+        checkCuda(cudaMemset(hitNormals_, 0, elementCount * 3 * sizeof(float)), "cudaMemset hitNormals");
+        checkCuda(cudaMemset(hitColors_, 0, elementCount * 3 * sizeof(float)), "cudaMemset hitColors");
+
+        // 1. Trace initial outer shell entry.
+        traceOuterShellEntryKernel<<<grid, block>>>(
+                currentEntryPos_,
+                outerExitT_,  // Temporarily store entry_t here
+                rayDirections_,
+                rayActiveFlags_,
+                accumT_,
+                params,
+                outerView);
+        checkCuda(cudaGetLastError(), "traceOuterShellEntryKernel launch");
+
+        // 2. Initial compaction by rays that hit outer shell.
         checkCuda(cudaMemset(hitCount_, 0, sizeof(int)), "cudaMemset hitCount");
         compactInputsKernel<<<compactGrid, compactBlock>>>(
-                outerHitFlags_,
+                rayActiveFlags_,
                 elementCountInt,
                 hitIndices_,
                 hitCount_);
         checkCuda(cudaGetLastError(), "compactInputsKernel launch");
 
-        int hitCount = 0;
-        checkCuda(cudaMemcpy(&hitCount, hitCount_, sizeof(int), cudaMemcpyDeviceToHost),
-                  "cudaMemcpy hitCount");
+        int activeCount = 0;
+        checkCuda(cudaMemcpy(&activeCount, hitCount_, sizeof(int), cudaMemcpyDeviceToHost),
+                  "cudaMemcpy activeCount");
 
-        if (hitCount > 0) {
-            size_t hitCountSize = static_cast<size_t>(hitCount);
+        // 3. Multi-segment iteration loop.
+        for (int iter = 0; iter < kMaxSegmentIterations && activeCount > 0; ++iter) {
+            size_t activeCountSize = static_cast<size_t>(activeCount);
             size_t granularity = static_cast<size_t>(tcnn::cpp::batch_size_granularity());
-            size_t paddedHitCount = roundUp(hitCountSize, granularity);
+            size_t paddedActiveCount = roundUp(activeCountSize, granularity);
 
-            // 3. Build 3 separate encoding input buffers.
             const int buildBlock = 256;
-            int buildGrid = (hitCount + buildBlock - 1) / buildBlock;
-            buildNeuralInputsKernel<<<buildGrid, buildBlock>>>(
-                    outerHitPositions_,
-                    innerHitPositions_,
+            int buildGrid = (activeCount + buildBlock - 1) / buildBlock;
+
+            // 3a. Trace segment exits (outer shell backward, inner shell forward).
+            traceSegmentExitsKernel<<<buildGrid, buildBlock>>>(
+                    currentEntryPos_,
                     rayDirections_,
                     hitIndices_,
-                    hitCount,
+                    activeCount,
+                    outerView,
+                    innerView,
+                    segmentExitPos_,
+                    outerExitT_,
+                    innerEnterT_,
+                    innerHitFlags_);
+            checkCuda(cudaGetLastError(), "traceSegmentExitsKernel launch");
+
+            // 3b. Build neural network inputs for current segment.
+            buildSegmentNeuralInputsKernel<<<buildGrid, buildBlock>>>(
+                    currentEntryPos_,
+                    segmentExitPos_,
+                    rayDirections_,
+                    hitIndices_,
+                    activeCount,
                     outerMin,
                     outerInvExtent,
-                    compactedOuterPos_,
-                    compactedInnerPos_,
+                    compactedOuterPos_,  // entry pos
+                    compactedInnerPos_,  // exit pos
                     compactedDirs_);
-            checkCuda(cudaGetLastError(), "buildNeuralInputsKernel launch");
+            checkCuda(cudaGetLastError(), "buildSegmentNeuralInputsKernel launch");
 
             // Zero-pad tails for TCNN alignment.
-            if (paddedHitCount > hitCountSize) {
-                size_t tail = paddedHitCount - hitCountSize;
-                checkCuda(cudaMemset(
-                        compactedOuterPos_ + hitCountSize * 3,
-                        0, tail * 3 * sizeof(float)),
-                        "cudaMemset outer pos tail");
-                checkCuda(cudaMemset(
-                        compactedInnerPos_ + hitCountSize * 3,
-                        0, tail * 3 * sizeof(float)),
-                        "cudaMemset inner pos tail");
-                checkCuda(cudaMemset(
-                        compactedDirs_ + hitCountSize * 3,
-                        0, tail * 3 * sizeof(float)),
-                        "cudaMemset dirs tail");
+            if (paddedActiveCount > activeCountSize) {
+                size_t tail = paddedActiveCount - activeCountSize;
+                checkCuda(cudaMemset(compactedOuterPos_ + activeCountSize * 3, 0, tail * 3 * sizeof(float)),
+                          "cudaMemset entry pos tail");
+                checkCuda(cudaMemset(compactedInnerPos_ + activeCountSize * 3, 0, tail * 3 * sizeof(float)),
+                          "cudaMemset exit pos tail");
+                checkCuda(cudaMemset(compactedDirs_ + activeCountSize * 3, 0, tail * 3 * sizeof(float)),
+                          "cudaMemset dirs tail");
             }
 
-            uint32_t batchSize = static_cast<uint32_t>(paddedHitCount);
+            uint32_t batchSize = static_cast<uint32_t>(paddedActiveCount);
 
-            // 4a. Point encoding: outer positions.
+            // 3c. Point encoding: entry positions.
             {
                 tcnn::cpp::Context ctx = pointEncoding_->forward(
                     0, batchSize,
@@ -1740,7 +2224,7 @@ void RendererNeural::render(const Vec3& camPos, std::vector<uchar4>& hostPixels)
                 (void)ctx;
             }
 
-            // 4b. Point encoding: inner positions (same encoder, same params).
+            // 3d. Point encoding: exit positions.
             {
                 tcnn::cpp::Context ctx = pointEncoding_->forward(
                     0, batchSize,
@@ -1751,7 +2235,7 @@ void RendererNeural::render(const Vec3& camPos, std::vector<uchar4>& hostPixels)
                 (void)ctx;
             }
 
-            // 4c. Direction encoding.
+            // 3e. Direction encoding.
             {
                 tcnn::cpp::Context ctx = dirEncoding_->forward(
                     0, batchSize,
@@ -1762,9 +2246,8 @@ void RendererNeural::render(const Vec3& camPos, std::vector<uchar4>& hostPixels)
                 (void)ctx;
             }
 
-            // 5. Concatenate FP16 encoding outputs into FP32 MLP input.
-            int concatGrid = (hitCount + buildBlock - 1) / buildBlock;
-            concatenateEncodingsKernel<<<concatGrid, buildBlock>>>(
+            // 3f. Concatenate FP16 encoding outputs into FP32 MLP input.
+            concatenateEncodingsKernel<<<buildGrid, buildBlock>>>(
                     static_cast<const __half*>(pointEncOutput1_),
                     pointEncOutDims_,
                     static_cast<const __half*>(pointEncOutput2_),
@@ -1773,19 +2256,18 @@ void RendererNeural::render(const Vec3& camPos, std::vector<uchar4>& hostPixels)
                     dirEncOutDims_,
                     mlpInput_,
                     mlpInputDims_,
-                    hitCount);
+                    activeCount);
             checkCuda(cudaGetLastError(), "concatenateEncodingsKernel launch");
 
             // Zero-pad MLP input tail.
-            if (paddedHitCount > hitCountSize) {
-                size_t tail = paddedHitCount - hitCountSize;
-                checkCuda(cudaMemset(
-                        mlpInput_ + hitCountSize * mlpInputDims_,
-                        0, tail * mlpInputDims_ * sizeof(float)),
-                        "cudaMemset mlp input tail");
+            if (paddedActiveCount > activeCountSize) {
+                size_t tail = paddedActiveCount - activeCountSize;
+                checkCuda(cudaMemset(mlpInput_ + activeCountSize * mlpInputDims_, 0,
+                                     tail * mlpInputDims_ * sizeof(float)),
+                          "cudaMemset mlp input tail");
             }
 
-            // 6. MLP forward pass.
+            // 3g. MLP forward pass.
             {
                 tcnn::cpp::Context ctx = mlpNetwork_->forward(
                     0, batchSize,
@@ -1796,24 +2278,56 @@ void RendererNeural::render(const Vec3& camPos, std::vector<uchar4>& hostPixels)
                 (void)ctx;
             }
 
-            // 7. Apply neural outputs.
-            int applyGrid = (hitCount + buildBlock - 1) / buildBlock;
-            applyNeuralOutputKernel<<<applyGrid, buildBlock>>>(
+            // 3h. Apply neural outputs and update ray state.
+            applySegmentNeuralOutputKernel<<<buildGrid, buildBlock>>>(
                     static_cast<const __half*>(outputs_),
-                    hitIndices_,
-                    hitCount,
                     static_cast<int>(mlpOutputDims_),
-                    outerHitPositions_,
+                    hitIndices_,
+                    activeCount,
+                    currentEntryPos_,
                     rayDirections_,
+                    accumT_,
+                    innerHitFlags_,
+                    innerEnterT_,
+                    outerExitT_,
                     hitPositions_,
                     hitNormals_,
                     hitColors_,
                     hitFlags_,
+                    rayActiveFlags_,
                     params.material);
-            checkCuda(cudaGetLastError(), "applyNeuralOutputKernel launch");
+            checkCuda(cudaGetLastError(), "applySegmentNeuralOutputKernel launch");
+
+            // 3i. Prepare for next iteration (trace outer shell re-entry).
+            prepareNextIterationKernel<<<buildGrid, buildBlock>>>(
+                    segmentExitPos_,
+                    outerExitT_,
+                    rayDirections_,
+                    innerHitFlags_,
+                    hitIndices_,
+                    activeCount,
+                    outerView,
+                    currentEntryPos_,
+                    rayActiveFlags_,
+                    accumT_,
+                    innerEnterT_);  // Reuse as newEntryT
+            checkCuda(cudaGetLastError(), "prepareNextIterationKernel launch");
+
+            // 3j. Re-compact active rays for next iteration.
+            checkCuda(cudaMemset(hitCount_, 0, sizeof(int)), "cudaMemset hitCount");
+            compactInputsKernel<<<compactGrid, compactBlock>>>(
+                    rayActiveFlags_,
+                    elementCountInt,
+                    hitIndices_,
+                    hitCount_);
+            checkCuda(cudaGetLastError(), "compactInputsKernel launch");
+
+            checkCuda(cudaMemcpy(&activeCount, hitCount_, sizeof(int), cudaMemcpyDeviceToHost),
+                      "cudaMemcpy activeCount");
         }
 
-        // 8. Path trace from neural hits using original mesh for bounces.
+        // 4. Path trace from neural hits using original mesh for bounces.
+        // (Step numbers continue from multi-segment iteration above)
         if (!lambertView_) {
             initNeuralPathKernel<<<grid, block>>>(
                     pathThroughput_,
@@ -2006,6 +2520,13 @@ void RendererNeural::release() {
     freePtr(pathThroughput_);
     freePtr(pathRadiance_);
     freePtr(pathActive_);
+    freePtr(rayActiveFlags_);
+    freePtr(accumT_);
+    freePtr(currentEntryPos_);
+    freePtr(outerExitT_);
+    freePtr(innerEnterT_);
+    freePtr(innerHitFlags_);
+    freePtr(segmentExitPos_);
     bufferElements_ = 0;
     accumPixels_ = 0;
     accumSampleCount_ = 0;
@@ -2049,7 +2570,9 @@ bool RendererNeural::ensureNetworkBuffers(size_t elementCount) {
             hitIndices_ && hitCount_ &&
             bouncePositions_ && bounceNormals_ && bounceDirs_ && bounceColors_ && bounceHitFlags_ &&
             bounce2Positions_ && bounce2Normals_ && bounce2Dirs_ && bounce2Colors_ && bounce2HitFlags_ &&
-            pathThroughput_ && pathRadiance_ && pathActive_) {
+            pathThroughput_ && pathRadiance_ && pathActive_ &&
+            rayActiveFlags_ && accumT_ && currentEntryPos_ &&
+            outerExitT_ && innerEnterT_ && innerHitFlags_ && segmentExitPos_) {
         return true;
     }
 
@@ -2091,6 +2614,13 @@ bool RendererNeural::ensureNetworkBuffers(size_t elementCount) {
     freePtr(pathThroughput_);
     freePtr(pathRadiance_);
     freePtr(pathActive_);
+    freePtr(rayActiveFlags_);
+    freePtr(accumT_);
+    freePtr(currentEntryPos_);
+    freePtr(outerExitT_);
+    freePtr(innerEnterT_);
+    freePtr(innerHitFlags_);
+    freePtr(segmentExitPos_);
 
     size_t vec3Bytes = elementCount * 3 * sizeof(float);
     size_t intBytes = elementCount * sizeof(int);
@@ -2156,6 +2686,15 @@ bool RendererNeural::ensureNetworkBuffers(size_t elementCount) {
     checkCuda(cudaMalloc(&pathThroughput_, elementCount * sizeof(Vec3)), "cudaMalloc pathThroughput");
     checkCuda(cudaMalloc(&pathRadiance_, elementCount * sizeof(Vec3)), "cudaMalloc pathRadiance");
     checkCuda(cudaMalloc(&pathActive_, intBytes), "cudaMalloc pathActive");
+
+    // Multi-segment iteration state buffers.
+    checkCuda(cudaMalloc(&rayActiveFlags_, intBytes), "cudaMalloc rayActiveFlags");
+    checkCuda(cudaMalloc(&accumT_, elementCount * sizeof(float)), "cudaMalloc accumT");
+    checkCuda(cudaMalloc(&currentEntryPos_, vec3Bytes), "cudaMalloc currentEntryPos");
+    checkCuda(cudaMalloc(&outerExitT_, elementCount * sizeof(float)), "cudaMalloc outerExitT");
+    checkCuda(cudaMalloc(&innerEnterT_, elementCount * sizeof(float)), "cudaMalloc innerEnterT");
+    checkCuda(cudaMalloc(&innerHitFlags_, intBytes), "cudaMalloc innerHitFlags");
+    checkCuda(cudaMalloc(&segmentExitPos_, vec3Bytes), "cudaMalloc segmentExitPos");
 
     bufferElements_ = elementCount;
     return true;
