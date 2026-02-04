@@ -150,6 +150,8 @@ int main(int argc, char** argv) {
     if (!config.environment.hdri_path.empty() && !scene.environment().loadFromFile(config.environment.hdri_path.c_str(), &envError)) {
         std::fprintf(stderr, "Failed to load HDRI '%s': %s\n", config.environment.hdri_path.c_str(), envError.c_str());
     }
+    scene.environment().setRotation(config.environment.rotation);
+    scene.environment().setStrength(config.environment.strength);
 
     // Set camera from config matrix
     {

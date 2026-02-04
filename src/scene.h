@@ -12,6 +12,7 @@ struct EnvironmentDeviceView {
     int width = 0;
     int height = 0;
     float rotation = 0.0f;  // Rotation in degrees around Y axis
+    float strength = 1.0f;  // Environment intensity multiplier
 };
 
 class EnvironmentMap {
@@ -25,11 +26,13 @@ public:
     bool uploadToDevice();
     void releaseDevice();
     bool isValid() const { return width_ > 0 && height_ > 0 && !pixels_.empty(); }
-    EnvironmentDeviceView deviceView() const { return EnvironmentDeviceView{devicePixels_, width_, height_}; }
+    EnvironmentDeviceView deviceView() const { return EnvironmentDeviceView{devicePixels_, width_, height_, rotation_, strength_}; }
     Vec3 averageColor() const { return averageColor_; }
     float averageLuminance() const { return averageLuminance_; }
     bool isLdr() const { return isLdr_; }
     const std::string& path() const { return path_; }
+    void setRotation(float rotation) { rotation_ = rotation; }
+    void setStrength(float strength) { strength_ = strength; }
 
 private:
     std::vector<Vec3> pixels_;
@@ -42,6 +45,8 @@ private:
     Vec3* devicePixels_ = nullptr;
     int deviceCount_ = 0;
     bool deviceDirty_ = true;
+    float rotation_ = 0.0f;
+    float strength_ = 1.0f;
 };
 
 class Scene {

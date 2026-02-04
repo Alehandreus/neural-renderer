@@ -275,6 +275,8 @@ int main(int argc, char** argv) {
         std::fprintf(stderr, "Failed to load HDRI '%s': %s\n", config.environment.hdri_path.c_str(), envError.c_str());
         return 1;
     }
+    scene.environment().setRotation(config.environment.rotation);
+    scene.environment().setStrength(config.environment.strength);
     std::printf("Loaded environment: %s\n", config.environment.hdri_path.c_str());
 
     // Create renderer.

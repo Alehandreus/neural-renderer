@@ -236,7 +236,7 @@ bool LoadMeshFromFile(const std::string& path,
     }
 
     const Material defaultMaterial;
-    const Vec3 defaultColor = defaultMaterial.color;
+    const Vec3 defaultColor = defaultMaterial.base_color;
     Assimp::Importer importer;
     unsigned int flags = aiProcess_Triangulate |
             aiProcess_JoinIdenticalVertices |
@@ -359,6 +359,7 @@ bool LoadTexturedGltfFromFile(const std::string& path,
     struct MaterialInfo {
         Vec3 baseColor{1.0f, 1.0f, 1.0f};
         int textureIndex = -1;
+        int normalTexIndex = -1;
     };
 
     std::unordered_map<std::string, int> textureCache;
@@ -366,7 +367,7 @@ bool LoadTexturedGltfFromFile(const std::string& path,
     std::vector<MaterialInfo> materials(scene->mNumMaterials);
     std::filesystem::path baseDir = std::filesystem::path(path).parent_path();
 
-    auto loadTexture = [&](const aiString& texPath, std::string* texError) -> int {
+    auto loadTexture = [&](const aiString& texPath, std::string* texError, bool isSRGB = true) -> int {
         if (texPath.length == 0) {
             return -1;
         }
@@ -391,7 +392,7 @@ bool LoadTexturedGltfFromFile(const std::string& path,
         if (!loaded) {
             return -1;
         }
-        image.srgb = true;
+        image.srgb = isSRGB;
         int id = static_cast<int>(textures.size());
         textures.push_back(std::move(image));
         textureCache[key] = id;
@@ -413,11 +414,18 @@ bool LoadTexturedGltfFromFile(const std::string& path,
 
         aiString texPath;
         if (mat->GetTexture(aiTextureType_BASE_COLOR, 0, &texPath) == AI_SUCCESS) {
-            info.textureIndex = loadTexture(texPath, error);
+            info.textureIndex = loadTexture(texPath, error, true);
         }
         if (info.textureIndex < 0 &&
             mat->GetTexture(aiTextureType_DIFFUSE, 0, &texPath) == AI_SUCCESS) {
-            info.textureIndex = loadTexture(texPath, error);
+            info.textureIndex = loadTexture(texPath, error, true);
+        }
+
+        // Load normal map (linear space, not sRGB) - TODO: implement normal mapping
+        if (mat->GetTexture(aiTextureType_NORMALS, 0, &texPath) == AI_SUCCESS) {
+            info.normalTexIndex = loadTexture(texPath, error, false);
+        } else if (mat->GetTexture(aiTextureType_HEIGHT, 0, &texPath) == AI_SUCCESS) {
+            info.normalTexIndex = loadTexture(texPath, error, false);
         }
 
         materials[i] = info;
@@ -471,14 +479,20 @@ bool LoadTexturedGltfFromFile(const std::string& path,
             Vec2 uv1;
             Vec2 uv2;
             int texId = -1;
-            if (mesh->HasTextureCoords(0) && matInfo.textureIndex >= 0) {
+            int normalTexId = -1;
+            if (mesh->HasTextureCoords(0)) {
                 const aiVector3D tuv0 = mesh->mTextureCoords[0][i0];
                 const aiVector3D tuv1 = mesh->mTextureCoords[0][i1];
                 const aiVector3D tuv2 = mesh->mTextureCoords[0][i2];
                 uv0 = Vec2(tuv0.x, tuv0.y);
                 uv1 = Vec2(tuv1.x, tuv1.y);
                 uv2 = Vec2(tuv2.x, tuv2.y);
-                texId = matInfo.textureIndex;
+                if (matInfo.textureIndex >= 0) {
+                    texId = matInfo.textureIndex;
+                }
+                if (matInfo.normalTexIndex >= 0) {
+                    normalTexId = matInfo.normalTexIndex;
+                }
             }
 
             Triangle tri;
@@ -496,6 +510,9 @@ bool LoadTexturedGltfFromFile(const std::string& path,
             tri.uv1 = uv1;
             tri.uv2 = uv2;
             tri.texId = texId;
+            tri.normalTexId = normalTexId;
+            tri._pad1 = 0;
+            tri._pad2 = 0;
             triangles.push_back(tri);
         }
     }
@@ -540,7 +557,7 @@ void GenerateUvSphere(Mesh* outMesh, int stacks, int slices, float radius) {
     }
 
     const Material defaultMaterial;
-    const Vec3 defaultColor = defaultMaterial.color;
+    const Vec3 defaultColor = defaultMaterial.base_color;
     const float kPi = 3.14159265358979323846f;
     std::vector<Triangle> triangles;
     triangles.reserve(static_cast<size_t>(stacks) * static_cast<size_t>(slices) * 2);

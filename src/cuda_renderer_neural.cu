@@ -15,6 +15,7 @@
 #include <tiny-cuda-nn/common_device.h>
 
 #include "scene.h"
+#include "disney_brdf.cuh"
 
 namespace {
 
@@ -26,9 +27,8 @@ struct RenderParams {
     Vec3 lightDir;
     Vec3 outerShellMin;
     Vec3 outerShellInvExtent;
-    Vec3 materialColor;
+    Material material;
     float fovY;
-    float materialReflectiveness;
     float maxRadiance;
     float sceneScale;
     int maxBounces;
@@ -58,9 +58,21 @@ __device__ inline Vec3 srgbToLinear(Vec3 c) {
 }
 
 __device__ inline float linearToSrgb(float v) {
-    v = clampf(v, 0.0f, 1.0f);
-    return powf(v, 1.0f / 2.2f);
+    // Clamp to prevent negative values
+    v = fmaxf(0.0f, v);
+
+    // Apply correct sRGB formula
+    float result;
+    if (v <= 0.0031308f) {
+        result = 12.92f * v;
+    } else {
+        result = 1.055f * powf(v, 1.0f / 2.4f) - 0.055f;
+    }
+
+    // Clamp output to [0, 1] range for display
+    return fminf(1.0f, result);
 }
+
 
 __device__ inline Vec3 encodeSrgb(Vec3 c) {
     return Vec3(linearToSrgb(c.x), linearToSrgb(c.y), linearToSrgb(c.z));
@@ -154,7 +166,16 @@ __device__ inline Vec3 sampleEnvironment(EnvironmentDeviceView env, Vec3 dir) {
         if (y >= env.height) {
             y = env.height - 1;
         }
-        return env.pixels[y * env.width + x];
+
+        // Sample environment and apply strength
+        Vec3 envColor = env.pixels[y * env.width + x] * env.strength;
+
+        // Clamp to 100.0 to avoid fireflies from bright light sources (matching nbvh)
+        envColor.x = fminf(envColor.x, 100.0f);
+        envColor.y = fminf(envColor.y, 100.0f);
+        envColor.z = fminf(envColor.z, 100.0f);
+
+        return envColor;
     }
 
     Vec3 skyTop(0.2f, 0.4f, 0.7f);
@@ -211,6 +232,12 @@ __device__ inline Vec3 sampleHemisphereCosine(Vec3 normal, uint32_t& rng) {
     Vec3 tangent = normalize(cross(up, normal));
     Vec3 bitangent = cross(normal, tangent);
     return normalize(tangent * x + bitangent * y + normal * z);
+}
+
+__device__ inline void buildTangentSpace(Vec3 normal, Vec3* tangent, Vec3* bitangent) {
+    Vec3 up = fabsf(normal.z) < 0.999f ? Vec3(0.0f, 0.0f, 1.0f) : Vec3(1.0f, 0.0f, 0.0f);
+    *tangent = normalize(cross(up, normal));
+    *bitangent = cross(normal, *tangent);
 }
 
 __device__ inline Ray generatePrimaryRay(int x, int y, const RenderParams& params, uint32_t& rng) {
@@ -353,6 +380,7 @@ __device__ inline bool traceMesh(const Ray& ray,
     }
 
     if (bestHit.hit) {
+        // Sample base color texture
         Vec3 texColor = sampleTextureDevice(
             mesh.textures,
             mesh.textureCount,
@@ -361,6 +389,9 @@ __device__ inline bool traceMesh(const Ray& ray,
             bestHit.uv.y,
             mesh.textureNearest != 0);
         bestHit.color = mul(bestHit.color, texColor);
+
+        // TODO: Sample normal map and transform to world space
+        // This requires tangent/bitangent computation
     }
     if (outHit) {
         *outHit = bestHit;
@@ -553,7 +584,7 @@ __global__ void applyNeuralOutputKernel(const __half* outputs,
                                         float* hitNormals,
                                         float* hitColors,
                                         int* hitFlags,
-                                        Vec3 materialColor) {
+                                        Material material) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= hitCount) {
         return;
@@ -592,9 +623,9 @@ __global__ void applyNeuralOutputKernel(const __half* outputs,
         hitNormals[srcBase + 1] = normal.y;
         hitNormals[srcBase + 2] = normal.z;
 
-        hitColors[srcBase + 0] = materialColor.x;
-        hitColors[srcBase + 1] = materialColor.y;
-        hitColors[srcBase + 2] = materialColor.z;
+        hitColors[srcBase + 0] = material.base_color.x;
+        hitColors[srcBase + 1] = material.base_color.y;
+        hitColors[srcBase + 2] = material.base_color.z;
         hitFlags[sampleIdx] = 1;
     } else {
         hitPositions[srcBase + 0] = 0.0f;
@@ -685,7 +716,6 @@ __global__ void pathTraceKernel(uchar4* output,
         return;
     }
 
-    float reflectiveness = clampf(params.materialReflectiveness, 0.0f, 1.0f);
     for (int s = 0; s < params.samplesPerPixel; ++s) {
         int sampleIdx = pixelIdx + s * params.pixelCount;
         uint32_t rng = initRng(pixelIdx, params.sampleOffset, s);
@@ -696,11 +726,8 @@ __global__ void pathTraceKernel(uchar4* output,
         bool hit = hitFlags[sampleIdx] != 0;
         Vec3 hitPos;
         Vec3 normal;
+        Vec3 albedo(1.0f, 1.0f, 1.0f);
         if (hit) {
-            throughput = Vec3(
-                    hitColors[sampleIdx * 3 + 0],
-                    hitColors[sampleIdx * 3 + 1],
-                    hitColors[sampleIdx * 3 + 2]);
             hitPos = Vec3(
                     hitPositions[sampleIdx * 3 + 0],
                     hitPositions[sampleIdx * 3 + 1],
@@ -709,6 +736,10 @@ __global__ void pathTraceKernel(uchar4* output,
                     hitNormals[sampleIdx * 3 + 0],
                     hitNormals[sampleIdx * 3 + 1],
                     hitNormals[sampleIdx * 3 + 2]);
+            albedo = Vec3(
+                    hitColors[sampleIdx * 3 + 0],
+                    hitColors[sampleIdx * 3 + 1],
+                    hitColors[sampleIdx * 3 + 2]);
         }
 
         Ray ray = primaryRay;
@@ -738,17 +769,50 @@ __global__ void pathTraceKernel(uchar4* output,
                 break;
             }
 
-            Vec3 bounceDir;
-            float choose = rand01(rng);
-            if (choose < reflectiveness) {
-                bounceDir = normalize(reflectDir(ray.direction, normal));
-            } else {
-                bounceDir = sampleHemisphereCosine(normal, rng);
+            // Build tangent space for anisotropic materials
+            Vec3 tangent, bitangent;
+            buildTangentSpace(normal, &tangent, &bitangent);
+
+            // Create material with texture-modulated base color
+            Material surfaceMat = params.material;
+            surfaceMat.base_color = mul(surfaceMat.base_color, albedo);
+
+            // Sample Disney BRDF
+            Vec3 wo = ray.direction * -1.0f;
+            float u1 = rand01(rng);
+            float u2 = rand01(rng);
+            float u3 = rand01(rng);
+            float pdf;
+            Vec3 wi = disney_sample(surfaceMat, normal, wo, u1, u2, u3, &pdf);
+
+            if (pdf <= 0.0f) {
+                break;
             }
 
-            float rayOffset = params.sceneScale * 1e-8f;
-            ray = Ray(hitPos + normal * rayOffset, bounceDir);
-            HitInfo bounceHit{false, 0.0f, Vec3(), Vec3(), Vec2(), -1, -1};
+            // Evaluate Disney BRDF
+            Vec3 f = disney_eval(surfaceMat, normal, wo, wi, tangent, bitangent);
+
+            // Update throughput
+            float cos_theta = fmaxf(0.0f, dot(normal, wi));
+            if (cos_theta > 0.0f) {
+                throughput = mul(throughput, f * (cos_theta / pdf));
+            } else {
+                break;
+            }
+
+            // Russian roulette path termination
+            if (bounce > 3) {
+                float q = fmaxf(0.05f, 1.0f - fmaxf(throughput.x, fmaxf(throughput.y, throughput.z)));
+                if (rand01(rng) < q) {
+                    break;
+                }
+                throughput = throughput * (1.0f / (1.0f - q));
+            }
+
+            // Trace next ray
+            float rayOffset = params.sceneScale * 1e-4f;
+            ray = Ray(hitPos + normal * rayOffset, wi);
+            HitInfo bounceHit{false, 0.0f, Vec3(), Vec3(), Vec2(), -1, -1, -1};
             hit = traceMesh(ray, mesh, &bounceHit);
             if (!hit) {
                 Vec3 envLight = sampleEnvironment(env, ray.direction);
@@ -759,7 +823,7 @@ __global__ void pathTraceKernel(uchar4* output,
 
             hitPos = ray.at(bounceHit.distance);
             normal = bounceHit.normal;
-            throughput = mul(throughput, bounceHit.color);
+            albedo = bounceHit.color;
         }
 
         sum += radiance;
@@ -919,7 +983,6 @@ __global__ void renderBounceKernel(const float* hitPositions,
     }
 
     int pixelIdx = y * params.width + x;
-    float reflectiveness = clampf(params.materialReflectiveness, 0.0f, 1.0f);
     for (int s = 0; s < params.samplesPerPixel; ++s) {
         int sampleIdx = pixelIdx + s * params.pixelCount;
         int base = sampleIdx * 3;
@@ -972,13 +1035,13 @@ __global__ void renderBounceKernel(const float* hitPositions,
             continue;
         }
 
-        Vec3 bounceDir;
-        float choose = rand01(rng);
-        if (choose < reflectiveness) {
-            bounceDir = normalize(reflectDir(primaryRay.direction, normal));
-        } else {
-            bounceDir = sampleHemisphereCosine(normal, rng);
-        }
+        // Sample Disney BRDF for bounce direction
+        Vec3 wo = primaryRay.direction * -1.0f;
+        float u1 = rand01(rng);
+        float u2 = rand01(rng);
+        float u3 = rand01(rng);
+        float pdf;
+        Vec3 bounceDir = disney_sample(params.material, normal, wo, u1, u2, u3, &pdf);
 
         bounceDirs[base + 0] = bounceDir.x;
         bounceDirs[base + 1] = bounceDir.y;
@@ -1035,7 +1098,6 @@ __global__ void renderBounceFromStateKernel(const float* inPositions,
     }
 
     int pixelIdx = y * params.width + x;
-    float reflectiveness = clampf(params.materialReflectiveness, 0.0f, 1.0f);
     for (int s = 0; s < params.samplesPerPixel; ++s) {
         int sampleIdx = pixelIdx + s * params.pixelCount;
         int base = sampleIdx * 3;
@@ -1088,13 +1150,13 @@ __global__ void renderBounceFromStateKernel(const float* inPositions,
             continue;
         }
 
-        Vec3 bounceDir;
-        float choose = rand01(rng);
-        if (choose < reflectiveness) {
-            bounceDir = normalize(reflectDir(incoming, normal));
-        } else {
-            bounceDir = sampleHemisphereCosine(normal, rng);
-        }
+        // Sample Disney BRDF for bounce direction
+        Vec3 wo = incoming * -1.0f;
+        float u1 = rand01(rng);
+        float u2 = rand01(rng);
+        float u3 = rand01(rng);
+        float pdf;
+        Vec3 bounceDir = disney_sample(params.material, normal, wo, u1, u2, u3, &pdf);
 
         outDirs[base + 0] = bounceDir.x;
         outDirs[base + 1] = bounceDir.y;
@@ -1570,9 +1632,8 @@ void RendererNeural::render(const Vec3& camPos, std::vector<uchar4>& hostPixels)
     params.lightDir = lightDir_;
     params.outerShellMin = outerMin;
     params.outerShellInvExtent = outerInvExtent;
-    params.materialColor = material.color;
+    params.material = material;
     params.fovY = basis_.fovY;
-    params.materialReflectiveness = material.reflectiveness;
     params.maxRadiance = 20.0f;
     params.sceneScale = sceneScale_;
     params.maxBounces = maxBounces;
@@ -1748,7 +1809,7 @@ void RendererNeural::render(const Vec3& camPos, std::vector<uchar4>& hostPixels)
                     hitNormals_,
                     hitColors_,
                     hitFlags_,
-                    params.materialColor);
+                    params.material);
             checkCuda(cudaGetLastError(), "applyNeuralOutputKernel launch");
         }
 
