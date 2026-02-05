@@ -43,6 +43,12 @@ bool LoadConfigFromFile(const char* configPath, RendererConfig* config, std::str
                 config->outer_shell.path = outer.value("path", "");
                 config->outer_shell.scale = outer.value("scale", 1.0f);
             }
+
+            if (scene.contains("additional_mesh")) {
+                auto& additional = scene["additional_mesh"];
+                config->additional_mesh.path = additional.value("path", "");
+                config->additional_mesh.scale = additional.value("scale", 1.0f);
+            }
         }
 
         // Parse checkpoint path

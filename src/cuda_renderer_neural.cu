@@ -39,6 +39,11 @@ struct RenderParams {
     uint32_t sampleOffset;
 };
 
+struct BoundingBox {
+    Vec3 min;
+    Vec3 max;
+};
+
 // Intersection mode for path tracing
 enum IntersectionMode {
     GT_MESH,   // Ground truth mesh intersection
@@ -877,6 +882,105 @@ __global__ void integrateBounceKernel(Vec3* throughput,
     }
 }
 
+// ---------------------------------------------------------------------------
+// Trace hybrid bounces: check both shells and additional mesh (two-box early culling)
+// ---------------------------------------------------------------------------
+__global__ void traceHybridBouncesKernel(
+        const float* bounceOrigins,
+        const float* bounceDirections,
+        const float* bouncePdfs,
+        MeshDeviceView outerShell,
+        MeshDeviceView additionalMesh,
+        BoundingBox shellsBounds,
+        BoundingBox additionalBounds,
+        RenderParams params,
+        float* bouncePositions,
+        float* bounceNormals,
+        float* bounceColors,
+        int* bounceHitFlags) {
+    int x = blockIdx.x * blockDim.x + threadIdx.x;
+    int y = blockIdx.y * blockDim.y + threadIdx.y;
+    if (x >= params.width || y >= params.height) return;
+
+    int pixelIdx = y * params.width + x;
+    for (int s = 0; s < params.samplesPerPixel; ++s) {
+        int sampleIdx = pixelIdx + s * params.pixelCount;
+        int base = sampleIdx * 3;
+
+        // Reconstruct bounce ray
+        Vec3 origin(bounceOrigins[base+0], bounceOrigins[base+1], bounceOrigins[base+2]);
+        Vec3 dir(bounceDirections[base+0], bounceDirections[base+1], bounceDirections[base+2]);
+        Ray ray(origin, dir);
+
+        HitInfo closestHit{false, 0.0f, Vec3(), Vec3(), Vec2(), -1, -1};
+        float closestT = 1e30f;
+
+        // If additional mesh is empty, only trace shells
+        if (additionalMesh.triangleCount == 0) {
+            traceMesh(ray, outerShell, &closestHit, true);
+        } else {
+            // Two-box early culling
+            Vec3 invDir(1.0f/dir.x, 1.0f/dir.y, 1.0f/dir.z);
+            float tNearShells = 0.0f, tNearAdditional = 0.0f;
+            bool hitShellsBox = intersectAabb(ray, invDir, shellsBounds.min, shellsBounds.max, 1e30f, &tNearShells);
+            bool hitAdditionalBox = intersectAabb(ray, invDir, additionalBounds.min, additionalBounds.max, 1e30f, &tNearAdditional);
+
+            // Trace in near-to-far order with early exit
+            if (hitShellsBox && hitAdditionalBox) {
+                if (tNearShells < tNearAdditional) {
+                    // Check shells first
+                    HitInfo shellHit;
+                    if (traceMesh(ray, outerShell, &shellHit, true) && shellHit.distance < closestT) {
+                        closestHit = shellHit;
+                        closestT = shellHit.distance;
+                    }
+                    // Only check additional if it could be closer
+                    if (tNearAdditional < closestT) {
+                        HitInfo addHit;
+                        if (traceMesh(ray, additionalMesh, &addHit, true) && addHit.distance < closestT) {
+                            closestHit = addHit;
+                        }
+                    }
+                } else {
+                    // Check additional first, then shells
+                    HitInfo addHit;
+                    if (traceMesh(ray, additionalMesh, &addHit, true) && addHit.distance < closestT) {
+                        closestHit = addHit;
+                        closestT = addHit.distance;
+                    }
+                    if (tNearShells < closestT) {
+                        HitInfo shellHit;
+                        if (traceMesh(ray, outerShell, &shellHit, true) && shellHit.distance < closestT) {
+                            closestHit = shellHit;
+                        }
+                    }
+                }
+            } else if (hitShellsBox) {
+                traceMesh(ray, outerShell, &closestHit, true);
+            } else if (hitAdditionalBox) {
+                traceMesh(ray, additionalMesh, &closestHit, true);
+            }
+        }
+
+        // Populate output
+        if (closestHit.hit) {
+            Vec3 hitPos = ray.at(closestHit.distance);
+            bouncePositions[base+0] = hitPos.x;
+            bouncePositions[base+1] = hitPos.y;
+            bouncePositions[base+2] = hitPos.z;
+            bounceNormals[base+0] = closestHit.normal.x;
+            bounceNormals[base+1] = closestHit.normal.y;
+            bounceNormals[base+2] = closestHit.normal.z;
+            bounceColors[base+0] = closestHit.color.x;
+            bounceColors[base+1] = closestHit.color.y;
+            bounceColors[base+2] = closestHit.color.z;
+            bounceHitFlags[sampleIdx] = 1;
+        } else {
+            bounceHitFlags[sampleIdx] = 0;
+        }
+    }
+}
+
 // Finalize and output (shared kernel)
 __global__ void finalizePathTracingKernel(uchar4* output,
                                           Vec3* accum,
@@ -1196,6 +1300,116 @@ __global__ void applySegmentNeuralOutputKernel(
 }
 
 // ---------------------------------------------------------------------------
+// Trace additional mesh for all primary rays (hybrid rendering)
+// ---------------------------------------------------------------------------
+__global__ void traceAdditionalMeshPrimaryRaysKernel(
+        float* hitPositions,
+        float* hitNormals,
+        float* hitColors,
+        int* hitFlags,
+        RenderParams params,
+        MeshDeviceView additionalMesh) {
+    int x = blockIdx.x * blockDim.x + threadIdx.x;
+    int y = blockIdx.y * blockDim.y + threadIdx.y;
+    if (x >= params.width || y >= params.height) return;
+
+    // Early exit if additional mesh is empty
+    if (additionalMesh.triangleCount == 0) return;
+
+    int pixelIdx = y * params.width + x;
+    for (int s = 0; s < params.samplesPerPixel; ++s) {
+        int sampleIdx = pixelIdx + s * params.pixelCount;
+
+        // Reconstruct primary ray (same as shell tracing)
+        uint32_t rng = initRng(pixelIdx, params.sampleOffset, s);
+        Ray ray = generatePrimaryRay(x, y, params, rng);
+
+        // Trace against additional mesh
+        HitInfo hit;
+        if (traceMesh(ray, additionalMesh, &hit, true)) {
+            int base = sampleIdx * 3;
+            Vec3 hitPos = ray.at(hit.distance);
+            hitPositions[base+0] = hitPos.x;
+            hitPositions[base+1] = hitPos.y;
+            hitPositions[base+2] = hitPos.z;
+            hitNormals[base+0] = hit.normal.x;
+            hitNormals[base+1] = hit.normal.y;
+            hitNormals[base+2] = hit.normal.z;
+            hitColors[base+0] = hit.color.x;
+            hitColors[base+1] = hit.color.y;
+            hitColors[base+2] = hit.color.z;
+            hitFlags[sampleIdx] = 1;
+        } else {
+            hitFlags[sampleIdx] = 0;
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Select closest hit between shells and additional mesh (hybrid rendering)
+// ---------------------------------------------------------------------------
+__global__ void selectClosestPrimaryHitKernel(
+        float* shellHitPositions,
+        float* shellHitNormals,
+        float* shellHitColors,
+        int* shellHitFlags,
+        const float* additionalHitPositions,
+        const float* additionalHitNormals,
+        const float* additionalHitColors,
+        const int* additionalHitFlags,
+        RenderParams params) {
+    int x = blockIdx.x * blockDim.x + threadIdx.x;
+    int y = blockIdx.y * blockDim.y + threadIdx.y;
+    if (x >= params.width || y >= params.height) return;
+
+    int pixelIdx = y * params.width + x;
+    for (int s = 0; s < params.samplesPerPixel; ++s) {
+        int sampleIdx = pixelIdx + s * params.pixelCount;
+        int base = sampleIdx * 3;
+
+        bool shellHit = shellHitFlags[sampleIdx] != 0;
+        bool additionalHit = additionalHitFlags[sampleIdx] != 0;
+
+        if (shellHit && additionalHit) {
+            // Both hit - compute distances and use closer
+            Vec3 rayOrigin = params.camPos;
+            Vec3 shellPos(shellHitPositions[base+0], shellHitPositions[base+1], shellHitPositions[base+2]);
+            Vec3 additionalPos(additionalHitPositions[base+0], additionalHitPositions[base+1], additionalHitPositions[base+2]);
+
+            float shellDist = length(shellPos - rayOrigin);
+            float additionalDist = length(additionalPos - rayOrigin);
+
+            if (additionalDist < shellDist) {
+                // Use additional mesh hit
+                shellHitPositions[base+0] = additionalHitPositions[base+0];
+                shellHitPositions[base+1] = additionalHitPositions[base+1];
+                shellHitPositions[base+2] = additionalHitPositions[base+2];
+                shellHitNormals[base+0] = additionalHitNormals[base+0];
+                shellHitNormals[base+1] = additionalHitNormals[base+1];
+                shellHitNormals[base+2] = additionalHitNormals[base+2];
+                shellHitColors[base+0] = additionalHitColors[base+0];
+                shellHitColors[base+1] = additionalHitColors[base+1];
+                shellHitColors[base+2] = additionalHitColors[base+2];
+            }
+            // Else keep shell hit
+        } else if (additionalHit) {
+            // Only additional mesh hit
+            shellHitPositions[base+0] = additionalHitPositions[base+0];
+            shellHitPositions[base+1] = additionalHitPositions[base+1];
+            shellHitPositions[base+2] = additionalHitPositions[base+2];
+            shellHitNormals[base+0] = additionalHitNormals[base+0];
+            shellHitNormals[base+1] = additionalHitNormals[base+1];
+            shellHitNormals[base+2] = additionalHitNormals[base+2];
+            shellHitColors[base+0] = additionalHitColors[base+0];
+            shellHitColors[base+1] = additionalHitColors[base+1];
+            shellHitColors[base+2] = additionalHitColors[base+2];
+            shellHitFlags[sampleIdx] = 1;
+        }
+        // Else keep shell hit or miss
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Prepare for next iteration: trace outer shell re-entry and update state.
 // Implements: mask_for_remaining_rays = ~pred_intersection_mask & (x_outer_enter_mask_new | x_inner_mask)
 // ---------------------------------------------------------------------------
@@ -1469,7 +1683,7 @@ RendererNeural::RendererNeural(Scene& scene)
             {"otype", "HashGrid"},
             {"n_levels", 8},
             {"n_features_per_level", 4},
-            {"log2_hashmap_size", 16},
+            {"log2_hashmap_size", 14},
             {"base_resolution", 16},
             {"per_level_scale", 2},
             {"fixed_point_pos", false},
@@ -1645,6 +1859,7 @@ void RendererNeural::render(const Vec3& camPos, std::vector<uchar4>& hostPixels)
     originalMesh.uploadToDevice();
     outerShell.uploadToDevice();
     innerShell.uploadToDevice();
+    scene_->additionalMesh().uploadToDevice();
 
     // Select mesh for non-neural rendering (0=original, 1=inner, 2=outer).
     Mesh* classicMesh = &originalMesh;
@@ -1767,6 +1982,15 @@ void RendererNeural::render(const Vec3& camPos, std::vector<uchar4>& hostPixels)
 
     dim3 block(8, 8);
     dim3 grid((width_ + block.x - 1) / block.x, (height_ + block.y - 1) / block.y);
+
+    // Compute bounding boxes for two-level culling
+    Vec3 shellsMin = outerShell.boundsMin();
+    Vec3 shellsMax = outerShell.boundsMax();
+    BoundingBox shellsBounds{shellsMin, shellsMax};
+
+    Vec3 additionalMin = scene_->additionalMesh().boundsMin();
+    Vec3 additionalMax = scene_->additionalMesh().boundsMax();
+    BoundingBox additionalBounds{additionalMin, additionalMax};
 
     bool neuralReady = useNeuralQuery_ && pointEncoding_ && mlpNetwork_ &&
                        outerShell.triangleCount() > 0;
@@ -1970,6 +2194,33 @@ void RendererNeural::render(const Vec3& camPos, std::vector<uchar4>& hostPixels)
                       "cudaMemcpy activeCount");
         }
 
+        // Always trace additional mesh (empty mesh results in all misses)
+        MeshDeviceView additionalView = scene_->additionalMesh().deviceView();
+
+        traceAdditionalMeshPrimaryRaysKernel<<<grid, block>>>(
+                additionalHitPositions_,
+                additionalHitNormals_,
+                additionalHitColors_,
+                additionalHitFlags_,
+                params,
+                additionalView);
+        checkCuda(cudaGetLastError(), "traceAdditionalMeshPrimaryRaysKernel launch");
+        checkCuda(cudaDeviceSynchronize(), "traceAdditionalMeshPrimaryRaysKernel sync");
+
+        // Always select closest hit (if additional mesh empty, shell hits win)
+        selectClosestPrimaryHitKernel<<<grid, block>>>(
+                hitPositions_,
+                hitNormals_,
+                hitColors_,
+                hitFlags_,
+                additionalHitPositions_,
+                additionalHitNormals_,
+                additionalHitColors_,
+                additionalHitFlags_,
+                params);
+        checkCuda(cudaGetLastError(), "selectClosestPrimaryHitKernel launch");
+        checkCuda(cudaDeviceSynchronize(), "selectClosestPrimaryHitKernel sync");
+
         // 4. Path trace from neural hits using wavefront architecture.
         // (Step numbers continue from multi-segment iteration above)
         if (!lambertView_) {
@@ -2007,18 +2258,21 @@ void RendererNeural::render(const Vec3& camPos, std::vector<uchar4>& hostPixels)
                         bounceBRDFs_);
                 checkCuda(cudaGetLastError(), "sampleBounceDirectionsKernel launch");
 
-                // Trace bounce rays against outer shell (NOT original mesh!)
-                traceGroundTruthBouncesKernel<<<grid, block>>>(
+                // Always use hybrid bounce kernel (handles empty additional mesh internally)
+                traceHybridBouncesKernel<<<grid, block>>>(
                         bounceOrigins_,
                         bounceDirections_,
                         bouncePdfs_,
-                        outerView,  // Use outer shell for neural mode
+                        outerView,
+                        additionalView,
+                        shellsBounds,
+                        additionalBounds,
                         params,
                         bouncePositions_,
                         bounceNormals_,
                         bounceColors_,
                         bounceHitFlags_);
-                checkCuda(cudaGetLastError(), "traceGroundTruthBouncesKernel launch");
+                checkCuda(cudaGetLastError(), "traceHybridBouncesKernel launch");
 
                 // Integrate bounce results (shared with GT)
                 integrateBounceKernel<<<grid, block>>>(
@@ -2198,6 +2452,10 @@ void RendererNeural::release() {
     freePtr(hitNormals_);
     freePtr(hitColors_);
     freePtr(hitFlags_);
+    freePtr(additionalHitPositions_);
+    freePtr(additionalHitNormals_);
+    freePtr(additionalHitColors_);
+    freePtr(additionalHitFlags_);
     freePtr(outputs_);
     freePtr(bouncePositions_);
     freePtr(bounceNormals_);
@@ -2296,6 +2554,10 @@ bool RendererNeural::ensureNetworkBuffers(size_t elementCount) {
     freePtr(hitNormals_);
     freePtr(hitColors_);
     freePtr(hitFlags_);
+    freePtr(additionalHitPositions_);
+    freePtr(additionalHitNormals_);
+    freePtr(additionalHitColors_);
+    freePtr(additionalHitFlags_);
     freePtr(outputs_);
     freePtr(bouncePositions_);
     freePtr(bounceNormals_);
@@ -2368,6 +2630,12 @@ bool RendererNeural::ensureNetworkBuffers(size_t elementCount) {
     checkCuda(cudaMalloc(&hitNormals_, vec3Bytes), "cudaMalloc hitNormals");
     checkCuda(cudaMalloc(&hitColors_, vec3Bytes), "cudaMalloc hitColors");
     checkCuda(cudaMalloc(&hitFlags_, intBytes), "cudaMalloc hitFlags");
+
+    // Additional mesh hit buffers (for hybrid rendering).
+    checkCuda(cudaMalloc(&additionalHitPositions_, vec3Bytes), "cudaMalloc additionalHitPositions");
+    checkCuda(cudaMalloc(&additionalHitNormals_, vec3Bytes), "cudaMalloc additionalHitNormals");
+    checkCuda(cudaMalloc(&additionalHitColors_, vec3Bytes), "cudaMalloc additionalHitColors");
+    checkCuda(cudaMalloc(&additionalHitFlags_, intBytes), "cudaMalloc additionalHitFlags");
 
     // Bounce buffers.
     checkCuda(cudaMalloc(&bouncePositions_, vec3Bytes), "cudaMalloc bouncePositions");

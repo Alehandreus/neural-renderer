@@ -41,6 +41,7 @@ struct RendererConfig {
     MeshConfig original_mesh;
     MeshConfig inner_shell;
     MeshConfig outer_shell;
+    MeshConfig additional_mesh;
     std::string checkpoint_path;
     EnvironmentConfig environment;
     CameraConfig camera;

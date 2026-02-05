@@ -60,6 +60,9 @@ public:
     Mesh& outerShell() { return outerShell_; }
     const Mesh& outerShell() const { return outerShell_; }
 
+    Mesh& additionalMesh() { return additionalMesh_; }
+    const Mesh& additionalMesh() const { return additionalMesh_; }
+
     EnvironmentMap& environment() { return environment_; }
     const EnvironmentMap& environment() const { return environment_; }
 
@@ -70,6 +73,7 @@ private:
     Mesh originalMesh_;
     Mesh innerShell_;
     Mesh outerShell_;
+    Mesh additionalMesh_;
     EnvironmentMap environment_;
     Material material_;
 };

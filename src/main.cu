@@ -120,10 +120,12 @@ int main(int argc, char** argv) {
     Mesh& originalMesh = scene.originalMesh();
     Mesh& innerShell = scene.innerShell();
     Mesh& outerShell = scene.outerShell();
+    Mesh& additionalMesh = scene.additionalMesh();
 
     std::string originalMeshLabel = "procedural sphere";
     std::string innerShellLabel = "(none)";
     std::string outerShellLabel = "(none)";
+    std::string additionalMeshLabel = "(none)";
 
     if (!config.original_mesh.path.empty() && loadMesh(config.original_mesh.path.c_str(), &originalMesh, "original",
                                                         config.rendering.normalize_meshes,
@@ -145,6 +147,13 @@ int main(int argc, char** argv) {
                                                       config.rendering.normalize_meshes, false,
                                                       config.outer_shell.scale)) {
         outerShellLabel = config.outer_shell.path;
+    }
+
+    if (!config.additional_mesh.path.empty() && loadMesh(config.additional_mesh.path.c_str(), &additionalMesh, "additional mesh",
+                                                          config.rendering.normalize_meshes,
+                                                          config.rendering.nearest_texture_sampling,
+                                                          config.additional_mesh.scale)) {
+        additionalMeshLabel = config.additional_mesh.path;
     }
 
     // Check if mesh has vertex colors, if not use material color from config
@@ -235,7 +244,7 @@ int main(int argc, char** argv) {
 
     double lastTime = glfwGetTime();
     bool lambertView = false;
-    bool useNeuralQuery = true;
+    bool useNeuralQuery = false;
     int bounceCount = kBounceCount;
     int samplesPerPixel = kSamplesPerPixel;
     int classicMeshIndex = 0;
@@ -442,6 +451,13 @@ int main(int argc, char** argv) {
                         outerShell.triangleCount(),
                         outerShell.nodeCount(),
                         static_cast<double>(outerShell.bvhStorageBytes()) / (1024.0 * 1024.0));
+        }
+        ImGui::Text("Additional: %s", additionalMeshLabel.c_str());
+        if (additionalMesh.triangleCount() > 0) {
+            ImGui::Text("  triangles: %d, BVH: %d (%.2f MB)",
+                        additionalMesh.triangleCount(),
+                        additionalMesh.nodeCount(),
+                        static_cast<double>(additionalMesh.bvhStorageBytes()) / (1024.0 * 1024.0));
         }
         ImGui::Text("Network params (fp16): %.2f MB",
                     static_cast<double>(renderer.paramsBytes()) / (1024.0 * 1024.0));
