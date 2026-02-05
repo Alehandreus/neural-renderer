@@ -113,7 +113,7 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    const int kBounceCount = 3;
+    const int kBounceCount = 2;
     const int kSamplesPerPixel = 1;
 
     Scene scene;

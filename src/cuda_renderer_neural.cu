@@ -18,8 +18,6 @@
 #include "scene.h"
 #include "disney_brdf.cuh"
 
-namespace {
-
 struct RenderParams {
     Vec3 camPos;
     Vec3 camForward;
@@ -39,6 +37,8 @@ struct RenderParams {
     int samplesPerPixel;
     uint32_t sampleOffset;
 };
+
+namespace {
 
 struct BoundingBox {
     Vec3 min;
@@ -1095,6 +1095,91 @@ __global__ void traceOuterShellEntryKernel(
 }
 
 // ---------------------------------------------------------------------------
+// Initial outer shell entry tracing for arbitrary rays.
+// Handles rays that start inside the outer shell by exiting first.
+// ---------------------------------------------------------------------------
+__global__ void traceOuterShellEntryFromRaysKernel(
+        const float* rayOrigins,
+        const float* rayDirections,
+        const int* rayActiveMask,
+        const float* rayPdfs,
+        float* entryPositions,
+        float* entryT,
+        int* activeFlags,
+        float* accumT,
+        RenderParams params,
+        MeshDeviceView outerShell) {
+    int x = blockIdx.x * blockDim.x + threadIdx.x;
+    int y = blockIdx.y * blockDim.y + threadIdx.y;
+    if (x >= params.width || y >= params.height) {
+        return;
+    }
+
+    int pixelIdx = y * params.width + x;
+    for (int s = 0; s < params.samplesPerPixel; ++s) {
+        int sampleIdx = pixelIdx + s * params.pixelCount;
+        int base = sampleIdx * 3;
+
+        if (rayActiveMask && !rayActiveMask[sampleIdx]) {
+            entryPositions[base + 0] = 0.0f;
+            entryPositions[base + 1] = 0.0f;
+            entryPositions[base + 2] = 0.0f;
+            entryT[sampleIdx] = 0.0f;
+            activeFlags[sampleIdx] = 0;
+            accumT[sampleIdx] = 0.0f;
+            continue;
+        }
+        if (rayPdfs && rayPdfs[sampleIdx] <= 0.0f) {
+            entryPositions[base + 0] = 0.0f;
+            entryPositions[base + 1] = 0.0f;
+            entryPositions[base + 2] = 0.0f;
+            entryT[sampleIdx] = 0.0f;
+            activeFlags[sampleIdx] = 0;
+            accumT[sampleIdx] = 0.0f;
+            continue;
+        }
+
+        Vec3 origin(rayOrigins[base + 0], rayOrigins[base + 1], rayOrigins[base + 2]);
+        Vec3 dir(rayDirections[base + 0], rayDirections[base + 1], rayDirections[base + 2]);
+        Ray ray(origin, dir);
+
+        HitInfo outerHit{false, 0.0f, Vec3(), Vec3(), Vec2(), -1, -1};
+        bool hitOuter = traceMeshWithMode(ray, outerShell, &outerHit, TraceMode::FORWARD_ONLY, false, params.material);
+
+        float baseOffset = 0.0f;
+        Vec3 entryOrigin = origin;
+        if (!hitOuter) {
+            HitInfo exitHit{false, 0.0f, Vec3(), Vec3(), Vec2(), -1, -1};
+            bool hitExit = traceMeshWithMode(ray, outerShell, &exitHit, TraceMode::BACKWARD_ONLY, false, params.material);
+            if (hitExit) {
+                baseOffset = exitHit.distance + kSegmentEpsilon;
+                entryOrigin = origin + dir * baseOffset;
+                Ray shiftedRay(entryOrigin, dir);
+                hitOuter = traceMeshWithMode(shiftedRay, outerShell, &outerHit, TraceMode::FORWARD_ONLY, false, params.material);
+            }
+        }
+
+        if (hitOuter) {
+            Vec3 entryPos = entryOrigin + dir * outerHit.distance;
+            float totalEntryT = baseOffset + outerHit.distance;
+            entryPositions[base + 0] = entryPos.x;
+            entryPositions[base + 1] = entryPos.y;
+            entryPositions[base + 2] = entryPos.z;
+            entryT[sampleIdx] = totalEntryT;
+            activeFlags[sampleIdx] = 1;
+            accumT[sampleIdx] = totalEntryT;
+        } else {
+            entryPositions[base + 0] = 0.0f;
+            entryPositions[base + 1] = 0.0f;
+            entryPositions[base + 2] = 0.0f;
+            entryT[sampleIdx] = 0.0f;
+            activeFlags[sampleIdx] = 0;
+            accumT[sampleIdx] = 0.0f;
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Trace segment exits: outer shell backward and inner shell forward.
 // Computes exit position as min(outer_exit, inner_enter).
 // ---------------------------------------------------------------------------
@@ -1335,12 +1420,13 @@ __global__ void traceAdditionalMeshPrimaryRaysKernel(
     int y = blockIdx.y * blockDim.y + threadIdx.y;
     if (x >= params.width || y >= params.height) return;
 
-    // Early exit if additional mesh is empty
-    if (additionalMesh.triangleCount == 0) return;
-
     int pixelIdx = y * params.width + x;
     for (int s = 0; s < params.samplesPerPixel; ++s) {
         int sampleIdx = pixelIdx + s * params.pixelCount;
+        if (additionalMesh.triangleCount == 0) {
+            hitFlags[sampleIdx] = 0;
+            continue;
+        }
 
         // Reconstruct primary ray (same as shell tracing)
         uint32_t rng = initRng(pixelIdx, params.sampleOffset, s);
@@ -1360,6 +1446,61 @@ __global__ void traceAdditionalMeshPrimaryRaysKernel(
             hitColors[base+0] = hit.color.x;
             hitColors[base+1] = hit.color.y;
             hitColors[base+2] = hit.color.z;
+            hitFlags[sampleIdx] = 1;
+        } else {
+            hitFlags[sampleIdx] = 0;
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Trace additional mesh for arbitrary rays (hybrid rendering).
+// ---------------------------------------------------------------------------
+__global__ void traceAdditionalMeshRaysKernel(
+        const float* rayOrigins,
+        const float* rayDirections,
+        const float* rayPdfs,
+        float* hitPositions,
+        float* hitNormals,
+        float* hitColors,
+        int* hitFlags,
+        RenderParams params,
+        MeshDeviceView additionalMesh) {
+    int x = blockIdx.x * blockDim.x + threadIdx.x;
+    int y = blockIdx.y * blockDim.y + threadIdx.y;
+    if (x >= params.width || y >= params.height) return;
+
+    int pixelIdx = y * params.width + x;
+    for (int s = 0; s < params.samplesPerPixel; ++s) {
+        int sampleIdx = pixelIdx + s * params.pixelCount;
+        int base = sampleIdx * 3;
+
+        if (additionalMesh.triangleCount == 0) {
+            hitFlags[sampleIdx] = 0;
+            continue;
+        }
+
+        if (rayPdfs && rayPdfs[sampleIdx] <= 0.0f) {
+            hitFlags[sampleIdx] = 0;
+            continue;
+        }
+
+        Vec3 origin(rayOrigins[base + 0], rayOrigins[base + 1], rayOrigins[base + 2]);
+        Vec3 dir(rayDirections[base + 0], rayDirections[base + 1], rayDirections[base + 2]);
+        Ray ray(origin, dir);
+
+        HitInfo hit;
+        if (traceMesh(ray, additionalMesh, &hit, true, params.material)) {
+            Vec3 hitPos = ray.at(hit.distance);
+            hitPositions[base + 0] = hitPos.x;
+            hitPositions[base + 1] = hitPos.y;
+            hitPositions[base + 2] = hitPos.z;
+            hitNormals[base + 0] = hit.normal.x;
+            hitNormals[base + 1] = hit.normal.y;
+            hitNormals[base + 2] = hit.normal.z;
+            hitColors[base + 0] = hit.color.x;
+            hitColors[base + 1] = hit.color.y;
+            hitColors[base + 2] = hit.color.z;
             hitFlags[sampleIdx] = 1;
         } else {
             hitFlags[sampleIdx] = 0;
@@ -1428,6 +1569,66 @@ __global__ void selectClosestPrimaryHitKernel(
             shellHitFlags[sampleIdx] = 1;
         }
         // Else keep shell hit or miss
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Select closest hit between shells and additional mesh (per-ray origin).
+// ---------------------------------------------------------------------------
+__global__ void selectClosestHitKernel(
+        float* shellHitPositions,
+        float* shellHitNormals,
+        float* shellHitColors,
+        int* shellHitFlags,
+        const float* additionalHitPositions,
+        const float* additionalHitNormals,
+        const float* additionalHitColors,
+        const int* additionalHitFlags,
+        const float* rayOrigins,
+        RenderParams params) {
+    int x = blockIdx.x * blockDim.x + threadIdx.x;
+    int y = blockIdx.y * blockDim.y + threadIdx.y;
+    if (x >= params.width || y >= params.height) return;
+
+    int pixelIdx = y * params.width + x;
+    for (int s = 0; s < params.samplesPerPixel; ++s) {
+        int sampleIdx = pixelIdx + s * params.pixelCount;
+        int base = sampleIdx * 3;
+
+        bool shellHit = shellHitFlags[sampleIdx] != 0;
+        bool additionalHit = additionalHitFlags[sampleIdx] != 0;
+
+        if (shellHit && additionalHit) {
+            Vec3 rayOrigin(rayOrigins[base + 0], rayOrigins[base + 1], rayOrigins[base + 2]);
+            Vec3 shellPos(shellHitPositions[base + 0], shellHitPositions[base + 1], shellHitPositions[base + 2]);
+            Vec3 additionalPos(additionalHitPositions[base + 0], additionalHitPositions[base + 1], additionalHitPositions[base + 2]);
+
+            float shellDist = length(shellPos - rayOrigin);
+            float additionalDist = length(additionalPos - rayOrigin);
+
+            if (additionalDist < shellDist) {
+                shellHitPositions[base + 0] = additionalHitPositions[base + 0];
+                shellHitPositions[base + 1] = additionalHitPositions[base + 1];
+                shellHitPositions[base + 2] = additionalHitPositions[base + 2];
+                shellHitNormals[base + 0] = additionalHitNormals[base + 0];
+                shellHitNormals[base + 1] = additionalHitNormals[base + 1];
+                shellHitNormals[base + 2] = additionalHitNormals[base + 2];
+                shellHitColors[base + 0] = additionalHitColors[base + 0];
+                shellHitColors[base + 1] = additionalHitColors[base + 1];
+                shellHitColors[base + 2] = additionalHitColors[base + 2];
+            }
+        } else if (additionalHit) {
+            shellHitPositions[base + 0] = additionalHitPositions[base + 0];
+            shellHitPositions[base + 1] = additionalHitPositions[base + 1];
+            shellHitPositions[base + 2] = additionalHitPositions[base + 2];
+            shellHitNormals[base + 0] = additionalHitNormals[base + 0];
+            shellHitNormals[base + 1] = additionalHitNormals[base + 1];
+            shellHitNormals[base + 2] = additionalHitNormals[base + 2];
+            shellHitColors[base + 0] = additionalHitColors[base + 0];
+            shellHitColors[base + 1] = additionalHitColors[base + 1];
+            shellHitColors[base + 2] = additionalHitColors[base + 2];
+            shellHitFlags[sampleIdx] = 1;
+        }
     }
 }
 
@@ -1863,6 +2064,233 @@ bool RendererNeural::loadWeightsFromFile(const std::string& path) {
     return true;
 }
 
+void RendererNeural::traceNeuralSegmentsForRays(bool useCameraRays,
+                                                const float* rayOrigins,
+                                                const float* rayDirections,
+                                                const int* rayActiveMask,
+                                                const float* rayPdfs,
+                                                size_t elementCount,
+                                                const RenderParams& params,
+                                                const MeshDeviceView& outerView,
+                                                const MeshDeviceView& innerView,
+                                                Vec3 outerMin,
+                                                Vec3 outerInvExtent,
+                                                float* outHitPositions,
+                                                float* outHitNormals,
+                                                float* outHitColors,
+                                                int* outHitFlags) {
+    if (elementCount == 0) {
+        return;
+    }
+
+    dim3 block(8, 8);
+    dim3 grid((width_ + block.x - 1) / block.x, (height_ + block.y - 1) / block.y);
+
+    int elementCountInt = static_cast<int>(elementCount);
+    const int compactBlock = 256;
+    int compactGrid = static_cast<int>((elementCount + compactBlock - 1) / compactBlock);
+
+    checkCuda(cudaMemset(outHitFlags, 0, elementCount * sizeof(int)), "cudaMemset hitFlags");
+    checkCuda(cudaMemset(outHitPositions, 0, elementCount * 3 * sizeof(float)), "cudaMemset hitPositions");
+    checkCuda(cudaMemset(outHitNormals, 0, elementCount * 3 * sizeof(float)), "cudaMemset hitNormals");
+    checkCuda(cudaMemset(outHitColors, 0, elementCount * 3 * sizeof(float)), "cudaMemset hitColors");
+
+    const float* segmentRayDirections = nullptr;
+    if (useCameraRays) {
+        traceOuterShellEntryKernel<<<grid, block>>>(
+                currentEntryPos_,
+                outerExitT_,
+                rayDirections_,
+                rayActiveFlags_,
+                accumT_,
+                params,
+                outerView);
+        checkCuda(cudaGetLastError(), "traceOuterShellEntryKernel launch");
+        segmentRayDirections = rayDirections_;
+    } else {
+        if (!rayOrigins || !rayDirections) {
+            return;
+        }
+        traceOuterShellEntryFromRaysKernel<<<grid, block>>>(
+                rayOrigins,
+                rayDirections,
+                rayActiveMask,
+                rayPdfs,
+                currentEntryPos_,
+                outerExitT_,
+                rayActiveFlags_,
+                accumT_,
+                params,
+                outerView);
+        checkCuda(cudaGetLastError(), "traceOuterShellEntryFromRaysKernel launch");
+        segmentRayDirections = rayDirections;
+    }
+
+    checkCuda(cudaMemset(hitCount_, 0, sizeof(int)), "cudaMemset hitCount");
+    compactInputsKernel<<<compactGrid, compactBlock>>>(
+            rayActiveFlags_,
+            elementCountInt,
+            hitIndices_,
+            hitCount_);
+    checkCuda(cudaGetLastError(), "compactInputsKernel launch");
+
+    int activeCount = 0;
+    checkCuda(cudaMemcpy(&activeCount, hitCount_, sizeof(int), cudaMemcpyDeviceToHost),
+              "cudaMemcpy activeCount");
+
+    for (int iter = 0; iter < kMaxSegmentIterations && activeCount > 0; ++iter) {
+        size_t activeCountSize = static_cast<size_t>(activeCount);
+        size_t granularity = static_cast<size_t>(tcnn::cpp::batch_size_granularity());
+        size_t paddedActiveCount = roundUp(activeCountSize, granularity);
+
+        const int buildBlock = 256;
+        int buildGrid = (activeCount + buildBlock - 1) / buildBlock;
+
+        traceSegmentExitsKernel<<<buildGrid, buildBlock>>>(
+                currentEntryPos_,
+                segmentRayDirections,
+                hitIndices_,
+                activeCount,
+                outerView,
+                innerView,
+                params.material,
+                segmentExitPos_,
+                outerExitT_,
+                innerEnterT_,
+                innerHitFlags_);
+        checkCuda(cudaGetLastError(), "traceSegmentExitsKernel launch");
+
+        buildSegmentNeuralInputsKernel<<<buildGrid, buildBlock>>>(
+                currentEntryPos_,
+                segmentExitPos_,
+                segmentRayDirections,
+                hitIndices_,
+                activeCount,
+                outerMin,
+                outerInvExtent,
+                compactedOuterPos_,
+                compactedInnerPos_,
+                compactedDirs_);
+        checkCuda(cudaGetLastError(), "buildSegmentNeuralInputsKernel launch");
+
+        if (paddedActiveCount > activeCountSize) {
+            size_t tail = paddedActiveCount - activeCountSize;
+            checkCuda(cudaMemset(compactedOuterPos_ + activeCountSize * 3, 0, tail * 3 * sizeof(float)),
+                      "cudaMemset entry pos tail");
+            checkCuda(cudaMemset(compactedInnerPos_ + activeCountSize * 3, 0, tail * 3 * sizeof(float)),
+                      "cudaMemset exit pos tail");
+            checkCuda(cudaMemset(compactedDirs_ + activeCountSize * 3, 0, tail * 3 * sizeof(float)),
+                      "cudaMemset dirs tail");
+        }
+
+        uint32_t batchSize = static_cast<uint32_t>(paddedActiveCount);
+
+        {
+            tcnn::cpp::Context ctx = pointEncoding_->forward(
+                0, batchSize,
+                compactedOuterPos_,
+                pointEncOutput1_,
+                pointEncParams_,
+                false);
+            (void)ctx;
+        }
+
+        {
+            tcnn::cpp::Context ctx = pointEncoding_->forward(
+                0, batchSize,
+                compactedInnerPos_,
+                pointEncOutput2_,
+                pointEncParams_,
+                false);
+            (void)ctx;
+        }
+
+        {
+            tcnn::cpp::Context ctx = dirEncoding_->forward(
+                0, batchSize,
+                compactedDirs_,
+                dirEncOutput_,
+                dirEncParams_,
+                false);
+            (void)ctx;
+        }
+
+        concatenateEncodingsKernel<<<buildGrid, buildBlock>>>(
+                static_cast<const __half*>(pointEncOutput1_),
+                pointEncOutDims_,
+                static_cast<const __half*>(pointEncOutput2_),
+                pointEncOutDims_,
+                static_cast<const __half*>(dirEncOutput_),
+                dirEncOutDims_,
+                mlpInput_,
+                mlpInputDims_,
+                activeCount);
+        checkCuda(cudaGetLastError(), "concatenateEncodingsKernel launch");
+
+        if (paddedActiveCount > activeCountSize) {
+            size_t tail = paddedActiveCount - activeCountSize;
+            checkCuda(cudaMemset(mlpInput_ + activeCountSize * mlpInputDims_, 0,
+                                 tail * mlpInputDims_ * sizeof(float)),
+                      "cudaMemset mlp input tail");
+        }
+
+        {
+            tcnn::cpp::Context ctx = mlpNetwork_->forward(
+                0, batchSize,
+                mlpInput_,
+                outputs_,
+                mlpParams_,
+                false);
+            (void)ctx;
+        }
+
+        applySegmentNeuralOutputKernel<<<buildGrid, buildBlock>>>(
+                static_cast<const __half*>(outputs_),
+                static_cast<int>(mlpOutputDims_),
+                hitIndices_,
+                activeCount,
+                currentEntryPos_,
+                segmentRayDirections,
+                accumT_,
+                innerHitFlags_,
+                innerEnterT_,
+                outerExitT_,
+                outHitPositions,
+                outHitNormals,
+                outHitColors,
+                outHitFlags,
+                rayActiveFlags_,
+                params.material);
+        checkCuda(cudaGetLastError(), "applySegmentNeuralOutputKernel launch");
+
+        prepareNextIterationKernel<<<buildGrid, buildBlock>>>(
+                segmentExitPos_,
+                outerExitT_,
+                segmentRayDirections,
+                innerHitFlags_,
+                hitIndices_,
+                activeCount,
+                outerView,
+                params.material,
+                currentEntryPos_,
+                rayActiveFlags_,
+                accumT_,
+                innerEnterT_);
+        checkCuda(cudaGetLastError(), "prepareNextIterationKernel launch");
+
+        checkCuda(cudaMemset(hitCount_, 0, sizeof(int)), "cudaMemset hitCount");
+        compactInputsKernel<<<compactGrid, compactBlock>>>(
+                rayActiveFlags_,
+                elementCountInt,
+                hitIndices_,
+                hitCount_);
+        checkCuda(cudaGetLastError(), "compactInputsKernel launch");
+
+        checkCuda(cudaMemcpy(&activeCount, hitCount_, sizeof(int), cudaMemcpyDeviceToHost),
+                  "cudaMemcpy activeCount");
+    }
+}
+
 void RendererNeural::render(const Vec3& camPos, std::vector<uchar4>& hostPixels) {
     if (width_ <= 0 || height_ <= 0) {
         return;
@@ -2011,218 +2439,25 @@ void RendererNeural::render(const Vec3& camPos, std::vector<uchar4>& hostPixels)
     dim3 block(8, 8);
     dim3 grid((width_ + block.x - 1) / block.x, (height_ + block.y - 1) / block.y);
 
-    // Compute bounding boxes for two-level culling
-    Vec3 shellsMin = outerShell.boundsMin();
-    Vec3 shellsMax = outerShell.boundsMax();
-    BoundingBox shellsBounds{shellsMin, shellsMax};
-
-    Vec3 additionalMin = scene_->additionalMesh().boundsMin();
-    Vec3 additionalMax = scene_->additionalMesh().boundsMax();
-    BoundingBox additionalBounds{additionalMin, additionalMax};
-
     bool neuralReady = useNeuralQuery_ && pointEncoding_ && mlpNetwork_ &&
                        outerShell.triangleCount() > 0;
     if (neuralReady) {
-        // --- Multi-segment iterative neural rendering pipeline ---
-
-        int elementCountInt = static_cast<int>(elementCount);
-        const int compactBlock = 256;
-        int compactGrid = static_cast<int>((elementCount + compactBlock - 1) / compactBlock);
-
-        // Initialize result buffers (no intersections yet).
-        checkCuda(cudaMemset(hitFlags_, 0, elementCount * sizeof(int)), "cudaMemset hitFlags");
-        checkCuda(cudaMemset(hitPositions_, 0, elementCount * 3 * sizeof(float)), "cudaMemset hitPositions");
-        checkCuda(cudaMemset(hitNormals_, 0, elementCount * 3 * sizeof(float)), "cudaMemset hitNormals");
-        checkCuda(cudaMemset(hitColors_, 0, elementCount * 3 * sizeof(float)), "cudaMemset hitColors");
-
-        // 1. Trace initial outer shell entry.
-        traceOuterShellEntryKernel<<<grid, block>>>(
-                currentEntryPos_,
-                outerExitT_,  // Temporarily store entry_t here
-                rayDirections_,
-                rayActiveFlags_,
-                accumT_,
+        traceNeuralSegmentsForRays(
+                true,
+                nullptr,
+                nullptr,
+                nullptr,
+                nullptr,
+                elementCount,
                 params,
-                outerView);
-        checkCuda(cudaGetLastError(), "traceOuterShellEntryKernel launch");
-
-        // 2. Initial compaction by rays that hit outer shell.
-        checkCuda(cudaMemset(hitCount_, 0, sizeof(int)), "cudaMemset hitCount");
-        compactInputsKernel<<<compactGrid, compactBlock>>>(
-                rayActiveFlags_,
-                elementCountInt,
-                hitIndices_,
-                hitCount_);
-        checkCuda(cudaGetLastError(), "compactInputsKernel launch");
-
-        int activeCount = 0;
-        checkCuda(cudaMemcpy(&activeCount, hitCount_, sizeof(int), cudaMemcpyDeviceToHost),
-                  "cudaMemcpy activeCount");
-
-        // 3. Multi-segment iteration loop.
-        for (int iter = 0; iter < kMaxSegmentIterations && activeCount > 0; ++iter) {
-            size_t activeCountSize = static_cast<size_t>(activeCount);
-            size_t granularity = static_cast<size_t>(tcnn::cpp::batch_size_granularity());
-            size_t paddedActiveCount = roundUp(activeCountSize, granularity);
-
-            const int buildBlock = 256;
-            int buildGrid = (activeCount + buildBlock - 1) / buildBlock;
-
-            // 3a. Trace segment exits (outer shell backward, inner shell forward).
-            traceSegmentExitsKernel<<<buildGrid, buildBlock>>>(
-                    currentEntryPos_,
-                    rayDirections_,
-                    hitIndices_,
-                    activeCount,
-                    outerView,
-                    innerView,
-                    params.material,
-                    segmentExitPos_,
-                    outerExitT_,
-                    innerEnterT_,
-                    innerHitFlags_);
-            checkCuda(cudaGetLastError(), "traceSegmentExitsKernel launch");
-
-            // 3b. Build neural network inputs for current segment.
-            buildSegmentNeuralInputsKernel<<<buildGrid, buildBlock>>>(
-                    currentEntryPos_,
-                    segmentExitPos_,
-                    rayDirections_,
-                    hitIndices_,
-                    activeCount,
-                    outerMin,
-                    outerInvExtent,
-                    compactedOuterPos_,  // entry pos
-                    compactedInnerPos_,  // exit pos
-                    compactedDirs_);
-            checkCuda(cudaGetLastError(), "buildSegmentNeuralInputsKernel launch");
-
-            // Zero-pad tails for TCNN alignment.
-            if (paddedActiveCount > activeCountSize) {
-                size_t tail = paddedActiveCount - activeCountSize;
-                checkCuda(cudaMemset(compactedOuterPos_ + activeCountSize * 3, 0, tail * 3 * sizeof(float)),
-                          "cudaMemset entry pos tail");
-                checkCuda(cudaMemset(compactedInnerPos_ + activeCountSize * 3, 0, tail * 3 * sizeof(float)),
-                          "cudaMemset exit pos tail");
-                checkCuda(cudaMemset(compactedDirs_ + activeCountSize * 3, 0, tail * 3 * sizeof(float)),
-                          "cudaMemset dirs tail");
-            }
-
-            uint32_t batchSize = static_cast<uint32_t>(paddedActiveCount);
-
-            // 3c. Point encoding: entry positions.
-            {
-                tcnn::cpp::Context ctx = pointEncoding_->forward(
-                    0, batchSize,
-                    compactedOuterPos_,
-                    pointEncOutput1_,
-                    pointEncParams_,
-                    false);
-                (void)ctx;
-            }
-
-            // 3d. Point encoding: exit positions.
-            {
-                tcnn::cpp::Context ctx = pointEncoding_->forward(
-                    0, batchSize,
-                    compactedInnerPos_,
-                    pointEncOutput2_,
-                    pointEncParams_,
-                    false);
-                (void)ctx;
-            }
-
-            // 3e. Direction encoding.
-            {
-                tcnn::cpp::Context ctx = dirEncoding_->forward(
-                    0, batchSize,
-                    compactedDirs_,
-                    dirEncOutput_,
-                    dirEncParams_,
-                    false);
-                (void)ctx;
-            }
-
-            // 3f. Concatenate FP16 encoding outputs into FP32 MLP input.
-            concatenateEncodingsKernel<<<buildGrid, buildBlock>>>(
-                    static_cast<const __half*>(pointEncOutput1_),
-                    pointEncOutDims_,
-                    static_cast<const __half*>(pointEncOutput2_),
-                    pointEncOutDims_,
-                    static_cast<const __half*>(dirEncOutput_),
-                    dirEncOutDims_,
-                    mlpInput_,
-                    mlpInputDims_,
-                    activeCount);
-            checkCuda(cudaGetLastError(), "concatenateEncodingsKernel launch");
-
-            // Zero-pad MLP input tail.
-            if (paddedActiveCount > activeCountSize) {
-                size_t tail = paddedActiveCount - activeCountSize;
-                checkCuda(cudaMemset(mlpInput_ + activeCountSize * mlpInputDims_, 0,
-                                     tail * mlpInputDims_ * sizeof(float)),
-                          "cudaMemset mlp input tail");
-            }
-
-            // 3g. MLP forward pass.
-            {
-                tcnn::cpp::Context ctx = mlpNetwork_->forward(
-                    0, batchSize,
-                    mlpInput_,
-                    outputs_,
-                    mlpParams_,
-                    false);
-                (void)ctx;
-            }
-
-            // 3h. Apply neural outputs and update ray state.
-            applySegmentNeuralOutputKernel<<<buildGrid, buildBlock>>>(
-                    static_cast<const __half*>(outputs_),
-                    static_cast<int>(mlpOutputDims_),
-                    hitIndices_,
-                    activeCount,
-                    currentEntryPos_,
-                    rayDirections_,
-                    accumT_,
-                    innerHitFlags_,
-                    innerEnterT_,
-                    outerExitT_,
-                    hitPositions_,
-                    hitNormals_,
-                    hitColors_,
-                    hitFlags_,
-                    rayActiveFlags_,
-                    params.material);
-            checkCuda(cudaGetLastError(), "applySegmentNeuralOutputKernel launch");
-
-            // 3i. Prepare for next iteration (trace outer shell re-entry).
-            prepareNextIterationKernel<<<buildGrid, buildBlock>>>(
-                    segmentExitPos_,
-                    outerExitT_,
-                    rayDirections_,
-                    innerHitFlags_,
-                    hitIndices_,
-                    activeCount,
-                    outerView,
-                    params.material,
-                    currentEntryPos_,
-                    rayActiveFlags_,
-                    accumT_,
-                    innerEnterT_);  // Reuse as newEntryT
-            checkCuda(cudaGetLastError(), "prepareNextIterationKernel launch");
-
-            // 3j. Re-compact active rays for next iteration.
-            checkCuda(cudaMemset(hitCount_, 0, sizeof(int)), "cudaMemset hitCount");
-            compactInputsKernel<<<compactGrid, compactBlock>>>(
-                    rayActiveFlags_,
-                    elementCountInt,
-                    hitIndices_,
-                    hitCount_);
-            checkCuda(cudaGetLastError(), "compactInputsKernel launch");
-
-            checkCuda(cudaMemcpy(&activeCount, hitCount_, sizeof(int), cudaMemcpyDeviceToHost),
-                      "cudaMemcpy activeCount");
-        }
+                outerView,
+                innerView,
+                outerMin,
+                outerInvExtent,
+                hitPositions_,
+                hitNormals_,
+                hitColors_,
+                hitFlags_);
 
         // Always trace additional mesh (empty mesh results in all misses)
         MeshDeviceView additionalView = scene_->additionalMesh().deviceView();
@@ -2266,8 +2501,7 @@ void RendererNeural::render(const Vec3& camPos, std::vector<uchar4>& hostPixels)
                     envView);
             checkCuda(cudaGetLastError(), "initializePathStateKernel launch");
 
-            // Wavefront bounce loop for neural mode
-            // Neural bounces trace against outer shell (not original mesh)
+            // Wavefront bounce loop for neural mode (neural segments + additional mesh)
             float* currentHitPos = hitPositions_;
             float* currentHitNormals = hitNormals_;
             float* currentHitColors = hitColors_;
@@ -2288,21 +2522,47 @@ void RendererNeural::render(const Vec3& camPos, std::vector<uchar4>& hostPixels)
                         bounceBRDFs_);
                 checkCuda(cudaGetLastError(), "sampleBounceDirectionsKernel launch");
 
-                // Always use hybrid bounce kernel (handles empty additional mesh internally)
-                traceHybridBouncesKernel<<<grid, block>>>(
+                traceNeuralSegmentsForRays(
+                        false,
                         bounceOrigins_,
                         bounceDirections_,
+                        pathActive_,
                         bouncePdfs_,
-                        outerView,
-                        additionalView,
-                        shellsBounds,
-                        additionalBounds,
+                        elementCount,
                         params,
+                        outerView,
+                        innerView,
+                        outerMin,
+                        outerInvExtent,
                         bouncePositions_,
                         bounceNormals_,
                         bounceColors_,
                         bounceHitFlags_);
-                checkCuda(cudaGetLastError(), "traceHybridBouncesKernel launch");
+
+                traceAdditionalMeshRaysKernel<<<grid, block>>>(
+                        bounceOrigins_,
+                        bounceDirections_,
+                        bouncePdfs_,
+                        additionalHitPositions_,
+                        additionalHitNormals_,
+                        additionalHitColors_,
+                        additionalHitFlags_,
+                        params,
+                        additionalView);
+                checkCuda(cudaGetLastError(), "traceAdditionalMeshRaysKernel launch");
+
+                selectClosestHitKernel<<<grid, block>>>(
+                        bouncePositions_,
+                        bounceNormals_,
+                        bounceColors_,
+                        bounceHitFlags_,
+                        additionalHitPositions_,
+                        additionalHitNormals_,
+                        additionalHitColors_,
+                        additionalHitFlags_,
+                        bounceOrigins_,
+                        params);
+                checkCuda(cudaGetLastError(), "selectClosestHitKernel launch");
 
                 // Integrate bounce results (shared with GT)
                 integrateBounceKernel<<<grid, block>>>(

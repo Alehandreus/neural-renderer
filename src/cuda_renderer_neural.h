@@ -9,6 +9,9 @@
 
 #include "renderer.h"
 
+struct MeshDeviceView;
+struct RenderParams;
+
 namespace tcnn {
 namespace cpp {
 class Module;
@@ -52,6 +55,21 @@ class RendererNeural final {
     bool ensureNetworkBuffers(size_t elementCount);
     bool ensureAccumBuffer(size_t pixelCount);
     void resetAccum();
+    void traceNeuralSegmentsForRays(bool useCameraRays,
+                                    const float* rayOrigins,
+                                    const float* rayDirections,
+                                    const int* rayActiveMask,
+                                    const float* rayPdfs,
+                                    size_t elementCount,
+                                    const RenderParams& params,
+                                    const MeshDeviceView& outerView,
+                                    const MeshDeviceView& innerView,
+                                    Vec3 outerMin,
+                                    Vec3 outerInvExtent,
+                                    float* outHitPositions,
+                                    float* outHitNormals,
+                                    float* outHitColors,
+                                    int* outHitFlags);
 
     Scene* scene_ = nullptr;
 
