@@ -17,6 +17,7 @@ struct EnvironmentConfig {
 struct CameraConfig {
     float matrix[16];  // 4x4 matrix in column-major order (OpenGL/GLM convention)
     float yfov = 1.047198f;  // ~60 degrees in radians
+    float move_speed = 0.0f;  // 0 means auto-calculate based on mesh bounds
 };
 
 struct RenderingConfig {
@@ -37,6 +38,11 @@ struct MaterialConfig {
     float clearcoat_gloss = 0.0f;
 };
 
+struct NeuralNetworkConfig {
+    int log2_hashmap_size = 14;
+    bool use_neural_query = false;
+};
+
 struct RendererConfig {
     MeshConfig original_mesh;
     MeshConfig inner_shell;
@@ -47,6 +53,7 @@ struct RendererConfig {
     CameraConfig camera;
     RenderingConfig rendering;
     MaterialConfig material;
+    NeuralNetworkConfig neural_network;
 };
 
 // Load config from JSON file

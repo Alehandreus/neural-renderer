@@ -76,6 +76,7 @@ bool LoadConfigFromFile(const char* configPath, RendererConfig* config, std::str
             }
 
             config->camera.yfov = cam.value("yfov", 1.047198f);
+            config->camera.move_speed = cam.value("move_speed", 0.0f);
         } else {
             *error = "Camera configuration missing";
             return false;
@@ -107,6 +108,13 @@ bool LoadConfigFromFile(const char* configPath, RendererConfig* config, std::str
             config->material.sheen_tint = mat.value("sheen_tint", 0.0f);
             config->material.clearcoat = mat.value("clearcoat", 0.0f);
             config->material.clearcoat_gloss = mat.value("clearcoat_gloss", 0.0f);
+        }
+
+        // Parse neural network settings
+        if (j.contains("neural_network")) {
+            auto& nn = j["neural_network"];
+            config->neural_network.log2_hashmap_size = nn.value("log2_hashmap_size", 14);
+            config->neural_network.use_neural_query = nn.value("use_neural_query", false);
         }
 
     } catch (const std::exception& e) {

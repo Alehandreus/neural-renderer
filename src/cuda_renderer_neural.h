@@ -16,10 +16,11 @@ class Module;
 }  // namespace tcnn
 
 class Scene;
+struct NeuralNetworkConfig;
 
 class RendererNeural final {
  public:
-    explicit RendererNeural(Scene& scene);
+    explicit RendererNeural(Scene& scene, const NeuralNetworkConfig* nnConfig = nullptr);
     ~RendererNeural();
 
     void resize(int width, int height);

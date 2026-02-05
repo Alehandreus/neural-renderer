@@ -185,26 +185,31 @@ int main(int argc, char** argv) {
     scene.material().clearcoat_gloss = config.material.clearcoat_gloss;
 
     // Set camera from config matrix
+    Vec3 configCamPos;
+    float configCamYaw, configCamPitch;
     {
-        Vec3 camPos;
-        float camYaw, camPitch;
-        MatrixToCameraState(config.camera.matrix, &camPos, &camYaw, &camPitch);
-        input.camera().position = camPos;
-        input.camera().yaw = camYaw;
-        input.camera().pitch = camPitch;
+        MatrixToCameraState(config.camera.matrix, &configCamPos, &configCamYaw, &configCamPitch);
+        input.camera().position = configCamPos;
+        input.camera().yaw = configCamYaw;
+        input.camera().pitch = configCamPitch;
         input.camera().fovY = config.camera.yfov;
 
-        // Set camera movement speed based on mesh bounds
-        Vec3 bmin = originalMesh.boundsMin();
-        Vec3 bmax = originalMesh.boundsMax();
-        Vec3 ext(bmax.x - bmin.x, bmax.y - bmin.y, bmax.z - bmin.z);
-        float diagonal = std::sqrt(ext.x * ext.x + ext.y * ext.y + ext.z * ext.z);
-        if (diagonal > 0.0f) {
-            input.setMoveSpeed(diagonal * 0.15f);
+        // Set camera movement speed
+        if (config.camera.move_speed > 0.0f) {
+            input.setMoveSpeed(config.camera.move_speed);
+        } else {
+            // Auto-calculate based on mesh bounds if move_speed not specified
+            Vec3 bmin = originalMesh.boundsMin();
+            Vec3 bmax = originalMesh.boundsMax();
+            Vec3 ext(bmax.x - bmin.x, bmax.y - bmin.y, bmax.z - bmin.z);
+            float diagonal = std::sqrt(ext.x * ext.x + ext.y * ext.y + ext.z * ext.z);
+            if (diagonal > 0.0f) {
+                input.setMoveSpeed(diagonal * 0.15f);
+            }
         }
     }
 
-    RendererNeural renderer(scene);
+    RendererNeural renderer(scene, &config.neural_network);
     bool loaded = false;
     renderer.setUseNeuralQuery(false);
     renderer.setBounceCount(kBounceCount);
@@ -244,12 +249,13 @@ int main(int argc, char** argv) {
 
     double lastTime = glfwGetTime();
     bool lambertView = false;
-    bool useNeuralQuery = false;
+    bool useNeuralQuery = config.neural_network.use_neural_query;
     int bounceCount = kBounceCount;
     int samplesPerPixel = kSamplesPerPixel;
     int classicMeshIndex = 0;
     float envmapRotation = config.environment.rotation;
     bool uiWantsMouse = false;
+    Material lastMaterial = scene.material();
 
     while (!glfwWindowShouldClose(window)) {
         double now = glfwGetTime();
@@ -365,6 +371,25 @@ int main(int argc, char** argv) {
             ImGui::SliderFloat("Clearcoat gloss", &mat.clearcoat_gloss, 0.0f, 1.0f);
             ImGui::TreePop();
         }
+        // Reset ray accumulation if material properties changed
+        {
+            Material& mat = scene.material();
+            if (mat.base_color.x != lastMaterial.base_color.x ||
+                mat.base_color.y != lastMaterial.base_color.y ||
+                mat.base_color.z != lastMaterial.base_color.z ||
+                mat.roughness != lastMaterial.roughness ||
+                mat.metallic != lastMaterial.metallic ||
+                mat.specular != lastMaterial.specular ||
+                mat.specular_tint != lastMaterial.specular_tint ||
+                mat.anisotropy != lastMaterial.anisotropy ||
+                mat.sheen != lastMaterial.sheen ||
+                mat.sheen_tint != lastMaterial.sheen_tint ||
+                mat.clearcoat != lastMaterial.clearcoat ||
+                mat.clearcoat_gloss != lastMaterial.clearcoat_gloss) {
+                renderer.resetSamples();
+                lastMaterial = mat;
+            }
+        }
         if (ImGui::TreeNode("Camera matrix")) {
             float matrix[16];
             CameraStateToMatrix(camera.position, camera.yaw, camera.pitch, matrix);
@@ -373,6 +398,12 @@ int main(int argc, char** argv) {
             for (int row = 0; row < 4; row++) {
                 ImGui::Text("[%6.3f %6.3f %6.3f %6.3f]",
                     matrix[row], matrix[4 + row], matrix[8 + row], matrix[12 + row]);
+            }
+            if (ImGui::Button("Reset to config")) {
+                input.camera().position = configCamPos;
+                input.camera().yaw = configCamYaw;
+                input.camera().pitch = configCamPitch;
+                renderer.resetSamples();
             }
             ImGui::TreePop();
         }
@@ -433,34 +464,37 @@ int main(int argc, char** argv) {
         }
         ImGui::Text("Resolution: %d x %d", fbWidth, fbHeight);
         ImGui::Separator();
-        ImGui::Text("Original: %s", originalMeshLabel.c_str());
-        ImGui::Text("  triangles: %d, BVH: %d (%.2f MB)",
-                    originalMesh.triangleCount(),
-                    originalMesh.nodeCount(),
-                    static_cast<double>(originalMesh.bvhStorageBytes()) / (1024.0 * 1024.0));
-        ImGui::Text("Inner shell: %s", innerShellLabel.c_str());
-        if (innerShell.triangleCount() > 0) {
+        if (ImGui::TreeNode("Mesh & BVH Info")) {
+            ImGui::Text("Original: %s", originalMeshLabel.c_str());
             ImGui::Text("  triangles: %d, BVH: %d (%.2f MB)",
-                        innerShell.triangleCount(),
-                        innerShell.nodeCount(),
-                        static_cast<double>(innerShell.bvhStorageBytes()) / (1024.0 * 1024.0));
+                        originalMesh.triangleCount(),
+                        originalMesh.nodeCount(),
+                        static_cast<double>(originalMesh.bvhStorageBytes()) / (1024.0 * 1024.0));
+            ImGui::Text("Inner shell: %s", innerShellLabel.c_str());
+            if (innerShell.triangleCount() > 0) {
+                ImGui::Text("  triangles: %d, BVH: %d (%.2f MB)",
+                            innerShell.triangleCount(),
+                            innerShell.nodeCount(),
+                            static_cast<double>(innerShell.bvhStorageBytes()) / (1024.0 * 1024.0));
+            }
+            ImGui::Text("Outer shell: %s", outerShellLabel.c_str());
+            if (outerShell.triangleCount() > 0) {
+                ImGui::Text("  triangles: %d, BVH: %d (%.2f MB)",
+                            outerShell.triangleCount(),
+                            outerShell.nodeCount(),
+                            static_cast<double>(outerShell.bvhStorageBytes()) / (1024.0 * 1024.0));
+            }
+            ImGui::Text("Additional: %s", additionalMeshLabel.c_str());
+            if (additionalMesh.triangleCount() > 0) {
+                ImGui::Text("  triangles: %d, BVH: %d (%.2f MB)",
+                            additionalMesh.triangleCount(),
+                            additionalMesh.nodeCount(),
+                            static_cast<double>(additionalMesh.bvhStorageBytes()) / (1024.0 * 1024.0));
+            }
+            ImGui::Text("Network params (fp16): %.2f MB",
+                        static_cast<double>(renderer.paramsBytes()) / (1024.0 * 1024.0));
+            ImGui::TreePop();
         }
-        ImGui::Text("Outer shell: %s", outerShellLabel.c_str());
-        if (outerShell.triangleCount() > 0) {
-            ImGui::Text("  triangles: %d, BVH: %d (%.2f MB)",
-                        outerShell.triangleCount(),
-                        outerShell.nodeCount(),
-                        static_cast<double>(outerShell.bvhStorageBytes()) / (1024.0 * 1024.0));
-        }
-        ImGui::Text("Additional: %s", additionalMeshLabel.c_str());
-        if (additionalMesh.triangleCount() > 0) {
-            ImGui::Text("  triangles: %d, BVH: %d (%.2f MB)",
-                        additionalMesh.triangleCount(),
-                        additionalMesh.nodeCount(),
-                        static_cast<double>(additionalMesh.bvhStorageBytes()) / (1024.0 * 1024.0));
-        }
-        ImGui::Text("Network params (fp16): %.2f MB",
-                    static_cast<double>(renderer.paramsBytes()) / (1024.0 * 1024.0));
         ImGui::Text("FPS: %.1f", io.Framerate);
         ImGui::End();
 

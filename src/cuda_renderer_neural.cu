@@ -14,6 +14,7 @@
 #include <tiny-cuda-nn/cpp_api.h>
 #include <tiny-cuda-nn/common_device.h>
 
+#include "config_loader.h"
 #include "scene.h"
 #include "disney_brdf.cuh"
 
@@ -1670,7 +1671,7 @@ void* allocAndInitParams(tcnn::cpp::Module* module, size_t* outBytes) {
 // RendererNeural implementation.
 // ===========================================================================
 
-RendererNeural::RendererNeural(Scene& scene)
+RendererNeural::RendererNeural(Scene& scene, const NeuralNetworkConfig* nnConfig)
         : scene_(&scene),
           lightDir_(normalize(Vec3(1.0f, 1.5f, -1.0f))) {
     if (!tcnn::cpp::has_networks()) {
@@ -1678,12 +1679,17 @@ RendererNeural::RendererNeural(Scene& scene)
         return;
     }
 
+    int log2HashmapSize = 14;
+    if (nnConfig != nullptr) {
+        log2HashmapSize = nnConfig->log2_hashmap_size;
+    }
+
     // Point encoding: HashGrid matching Python config.
     tcnn::cpp::json pointEncConfig = {
             {"otype", "HashGrid"},
             {"n_levels", 8},
             {"n_features_per_level", 4},
-            {"log2_hashmap_size", 14},
+            {"log2_hashmap_size", log2HashmapSize},
             {"base_resolution", 16},
             {"per_level_scale", 2},
             {"fixed_point_pos", false},
