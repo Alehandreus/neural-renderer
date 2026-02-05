@@ -1604,7 +1604,6 @@ __global__ void lambertKernel(uchar4* output,
             } else {
                 normal = Vec3(0.0f, 1.0f, 0.0f);
             }
-            normal = Vec3(0.0f, 1.0f, 0.0f);
             if (dot(normal, primaryRay.direction) > 0.0f) {
                 color = Vec3(0.0f, 0.0f, 0.0f);
             } else {
@@ -1713,7 +1712,7 @@ RendererNeural::RendererNeural(Scene& scene, const NeuralNetworkConfig* nnConfig
             {"n_levels", 8},
             {"n_features_per_level", 4},
             {"log2_hashmap_size", log2HashmapSize},
-            {"base_resolution", 16},
+            {"base_resolution", 64},
             {"per_level_scale", 2},
             {"fixed_point_pos", false},
     };

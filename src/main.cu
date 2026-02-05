@@ -249,6 +249,8 @@ int main(int argc, char** argv) {
     int samplesPerPixel = kSamplesPerPixel;
     int classicMeshIndex = 0;
     float envmapRotation = config.environment.rotation;
+    float envmapStrength = config.environment.strength;
+    float lastEnvmapStrength = envmapStrength;
     bool uiWantsMouse = false;
     Material lastMaterial = scene.material();
 
@@ -271,6 +273,7 @@ int main(int argc, char** argv) {
         renderer.setSamplesPerPixel(samplesPerPixel);
         renderer.setClassicMeshIndex(classicMeshIndex);
         renderer.setEnvmapRotation(envmapRotation);
+        scene.environment().setStrength(envmapStrength);
 
         glfwGetFramebufferSize(window, &fbWidth, &fbHeight);
         if (fbWidth != renderer.width() || fbHeight != renderer.height()) {
@@ -348,6 +351,7 @@ int main(int argc, char** argv) {
         const char* meshNames[] = {"Original", "Inner shell", "Outer shell"};
         ImGui::Combo("Classic mesh", &classicMeshIndex, meshNames, 3);
         ImGui::DragFloat("Envmap rotation", &envmapRotation, 1.0f, 0.0f, 360.0f, "%.1f deg");
+        ImGui::InputFloat("Envmap strength", &envmapStrength);
         float fovDeg = camera.fovY * (180.0f / 3.14159265f);
         if (ImGui::SliderFloat("FOV", &fovDeg, 10.0f, 120.0f, "%.1f deg")) {
             input.camera().fovY = fovDeg * (3.14159265f / 180.0f);
@@ -384,6 +388,11 @@ int main(int argc, char** argv) {
                 renderer.resetSamples();
                 lastMaterial = mat;
             }
+        }
+        // Reset ray accumulation if envmap strength changed
+        if (envmapStrength != lastEnvmapStrength) {
+            renderer.resetSamples();
+            lastEnvmapStrength = envmapStrength;
         }
         if (ImGui::TreeNode("Camera matrix")) {
             float matrix[16];
