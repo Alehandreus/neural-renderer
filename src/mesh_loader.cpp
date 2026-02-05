@@ -306,6 +306,11 @@ bool LoadMeshFromFile(const std::string& path,
             tri.uv1 = Vec2();
             tri.uv2 = Vec2();
             tri.texId = -1;
+            tri.normalTexId = -1;
+            tri.paramTexId = -1;
+            tri.metallicChannel = -1;
+            tri.roughnessChannel = -1;
+            tri.specularChannel = -1;
             triangles.push_back(tri);
         }
     }
@@ -360,6 +365,10 @@ bool LoadTexturedGltfFromFile(const std::string& path,
         Vec3 baseColor{1.0f, 1.0f, 1.0f};
         int textureIndex = -1;
         int normalTexIndex = -1;
+        int metallicRoughnessTexIndex = -1;
+        int metallicChannel = -1;
+        int roughnessChannel = -1;
+        int specularChannel = -1;
     };
 
     std::unordered_map<std::string, int> textureCache;
@@ -428,6 +437,17 @@ bool LoadTexturedGltfFromFile(const std::string& path,
             info.normalTexIndex = loadTexture(texPath, error, false);
         }
 
+        if (mat->GetTexture(aiTextureType_METALNESS, 0, &texPath) == AI_SUCCESS) {
+            info.metallicRoughnessTexIndex = loadTexture(texPath, error, false);
+        } else if (mat->GetTexture(aiTextureType_DIFFUSE_ROUGHNESS, 0, &texPath) == AI_SUCCESS) {
+            info.metallicRoughnessTexIndex = loadTexture(texPath, error, false);
+        }
+        if (info.metallicRoughnessTexIndex >= 0) {
+            info.metallicChannel = 2;    // glTF metallic in B
+            info.roughnessChannel = 1;   // glTF roughness in G
+            info.specularChannel = -1;
+        }
+
         materials[i] = info;
     }
 
@@ -480,6 +500,10 @@ bool LoadTexturedGltfFromFile(const std::string& path,
             Vec2 uv2;
             int texId = -1;
             int normalTexId = -1;
+            int paramTexId = -1;
+            int metallicChannel = -1;
+            int roughnessChannel = -1;
+            int specularChannel = -1;
             if (mesh->HasTextureCoords(0)) {
                 const aiVector3D tuv0 = mesh->mTextureCoords[0][i0];
                 const aiVector3D tuv1 = mesh->mTextureCoords[0][i1];
@@ -492,6 +516,12 @@ bool LoadTexturedGltfFromFile(const std::string& path,
                 }
                 if (matInfo.normalTexIndex >= 0) {
                     normalTexId = matInfo.normalTexIndex;
+                }
+                if (matInfo.metallicRoughnessTexIndex >= 0) {
+                    paramTexId = matInfo.metallicRoughnessTexIndex;
+                    metallicChannel = matInfo.metallicChannel;
+                    roughnessChannel = matInfo.roughnessChannel;
+                    specularChannel = matInfo.specularChannel;
                 }
             }
 
@@ -511,6 +541,10 @@ bool LoadTexturedGltfFromFile(const std::string& path,
             tri.uv2 = uv2;
             tri.texId = texId;
             tri.normalTexId = normalTexId;
+            tri.paramTexId = paramTexId;
+            tri.metallicChannel = metallicChannel;
+            tri.roughnessChannel = roughnessChannel;
+            tri.specularChannel = specularChannel;
             tri._pad1 = 0;
             tri._pad2 = 0;
             triangles.push_back(tri);
@@ -537,6 +571,7 @@ bool LoadTexturedGltfFromFile(const std::string& path,
         tex.width = image.width;
         tex.height = image.height;
         tex.channels = image.channels;
+        tex.srgb = image.srgb;
         tex.pixels = std::move(image.pixels);
         meshTextures.push_back(std::move(tex));
     }

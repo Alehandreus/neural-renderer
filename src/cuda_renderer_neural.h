@@ -113,6 +113,7 @@ class RendererNeural final {
     float* hitPositions_ = nullptr;
     float* hitNormals_ = nullptr;
     float* hitColors_ = nullptr;
+    float* hitMaterialParams_ = nullptr;
     int* hitFlags_ = nullptr;
 
     // Additional mesh hit buffers (for hybrid rendering).
@@ -126,6 +127,7 @@ class RendererNeural final {
     float* bounceNormals_ = nullptr;
     float* bounceDirs_ = nullptr;
     float* bounceColors_ = nullptr;
+    float* bounceMaterialParams_ = nullptr;
     int* bounceHitFlags_ = nullptr;
 
     float* bounce2Positions_ = nullptr;

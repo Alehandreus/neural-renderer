@@ -23,6 +23,7 @@ struct TextureDeviceView {
     int width = 0;
     int height = 0;
     int channels = 0;
+    int srgb = 0;
 };
 
 struct MeshTexture {
@@ -30,6 +31,7 @@ struct MeshTexture {
     int width = 0;
     int height = 0;
     int channels = 0;
+    bool srgb = false;
 };
 
 class Mesh {

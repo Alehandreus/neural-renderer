@@ -118,7 +118,12 @@ bool Mesh::uploadToDevice() {
                         "cudaMemcpy texture pixels");
                 }
                 deviceTexturePixels_[i] = devicePixels;
-                hostViews.push_back(TextureDeviceView{devicePixels, tex.width, tex.height, tex.channels});
+                hostViews.push_back(TextureDeviceView{
+                    devicePixels,
+                    tex.width,
+                    tex.height,
+                    tex.channels,
+                    tex.srgb ? 1 : 0});
             }
             if (!hostViews.empty()) {
                 checkCuda(cudaMalloc(

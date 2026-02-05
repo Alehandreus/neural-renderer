@@ -57,6 +57,7 @@ struct HitData {
     Vec3 position;      // Hit position in world space
     Vec3 normal;        // Surface normal at hit point
     Vec3 albedo;        // Surface color/albedo (texture-modulated)
+    Vec3 materialParams; // Material parameter triplet
     float distance;     // Distance to hit (for ray offsetting)
 };
 
@@ -99,17 +100,11 @@ __device__ inline Vec3 encodeSrgb(Vec3 c) {
     return Vec3(linearToSrgb(c.x), linearToSrgb(c.y), linearToSrgb(c.z));
 }
 
-__device__ inline Vec3 sampleTextureDevice(const TextureDeviceView* textures,
-                                           int textureCount,
-                                           int texId,
-                                           float u,
-                                           float v,
-                                           bool nearestFilter) {
-    if (!textures || texId < 0 || texId >= textureCount) {
-        return Vec3(-1.0f, -1.0f, -1.0f);
-    }
-    TextureDeviceView tex = textures[texId];
-    if (!tex.pixels || tex.width <= 0 || tex.height <= 0 || tex.channels < 3) {
+__device__ inline Vec3 sampleTextureRaw(const TextureDeviceView& tex,
+                                        float u,
+                                        float v,
+                                        bool nearestFilter) {
+    if (!tex.pixels || tex.width <= 0 || tex.height <= 0 || tex.channels <= 0) {
         return Vec3(-1.0f, -1.0f, -1.0f);
     }
 
@@ -119,10 +114,10 @@ __device__ inline Vec3 sampleTextureDevice(const TextureDeviceView* textures,
 
     auto fetch = [&](int xi, int yi) {
         int idx = (yi * tex.width + xi) * tex.channels;
-        float r = tex.pixels[idx + 0] * (1.0f / 255.0f);
-        float g = tex.pixels[idx + 1] * (1.0f / 255.0f);
-        float b = tex.pixels[idx + 2] * (1.0f / 255.0f);
-        return srgbToLinear(Vec3(r, g, b));
+        float r = tex.channels > 0 ? tex.pixels[idx + 0] * (1.0f / 255.0f) : 0.0f;
+        float g = tex.channels > 1 ? tex.pixels[idx + 1] * (1.0f / 255.0f) : 0.0f;
+        float b = tex.channels > 2 ? tex.pixels[idx + 2] * (1.0f / 255.0f) : 0.0f;
+        return Vec3(r, g, b);
     };
 
     if (nearestFilter) {
@@ -157,6 +152,53 @@ __device__ inline Vec3 sampleTextureDevice(const TextureDeviceView* textures,
     Vec3 c0 = lerp(c00, c10, tx);
     Vec3 c1 = lerp(c01, c11, tx);
     return lerp(c0, c1, ty);
+}
+
+__device__ inline float selectChannel(const Vec3& value, int channel) {
+    if (channel <= 0) {
+        return value.x;
+    } else if (channel == 1) {
+        return value.y;
+    }
+    return value.z;
+}
+
+__device__ inline float sampleTextureChannel(const TextureDeviceView* textures,
+                                             int textureCount,
+                                             int texId,
+                                             float u,
+                                             float v,
+                                             bool nearestFilter,
+                                             int channel) {
+    if (!textures || texId < 0 || texId >= textureCount || channel < 0) {
+        return -1.0f;
+    }
+    TextureDeviceView tex = textures[texId];
+    Vec3 sampled = sampleTextureRaw(tex, u, v, nearestFilter);
+    if (sampled.x < 0.0f) {
+        return -1.0f;
+    }
+    return selectChannel(sampled, channel);
+}
+
+__device__ inline Vec3 sampleTextureDevice(const TextureDeviceView* textures,
+                                           int textureCount,
+                                           int texId,
+                                           float u,
+                                           float v,
+                                           bool nearestFilter) {
+    if (!textures || texId < 0 || texId >= textureCount) {
+        return Vec3(-1.0f, -1.0f, -1.0f);
+    }
+    TextureDeviceView tex = textures[texId];
+    Vec3 raw = sampleTextureRaw(tex, u, v, nearestFilter);
+    if (raw.x < 0.0f) {
+        return raw;
+    }
+    if (tex.srgb != 0) {
+        return srgbToLinear(raw);
+    }
+    return raw;
 }
 
 __device__ inline Vec3 sampleEnvironment(EnvironmentDeviceView env, Vec3 dir) {
@@ -322,7 +364,7 @@ __device__ inline bool traceMeshWithMode(const Ray& ray,
         return false;
     }
 
-    HitInfo bestHit{false, 0.0f, Vec3(), Vec3(), Vec2(), -1, -1};
+    HitInfo bestHit{false, 0.0f, Vec3(), Vec3(), Vec3(), Vec2(), -1, -1, -1};
     float closestT = 1e30f;
     float minT = allowNegative ? -1e30f : 0.0f;
     Vec3 invDir(
@@ -445,7 +487,7 @@ __device__ inline bool traceMesh(const Ray& ray,
         return false;
     }
 
-    HitInfo bestHit{false, 0.0f, Vec3(), Vec3(), Vec2(), -1, -1};
+    HitInfo bestHit{false, 0.0f, Vec3(), Vec3(), Vec3(), Vec2(), -1, -1, -1};
     float closestT = 1e30f;
     Vec3 invDir(
         1.0f / ray.direction.x,
@@ -545,6 +587,31 @@ __device__ inline bool traceMesh(const Ray& ray,
             bestHit.color = material.base_color;
         }
 
+        Vec3 materialParams(material.metallic, material.roughness, material.specular);
+        if (bestHit.triIndex >= 0) {
+            const Triangle& hitTri = mesh.triangles[bestHit.triIndex];
+            if (hitTri.paramTexId >= 0) {
+                Vec3 paramSample = sampleTextureRaw(
+                    mesh.textures[hitTri.paramTexId],
+                    bestHit.uv.x,
+                    bestHit.uv.y,
+                    mesh.textureNearest != 0);
+                // Work around invalid result
+                if (paramSample.x >= 0.0f) {
+                    if (hitTri.metallicChannel >= 0) {
+                        materialParams.x = clampf(selectChannel(paramSample, hitTri.metallicChannel), 0.0f, 1.0f);
+                    }
+                    if (hitTri.roughnessChannel >= 0) {
+                        materialParams.y = clampf(selectChannel(paramSample, hitTri.roughnessChannel), 0.0f, 1.0f);
+                    }
+                    if (hitTri.specularChannel >= 0) {
+                        materialParams.z = clampf(selectChannel(paramSample, hitTri.specularChannel), 0.0f, 1.0f);
+                    }
+                }
+            }
+        }
+        bestHit.materialParams = materialParams;
+
         // TODO: Sample normal map and transform to world space
         // This requires tangent/bitangent computation
     }
@@ -563,15 +630,16 @@ __forceinline__ __device__ HitData traceRayGT(const Ray& ray,
                                                MeshDeviceView mesh,
                                                const Material& material) {
     HitData result;
-    HitInfo hitInfo{false, 0.0f, Vec3(), Vec3(), Vec2(), -1, -1};
+    HitInfo hitInfo{false, 0.0f, Vec3(), Vec3(), Vec3(), Vec2(), -1, -1, -1};
     bool hit = traceMesh(ray, mesh, &hitInfo, true, material);
 
     result.hit = hit;
     if (hit) {
         result.position = ray.at(hitInfo.distance);
-        result.normal = hitInfo.normal;
-        result.albedo = hitInfo.color;  // Already texture-modulated by traceMesh
-        result.distance = hitInfo.distance;
+    result.normal = hitInfo.normal;
+    result.albedo = hitInfo.color;  // Already texture-modulated by traceMesh
+    result.materialParams = hitInfo.materialParams;
+    result.distance = hitInfo.distance;
     } else {
         result.position = Vec3(0.0f, 0.0f, 0.0f);
         result.normal = Vec3(0.0f, 0.0f, 0.0f);
@@ -590,6 +658,7 @@ __forceinline__ __device__ HitData traceRayGT(const Ray& ray,
 __global__ void intersectGroundTruthKernel(float* hitPositions,
                                            float* hitNormals,
                                            float* hitColors,
+                                           float* hitMaterialParams,
                                            int* hitFlags,
                                            RenderParams params,
                                            MeshDeviceView mesh) {
@@ -618,6 +687,9 @@ __global__ void intersectGroundTruthKernel(float* hitPositions,
             hitColors[base + 0] = hit.albedo.x;
             hitColors[base + 1] = hit.albedo.y;
             hitColors[base + 2] = hit.albedo.z;
+            hitMaterialParams[base + 0] = hit.materialParams.x;
+            hitMaterialParams[base + 1] = hit.materialParams.y;
+            hitMaterialParams[base + 2] = hit.materialParams.z;
             hitFlags[sampleIdx] = 1;
         } else {
             hitPositions[base + 0] = 0.0f;
@@ -629,6 +701,9 @@ __global__ void intersectGroundTruthKernel(float* hitPositions,
             hitColors[base + 0] = 0.0f;
             hitColors[base + 1] = 0.0f;
             hitColors[base + 2] = 0.0f;
+            hitMaterialParams[base + 0] = params.material.metallic;
+            hitMaterialParams[base + 1] = params.material.roughness;
+            hitMaterialParams[base + 2] = params.material.specular;
             hitFlags[sampleIdx] = 0;
         }
     }
@@ -695,6 +770,7 @@ __global__ void initializePathStateKernel(Vec3* throughput,
 __global__ void sampleBounceDirectionsKernel(const float* hitPositions,
                                              const float* hitNormals,
                                              const float* hitColors,
+                                             const float* hitMaterialParams,
                                              const int* hitFlags,
                                              int* pathActive,
                                              RenderParams params,
@@ -753,9 +829,19 @@ __global__ void sampleBounceDirectionsKernel(const float* hitPositions,
         Vec3 tangent, bitangent;
         buildTangentSpace(normal, &tangent, &bitangent);
 
+        Vec3 materialParams(params.material.metallic, params.material.roughness, params.material.specular);
+        if (hitMaterialParams) {
+            materialParams.x = hitMaterialParams[base + 0];
+            materialParams.y = hitMaterialParams[base + 1];
+            materialParams.z = hitMaterialParams[base + 2];
+        }
+
         // Create material with texture-modulated base color
         Material surfaceMat = params.material;
         surfaceMat.base_color = mul(surfaceMat.base_color, albedo);
+        surfaceMat.metallic = materialParams.x;
+        surfaceMat.roughness = materialParams.y;
+        surfaceMat.specular = materialParams.z;
 
         // Sample Disney BRDF for bounce direction
         Vec3 wo = primaryRay.direction * -1.0f;
@@ -801,10 +887,11 @@ __global__ void traceGroundTruthBouncesKernel(const float* bounceOrigins,
                                               const float* bouncePdfs,
                                               MeshDeviceView mesh,
                                               RenderParams params,
-                                              float* bounceHitPositions,   // Output
-                                              float* bounceHitNormals,     // Output
-                                              float* bounceHitColors,      // Output
-                                              int* bounceHitFlags) {       // Output
+                                              float* bounceHitPositions,    // Output
+                                              float* bounceHitNormals,      // Output
+                                              float* bounceHitColors,       // Output
+                                              float* bounceMaterialParams,  // Output
+                                              int* bounceHitFlags) {        // Output
     int x = blockIdx.x * blockDim.x + threadIdx.x;
     int y = blockIdx.y * blockDim.y + threadIdx.y;
     if (x >= params.width || y >= params.height) {
@@ -825,7 +912,7 @@ __global__ void traceGroundTruthBouncesKernel(const float* bounceOrigins,
         Vec3 direction(bounceDirections[base + 0], bounceDirections[base + 1], bounceDirections[base + 2]);
         Ray bounceRay(origin, direction);
 
-        HitInfo hitInfo{false, 0.0f, Vec3(), Vec3(), Vec2(), -1, -1};
+        HitInfo hitInfo{false, 0.0f, Vec3(), Vec3(), Vec3(), Vec2(), -1, -1, -1};
         bool hit = traceMesh(bounceRay, mesh, &hitInfo, true, params.material);
 
         if (hit) {
@@ -839,9 +926,15 @@ __global__ void traceGroundTruthBouncesKernel(const float* bounceOrigins,
             bounceHitColors[base + 0] = hitInfo.color.x;
             bounceHitColors[base + 1] = hitInfo.color.y;
             bounceHitColors[base + 2] = hitInfo.color.z;
+            bounceMaterialParams[base + 0] = hitInfo.materialParams.x;
+            bounceMaterialParams[base + 1] = hitInfo.materialParams.y;
+            bounceMaterialParams[base + 2] = hitInfo.materialParams.z;
             bounceHitFlags[sampleIdx] = 1;
         } else {
             bounceHitFlags[sampleIdx] = 0;
+            bounceMaterialParams[base + 0] = params.material.metallic;
+            bounceMaterialParams[base + 1] = params.material.roughness;
+            bounceMaterialParams[base + 2] = params.material.specular;
         }
     }
 }
@@ -933,7 +1026,7 @@ __global__ void traceHybridBouncesKernel(
         Vec3 dir(bounceDirections[base+0], bounceDirections[base+1], bounceDirections[base+2]);
         Ray ray(origin, dir);
 
-        HitInfo closestHit{false, 0.0f, Vec3(), Vec3(), Vec2(), -1, -1};
+        HitInfo closestHit{false, 0.0f, Vec3(), Vec3(), Vec3(), Vec2(), -1, -1, -1};
         float closestT = 1e30f;
 
         // If additional mesh is empty, only trace shells
@@ -1072,7 +1165,7 @@ __global__ void traceOuterShellEntryKernel(
         rayDirections[base + 2] = ray.direction.z;
 
         // Trace outer shell entry (FORWARD_ONLY: allow_backward=false, allow_forward=true)
-        HitInfo outerHit{false, 0.0f, Vec3(), Vec3(), Vec2(), -1, -1};
+        HitInfo outerHit{false, 0.0f, Vec3(), Vec3(), Vec3(), Vec2(), -1, -1, -1};
         bool hitOuter = traceMeshWithMode(ray, outerShell, &outerHit, TraceMode::FORWARD_ONLY, false, params.material);
 
         if (hitOuter) {
@@ -1143,13 +1236,13 @@ __global__ void traceOuterShellEntryFromRaysKernel(
         Vec3 dir(rayDirections[base + 0], rayDirections[base + 1], rayDirections[base + 2]);
         Ray ray(origin, dir);
 
-        HitInfo outerHit{false, 0.0f, Vec3(), Vec3(), Vec2(), -1, -1};
+        HitInfo outerHit{false, 0.0f, Vec3(), Vec3(), Vec3(), Vec2(), -1, -1, -1};
         bool hitOuter = traceMeshWithMode(ray, outerShell, &outerHit, TraceMode::FORWARD_ONLY, false, params.material);
 
         float baseOffset = 0.0f;
         Vec3 entryOrigin = origin;
         if (!hitOuter) {
-            HitInfo exitHit{false, 0.0f, Vec3(), Vec3(), Vec2(), -1, -1};
+            HitInfo exitHit{false, 0.0f, Vec3(), Vec3(), Vec3(), Vec2(), -1, -1, -1};
             bool hitExit = traceMeshWithMode(ray, outerShell, &exitHit, TraceMode::BACKWARD_ONLY, false, params.material);
             if (hitExit) {
                 baseOffset = exitHit.distance + kSegmentEpsilon;
@@ -1215,7 +1308,7 @@ __global__ void traceSegmentExitsKernel(
     Ray ray(shiftedEntry, dir);
 
     // Trace outer shell EXIT (BACKWARD_ONLY: allow_backward=true, allow_forward=false)
-    HitInfo outerExit{false, 0.0f, Vec3(), Vec3(), Vec2(), -1, -1};
+    HitInfo outerExit{false, 0.0f, Vec3(), Vec3(), Vec3(), Vec2(), -1, -1, -1};
     bool hitOuterExit = traceMeshWithMode(ray, outerShell, &outerExit, TraceMode::BACKWARD_ONLY, false, material);
 
     float exitT;
@@ -1228,7 +1321,7 @@ __global__ void traceSegmentExitsKernel(
     outerExitT[sampleIdx] = exitT;
 
     // Trace inner shell (ANY mode, allow_negative=True as in Python)
-    HitInfo innerHit{false, 0.0f, Vec3(), Vec3(), Vec2(), -1, -1};
+    HitInfo innerHit{false, 0.0f, Vec3(), Vec3(), Vec3(), Vec2(), -1, -1, -1};
     bool hitInner = traceMeshWithMode(ray, innerShell, &innerHit, TraceMode::ANY, true, material);
 
     float innerT;
@@ -1674,7 +1767,7 @@ __global__ void prepareNextIterationKernel(
     Ray ray(shiftedExit, dir);
 
     // Trace outer shell for re-entry (FORWARD_ONLY)
-    HitInfo reentry{false, 0.0f, Vec3(), Vec3(), Vec2(), -1, -1};
+    HitInfo reentry{false, 0.0f, Vec3(), Vec3(), Vec3(), Vec2(), -1, -1, -1};
     bool hitReentry = traceMeshWithMode(ray, outerShell, &reentry, TraceMode::FORWARD_ONLY, false, material);
 
     // Remaining rays condition (matching Python):
@@ -2505,6 +2598,7 @@ void RendererNeural::render(const Vec3& camPos, std::vector<uchar4>& hostPixels)
             float* currentHitPos = hitPositions_;
             float* currentHitNormals = hitNormals_;
             float* currentHitColors = hitColors_;
+            float* currentHitMaterialParams = hitMaterialParams_;
             int* currentHitFlags = hitFlags_;
 
             for (int bounce = 1; bounce <= maxBounces; ++bounce) {
@@ -2513,6 +2607,7 @@ void RendererNeural::render(const Vec3& camPos, std::vector<uchar4>& hostPixels)
                         currentHitPos,
                         currentHitNormals,
                         currentHitColors,
+                        currentHitMaterialParams,
                         currentHitFlags,
                         pathActive_,
                         params,
@@ -2582,6 +2677,7 @@ void RendererNeural::render(const Vec3& camPos, std::vector<uchar4>& hostPixels)
                 currentHitNormals = bounceNormals_;
                 currentHitColors = bounceColors_;
                 currentHitFlags = bounceHitFlags_;
+                currentHitMaterialParams = bounceMaterialParams_;
             }
 
             // Finalize and output
@@ -2611,6 +2707,7 @@ void RendererNeural::render(const Vec3& camPos, std::vector<uchar4>& hostPixels)
                 hitPositions_,
                 hitNormals_,
                 hitColors_,
+                hitMaterialParams_,
                 hitFlags_,
                 params,
                 classicView);
@@ -2643,6 +2740,7 @@ void RendererNeural::render(const Vec3& camPos, std::vector<uchar4>& hostPixels)
             float* currentHitPos = hitPositions_;
             float* currentHitNormals = hitNormals_;
             float* currentHitColors = hitColors_;
+            float* currentHitMaterialParams = hitMaterialParams_;
             int* currentHitFlags = hitFlags_;
 
             for (int bounce = 1; bounce <= maxBounces; ++bounce) {
@@ -2651,6 +2749,7 @@ void RendererNeural::render(const Vec3& camPos, std::vector<uchar4>& hostPixels)
                         currentHitPos,
                         currentHitNormals,
                         currentHitColors,
+                        currentHitMaterialParams,
                         currentHitFlags,
                         pathActive_,
                         params,
@@ -2670,6 +2769,7 @@ void RendererNeural::render(const Vec3& camPos, std::vector<uchar4>& hostPixels)
                         bouncePositions_,
                         bounceNormals_,
                         bounceColors_,
+                        bounceMaterialParams_,
                         bounceHitFlags_);
                 checkCuda(cudaGetLastError(), "traceGroundTruthBouncesKernel launch");
 
@@ -2690,6 +2790,7 @@ void RendererNeural::render(const Vec3& camPos, std::vector<uchar4>& hostPixels)
                 currentHitPos = bouncePositions_;
                 currentHitNormals = bounceNormals_;
                 currentHitColors = bounceColors_;
+                currentHitMaterialParams = bounceMaterialParams_;
                 currentHitFlags = bounceHitFlags_;
             }
 
@@ -2741,6 +2842,7 @@ void RendererNeural::release() {
     freePtr(hitPositions_);
     freePtr(hitNormals_);
     freePtr(hitColors_);
+    freePtr(hitMaterialParams_);
     freePtr(hitFlags_);
     freePtr(additionalHitPositions_);
     freePtr(additionalHitNormals_);
@@ -2751,6 +2853,7 @@ void RendererNeural::release() {
     freePtr(bounceNormals_);
     freePtr(bounceDirs_);
     freePtr(bounceColors_);
+    freePtr(bounceMaterialParams_);
     freePtr(bounceHitFlags_);
     freePtr(bounce2Positions_);
     freePtr(bounce2Normals_);
@@ -2808,11 +2911,11 @@ bool RendererNeural::ensureNetworkBuffers(size_t elementCount) {
         return false;
     }
     if (elementCount <= bufferElements_ &&
-            hitPositions_ && hitNormals_ && hitColors_ && hitFlags_ &&
+            hitPositions_ && hitNormals_ && hitColors_ && hitMaterialParams_ && hitFlags_ &&
             outerHitPositions_ && innerHitPositions_ && rayDirections_ && outerHitFlags_ &&
             compactedOuterPos_ && compactedInnerPos_ && compactedDirs_ &&
             hitIndices_ && hitCount_ &&
-            bouncePositions_ && bounceNormals_ && bounceDirs_ && bounceColors_ && bounceHitFlags_ &&
+            bouncePositions_ && bounceNormals_ && bounceDirs_ && bounceColors_ && bounceMaterialParams_ && bounceHitFlags_ &&
             bounce2Positions_ && bounce2Normals_ && bounce2Dirs_ && bounce2Colors_ && bounce2HitFlags_ &&
             pathThroughput_ && pathRadiance_ && pathActive_ &&
             rayActiveFlags_ && accumT_ && currentEntryPos_ &&
@@ -2843,6 +2946,7 @@ bool RendererNeural::ensureNetworkBuffers(size_t elementCount) {
     freePtr(hitPositions_);
     freePtr(hitNormals_);
     freePtr(hitColors_);
+    freePtr(hitMaterialParams_);
     freePtr(hitFlags_);
     freePtr(additionalHitPositions_);
     freePtr(additionalHitNormals_);
@@ -2853,6 +2957,7 @@ bool RendererNeural::ensureNetworkBuffers(size_t elementCount) {
     freePtr(bounceNormals_);
     freePtr(bounceDirs_);
     freePtr(bounceColors_);
+    freePtr(bounceMaterialParams_);
     freePtr(bounceHitFlags_);
     freePtr(bounce2Positions_);
     freePtr(bounce2Normals_);
@@ -2919,6 +3024,7 @@ bool RendererNeural::ensureNetworkBuffers(size_t elementCount) {
     checkCuda(cudaMalloc(&hitPositions_, vec3Bytes), "cudaMalloc hitPositions");
     checkCuda(cudaMalloc(&hitNormals_, vec3Bytes), "cudaMalloc hitNormals");
     checkCuda(cudaMalloc(&hitColors_, vec3Bytes), "cudaMalloc hitColors");
+    checkCuda(cudaMalloc(&hitMaterialParams_, vec3Bytes), "cudaMalloc hitMaterialParams");
     checkCuda(cudaMalloc(&hitFlags_, intBytes), "cudaMalloc hitFlags");
 
     // Additional mesh hit buffers (for hybrid rendering).
@@ -2931,6 +3037,7 @@ bool RendererNeural::ensureNetworkBuffers(size_t elementCount) {
     checkCuda(cudaMalloc(&bouncePositions_, vec3Bytes), "cudaMalloc bouncePositions");
     checkCuda(cudaMalloc(&bounceNormals_, vec3Bytes), "cudaMalloc bounceNormals");
     checkCuda(cudaMalloc(&bounceColors_, vec3Bytes), "cudaMalloc bounceColors");
+    checkCuda(cudaMalloc(&bounceMaterialParams_, vec3Bytes), "cudaMalloc bounceMaterialParams");
     checkCuda(cudaMalloc(&bounceDirs_, vec3Bytes), "cudaMalloc bounceDirs");
     checkCuda(cudaMalloc(&bounceHitFlags_, intBytes), "cudaMalloc bounceHitFlags");
 
