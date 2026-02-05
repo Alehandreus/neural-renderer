@@ -246,6 +246,7 @@ int main(int argc, char** argv) {
     Mesh& originalMesh = scene.originalMesh();
     Mesh& innerShell = scene.innerShell();
     Mesh& outerShell = scene.outerShell();
+    Mesh& additionalMesh = scene.additionalMesh();
 
     if (!loadMesh(config.original_mesh.path.c_str(), &originalMesh, "original",
                   config.rendering.normalize_meshes, config.rendering.nearest_texture_sampling,
@@ -269,6 +270,12 @@ int main(int argc, char** argv) {
     }
     std::printf("Loaded outer shell: %d triangles\n", outerShell.triangleCount());
 
+    if (!config.additional_mesh.path.empty() &&
+        loadMesh(config.additional_mesh.path.c_str(), &additionalMesh, "additional mesh",
+                 config.rendering.normalize_meshes, false, config.additional_mesh.scale)) {
+        std::printf("Loaded additional mesh: %d triangles\n", additionalMesh.triangleCount());
+    }
+
     // Load environment.
     std::string envError;
     if (!scene.environment().loadFromFile(config.environment.hdri_path.c_str(), &envError)) {
@@ -280,10 +287,12 @@ int main(int argc, char** argv) {
     std::printf("Loaded environment: %s\n", config.environment.hdri_path.c_str());
 
     // Create renderer.
-    RendererNeural renderer(scene);
+    RendererNeural renderer(scene, &config.neural_network);
     renderer.resize(kWidth, kHeight);
     renderer.setBounceCount(kBounceCount);
     renderer.setLambertView(false);
+    renderer.setEnvmapRotation(config.environment.rotation);
+    renderer.setUseNeuralQuery(config.neural_network.use_neural_query);
 
     // Load checkpoint.
     if (!renderer.loadWeightsFromFile(config.checkpoint_path.c_str())) {
