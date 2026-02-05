@@ -106,11 +106,11 @@ __device__ inline Vec3 sampleTextureDevice(const TextureDeviceView* textures,
                                            float v,
                                            bool nearestFilter) {
     if (!textures || texId < 0 || texId >= textureCount) {
-        return Vec3(1.0f, 1.0f, 1.0f);
+        return Vec3(-1.0f, -1.0f, -1.0f);
     }
     TextureDeviceView tex = textures[texId];
     if (!tex.pixels || tex.width <= 0 || tex.height <= 0 || tex.channels < 3) {
-        return Vec3(1.0f, 1.0f, 1.0f);
+        return Vec3(-1.0f, -1.0f, -1.0f);
     }
 
     u = u - floorf(u);
@@ -420,7 +420,11 @@ __device__ inline bool traceMeshWithMode(const Ray& ray,
                 bestHit.uv.x,
                 bestHit.uv.y,
                 mesh.textureNearest != 0);
-            bestHit.color = mul(bestHit.color, texColor);
+            if (texColor.x < 0.0f) {
+                bestHit.color = material.base_color;  // Fallback to material color if texture sampling failed
+            } else {
+                bestHit.color = mul(bestHit.color, texColor);
+            }            
         } else {
             // Use constant color from material, ignore vertex colors and textures
             bestHit.color = material.base_color;
@@ -531,7 +535,11 @@ __device__ inline bool traceMesh(const Ray& ray,
                 bestHit.uv.x,
                 bestHit.uv.y,
                 mesh.textureNearest != 0);
-            bestHit.color = mul(bestHit.color, texColor);
+            if (texColor.x < 0.0f) {
+                bestHit.color = material.base_color;  // Fallback to material color if texture sampling failed
+            } else {
+                bestHit.color = mul(bestHit.color, texColor);
+            }  
         } else {
             // Use constant color from material, ignore vertex colors and textures
             bestHit.color = material.base_color;

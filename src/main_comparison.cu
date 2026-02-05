@@ -255,6 +255,7 @@ int main(int argc, char** argv) {
         return 1;
     }
     std::printf("Loaded original mesh: %d triangles\n", originalMesh.triangleCount());
+    originalMesh.setUseTextureColor(config.original_mesh.use_texture_color);
 
     if (!loadMesh(config.inner_shell.path.c_str(), &innerShell, "inner shell",
                   config.rendering.normalize_meshes, false, config.inner_shell.scale)) {
@@ -262,6 +263,7 @@ int main(int argc, char** argv) {
         return 1;
     }
     std::printf("Loaded inner shell: %d triangles\n", innerShell.triangleCount());
+    innerShell.setUseTextureColor(config.inner_shell.use_texture_color);
 
     if (!loadMesh(config.outer_shell.path.c_str(), &outerShell, "outer shell",
                   config.rendering.normalize_meshes, false, config.outer_shell.scale)) {
@@ -269,6 +271,7 @@ int main(int argc, char** argv) {
         return 1;
     }
     std::printf("Loaded outer shell: %d triangles\n", outerShell.triangleCount());
+    outerShell.setUseTextureColor(config.outer_shell.use_texture_color);
 
     if (!config.additional_mesh.path.empty() &&
         loadMesh(config.additional_mesh.path.c_str(), &additionalMesh, "additional mesh",
@@ -276,6 +279,7 @@ int main(int argc, char** argv) {
                  config.additional_mesh.scale)) {
         std::printf("Loaded additional mesh: %d triangles\n", additionalMesh.triangleCount());
     }
+    additionalMesh.setUseTextureColor(config.additional_mesh.use_texture_color);
 
     // Apply material config to scene
     scene.material().base_color = config.material.base_color;
