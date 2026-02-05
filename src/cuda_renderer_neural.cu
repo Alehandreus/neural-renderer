@@ -580,7 +580,7 @@ __device__ inline bool traceMesh(const Ray& ray,
             if (texColor.x < 0.0f) {
                 bestHit.color = material.base_color;  // Fallback to material color if texture sampling failed
             } else {
-                bestHit.color = mul(bestHit.color, texColor);
+                bestHit.color = texColor;
             }  
         } else {
             // Use constant color from material, ignore vertex colors and textures
@@ -636,10 +636,10 @@ __forceinline__ __device__ HitData traceRayGT(const Ray& ray,
     result.hit = hit;
     if (hit) {
         result.position = ray.at(hitInfo.distance);
-    result.normal = hitInfo.normal;
-    result.albedo = hitInfo.color;  // Already texture-modulated by traceMesh
-    result.materialParams = hitInfo.materialParams;
-    result.distance = hitInfo.distance;
+        result.normal = hitInfo.normal;
+        result.albedo = hitInfo.color;
+        result.materialParams = hitInfo.materialParams;
+        result.distance = hitInfo.distance;
     } else {
         result.position = Vec3(0.0f, 0.0f, 0.0f);
         result.normal = Vec3(0.0f, 0.0f, 0.0f);
@@ -753,7 +753,7 @@ __global__ void initializePathStateKernel(Vec3* throughput,
                 active[sampleIdx] = 0;
                 continue;
             }
-            sampleThroughput = Vec3(hitColors[base + 0], hitColors[base + 1], hitColors[base + 2]);
+            // sampleThroughput = Vec3(hitColors[base + 0], hitColors[base + 1], hitColors[base + 2]);
             isActive = 1;
         } else {
             Vec3 envLight = sampleEnvironmentWithClamp(env, primaryRay.direction, params.maxRadiance);
@@ -838,7 +838,7 @@ __global__ void sampleBounceDirectionsKernel(const float* hitPositions,
 
         // Create material with texture-modulated base color
         Material surfaceMat = params.material;
-        surfaceMat.base_color = mul(surfaceMat.base_color, albedo);
+        surfaceMat.base_color = albedo;
         surfaceMat.metallic = materialParams.x;
         surfaceMat.roughness = materialParams.y;
         surfaceMat.specular = materialParams.z;
@@ -963,12 +963,15 @@ __global__ void integrateBounceKernel(Vec3* throughput,
         }
 
         int base = sampleIdx * 3;
+        Vec3 brdfWeight(bounceBRDFs[base + 0], bounceBRDFs[base + 1], bounceBRDFs[base + 2]);
+        Vec3 newThroughput = mul(throughput[sampleIdx], brdfWeight);
+        throughput[sampleIdx] = newThroughput;
 
         if (!bounceHitFlags[sampleIdx]) {
             // Ray missed - sample environment and terminate
             Vec3 envDir(bounceDirections[base + 0], bounceDirections[base + 1], bounceDirections[base + 2]);
             Vec3 envLight = sampleEnvironmentWithClamp(env, envDir, params.maxRadiance);
-            radiance[sampleIdx] = radiance[sampleIdx] + mul(throughput[sampleIdx], envLight);
+            radiance[sampleIdx] = radiance[sampleIdx] + mul(newThroughput, envLight);
             active[sampleIdx] = 0;
             continue;
         }
@@ -977,10 +980,6 @@ __global__ void integrateBounceKernel(Vec3* throughput,
             active[sampleIdx] = 0;
             continue;
         }
-
-        // Update throughput with BRDF weight
-        Vec3 brdfWeight(bounceBRDFs[base + 0], bounceBRDFs[base + 1], bounceBRDFs[base + 2]);
-        throughput[sampleIdx] = mul(throughput[sampleIdx], brdfWeight);
 
         // Russian roulette path termination (after 3 bounces)
         if (bounceIndex > 3) {
