@@ -6,7 +6,7 @@
 // Matching nbvh/include/base/material.h
 struct Material {
     // Disney Material
-    Vec3 base_color{1.0, 1.0, 1.0};
+    Vec3 base_color{1.0, 0.3, 1.0}; // pink
     // Vec3 base_color{0.906, 0.906, 0.906};
     // Vec3 base_color{0.906, 0.906, 0.906};
     // Vec3 base_color{0.9f, 0.9f, 0.9f};

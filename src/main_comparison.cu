@@ -272,9 +272,22 @@ int main(int argc, char** argv) {
 
     if (!config.additional_mesh.path.empty() &&
         loadMesh(config.additional_mesh.path.c_str(), &additionalMesh, "additional mesh",
-                 config.rendering.normalize_meshes, false, config.additional_mesh.scale)) {
+                 config.rendering.normalize_meshes, config.rendering.nearest_texture_sampling,
+                 config.additional_mesh.scale)) {
         std::printf("Loaded additional mesh: %d triangles\n", additionalMesh.triangleCount());
     }
+
+    // Apply material config to scene
+    scene.material().base_color = config.material.base_color;
+    scene.material().roughness = config.material.roughness;
+    scene.material().metallic = config.material.metallic;
+    scene.material().specular = config.material.specular;
+    scene.material().specular_tint = config.material.specular_tint;
+    scene.material().anisotropy = config.material.anisotropy;
+    scene.material().sheen = config.material.sheen;
+    scene.material().sheen_tint = config.material.sheen_tint;
+    scene.material().clearcoat = config.material.clearcoat;
+    scene.material().clearcoat_gloss = config.material.clearcoat_gloss;
 
     // Load environment.
     std::string envError;
@@ -316,42 +329,21 @@ int main(int argc, char** argv) {
         std::printf("\n=== Rendering ground truth (%d samples) ===\n", kTotalSamples);
         renderer.setUseNeuralQuery(false);
         renderer.setClassicMeshIndex(0);  // Original mesh.
+        renderer.resetSamples();  // Reset accumulation to ensure clean state.
 
         int remainingSamples = kTotalSamples;
         while (remainingSamples > 0) {
             int batchSamples = std::min(remainingSamples, kBatchSize);
             renderer.setSamplesPerPixel(batchSamples);
-            // renderer.resetSamples();  // Reset accumulation before each batch.
 
-            std::vector<uchar4> batchPixels(pixelCount);
-            renderer.render(camera.position, batchPixels);
-
-            // Accumulate into ground truth buffer (simple averaging).
-            if (remainingSamples == kTotalSamples) {
-                // First batch: copy directly.
-                groundTruthPixels = batchPixels;
-            } else {
-                // Subsequent batches: accumulate.
-                // This is a simplified accumulation - ideally we'd accumulate in linear space.
-                // For now, just average the sRGB values (not physically correct but simple).
-                int totalRendered = kTotalSamples - remainingSamples + batchSamples;
-                float weight = static_cast<float>(batchSamples) / static_cast<float>(totalRendered);
-                float existingWeight = 1.0f - weight;
-
-                for (size_t i = 0; i < pixelCount; ++i) {
-                    groundTruthPixels[i].x = static_cast<unsigned char>(
-                        existingWeight * groundTruthPixels[i].x + weight * batchPixels[i].x);
-                    groundTruthPixels[i].y = static_cast<unsigned char>(
-                        existingWeight * groundTruthPixels[i].y + weight * batchPixels[i].y);
-                    groundTruthPixels[i].z = static_cast<unsigned char>(
-                        existingWeight * groundTruthPixels[i].z + weight * batchPixels[i].z);
-                }
-            }
+            renderer.render(camera.position, groundTruthPixels);
 
             remainingSamples -= batchSamples;
             std::printf("  Progress: %d / %d samples\n", kTotalSamples - remainingSamples, kTotalSamples);
         }
 
+        // The renderer has accumulated all samples internally.
+        // groundTruthPixels now contains the final result.
         std::string gtPath = std::string(kOutputFolder) + "/" + kGroundTruthOutput;
         savePng(gtPath.c_str(), groundTruthPixels, kWidth, kHeight);
     }
@@ -360,44 +352,23 @@ int main(int argc, char** argv) {
     {
         std::printf("\n=== Rendering neural (%d samples) ===\n", kTotalSamples);
 
-        // Reset renderer to clear internal state and reallocate buffers for neural mode.
-        renderer.resize(kWidth, kHeight);
-        renderer.setCameraBasis(basis);
-        renderer.setBounceCount(kBounceCount);
-        renderer.setLambertView(false);
         renderer.setUseNeuralQuery(true);
+        renderer.setClassicMeshIndex(0);  // Original mesh (same as ground truth).
+        renderer.resetSamples();  // Reset accumulation to ensure clean state.
 
         int remainingSamples = kTotalSamples;
         while (remainingSamples > 0) {
             int batchSamples = std::min(remainingSamples, kBatchSize);
             renderer.setSamplesPerPixel(batchSamples);
-            // renderer.resetSamples();  // Reset accumulation before each batch.
 
-            std::vector<uchar4> batchPixels(pixelCount);
-            renderer.render(camera.position, batchPixels);
-
-            // Accumulate into neural buffer.
-            if (remainingSamples == kTotalSamples) {
-                neuralPixels = batchPixels;
-            } else {
-                int totalRendered = kTotalSamples - remainingSamples + batchSamples;
-                float weight = static_cast<float>(batchSamples) / static_cast<float>(totalRendered);
-                float existingWeight = 1.0f - weight;
-
-                for (size_t i = 0; i < pixelCount; ++i) {
-                    neuralPixels[i].x = static_cast<unsigned char>(
-                        existingWeight * neuralPixels[i].x + weight * batchPixels[i].x);
-                    neuralPixels[i].y = static_cast<unsigned char>(
-                        existingWeight * neuralPixels[i].y + weight * batchPixels[i].y);
-                    neuralPixels[i].z = static_cast<unsigned char>(
-                        existingWeight * neuralPixels[i].z + weight * batchPixels[i].z);
-                }
-            }
+            renderer.render(camera.position, neuralPixels);
 
             remainingSamples -= batchSamples;
             std::printf("  Progress: %d / %d samples\n", kTotalSamples - remainingSamples, kTotalSamples);
         }
 
+        // The renderer has accumulated all samples internally.
+        // neuralPixels now contains the final result.
         std::string neuralPath = std::string(kOutputFolder) + "/" + kNeuralOutput;
         savePng(neuralPath.c_str(), neuralPixels, kWidth, kHeight);
     }

@@ -164,19 +164,6 @@ void Mesh::releaseDevice() {
     deviceTextureCount_ = 0;
 }
 
-bool Mesh::hasVertexColors() const {
-    const float kEpsilon = 0.01f;
-    for (const Triangle& tri : triangles_) {
-        // Check if any vertex color is significantly different from white
-        if (std::abs(tri.c0.x - 1.0f) > kEpsilon || std::abs(tri.c0.y - 1.0f) > kEpsilon || std::abs(tri.c0.z - 1.0f) > kEpsilon ||
-            std::abs(tri.c1.x - 1.0f) > kEpsilon || std::abs(tri.c1.y - 1.0f) > kEpsilon || std::abs(tri.c1.z - 1.0f) > kEpsilon ||
-            std::abs(tri.c2.x - 1.0f) > kEpsilon || std::abs(tri.c2.y - 1.0f) > kEpsilon || std::abs(tri.c2.z - 1.0f) > kEpsilon) {
-            return true;
-        }
-    }
-    return false;
-}
-
 void Mesh::overrideVertexColors(Vec3 color) {
     for (Triangle& tri : triangles_) {
         tri.c0 = color;

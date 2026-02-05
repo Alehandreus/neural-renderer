@@ -15,6 +15,7 @@ struct MeshDeviceView {
     const struct TextureDeviceView* textures = nullptr;
     int textureCount = 0;
     int textureNearest = 0;
+    int useTextureColor = 0;  // 0 = constant color, 1 = texture/vertex colors
 };
 
 struct TextureDeviceView {
@@ -42,6 +43,8 @@ public:
     void setTextures(std::vector<MeshTexture> textures);
     void setTextureNearest(bool nearest) { textureNearest_ = nearest; }
     bool textureNearest() const { return textureNearest_; }
+    void setUseTextureColor(bool use) { useTextureColor_ = use; }
+    bool useTextureColor() const { return useTextureColor_; }
     const std::vector<Triangle>& triangles() const { return triangles_; }
     int triangleCount() const { return static_cast<int>(triangles_.size()); }
     const std::vector<MeshTexture>& textures() const { return textures_; }
@@ -54,13 +57,13 @@ public:
     Vec3 boundsMin() const { return boundsMin_; }
     Vec3 boundsMax() const { return boundsMax_; }
 
-    bool hasVertexColors() const;
     void overrideVertexColors(Vec3 color);
 
     bool uploadToDevice();
     MeshDeviceView deviceView() const {
         return MeshDeviceView{deviceTriangles_, deviceCount_, deviceNodes_, deviceNodeCount_,
-                              deviceTextures_, deviceTextureCount_, textureNearest_ ? 1 : 0};
+                              deviceTextures_, deviceTextureCount_, textureNearest_ ? 1 : 0,
+                              useTextureColor_ ? 1 : 0};
     }
     void releaseDevice();
 
@@ -78,6 +81,7 @@ private:
     bool boundsDirty_ = true;
     bool texturesDirty_ = true;
     bool textureNearest_ = false;
+    bool useTextureColor_ = false;
     Vec3 boundsMin_{};
     Vec3 boundsMax_{};
     std::vector<unsigned char*> deviceTexturePixels_;

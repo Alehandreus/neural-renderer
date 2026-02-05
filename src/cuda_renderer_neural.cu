@@ -316,7 +316,8 @@ __device__ inline bool traceMeshWithMode(const Ray& ray,
                                          MeshDeviceView mesh,
                                          HitInfo* outHit,
                                          TraceMode mode,
-                                         bool allowNegative = false) {
+                                         bool allowNegative,
+                                         const Material& material) {
     if (mesh.nodeCount <= 0 || mesh.triangleCount <= 0) {
         return false;
     }
@@ -410,15 +411,20 @@ __device__ inline bool traceMeshWithMode(const Ray& ray,
     }
 
     if (bestHit.hit) {
-        // Sample base color texture
-        Vec3 texColor = sampleTextureDevice(
-            mesh.textures,
-            mesh.textureCount,
-            bestHit.texId,
-            bestHit.uv.x,
-            bestHit.uv.y,
-            mesh.textureNearest != 0);
-        bestHit.color = mul(bestHit.color, texColor);
+        if (mesh.useTextureColor) {
+            // Use vertex colors × texture
+            Vec3 texColor = sampleTextureDevice(
+                mesh.textures,
+                mesh.textureCount,
+                bestHit.texId,
+                bestHit.uv.x,
+                bestHit.uv.y,
+                mesh.textureNearest != 0);
+            bestHit.color = mul(bestHit.color, texColor);
+        } else {
+            // Use constant color from material, ignore vertex colors and textures
+            bestHit.color = material.base_color;
+        }
     }
     if (outHit) {
         *outHit = bestHit;
@@ -429,7 +435,8 @@ __device__ inline bool traceMeshWithMode(const Ray& ray,
 __device__ inline bool traceMesh(const Ray& ray,
                                  MeshDeviceView mesh,
                                  HitInfo* outHit,
-                                 bool cullBackfaces = true) {
+                                 bool cullBackfaces,
+                                 const Material& material) {
     if (mesh.nodeCount <= 0 || mesh.triangleCount <= 0) {
         return false;
     }
@@ -515,15 +522,20 @@ __device__ inline bool traceMesh(const Ray& ray,
     }
 
     if (bestHit.hit) {
-        // Sample base color texture
-        Vec3 texColor = sampleTextureDevice(
-            mesh.textures,
-            mesh.textureCount,
-            bestHit.texId,
-            bestHit.uv.x,
-            bestHit.uv.y,
-            mesh.textureNearest != 0);
-        bestHit.color = mul(bestHit.color, texColor);
+        if (mesh.useTextureColor) {
+            // Use vertex colors × texture
+            Vec3 texColor = sampleTextureDevice(
+                mesh.textures,
+                mesh.textureCount,
+                bestHit.texId,
+                bestHit.uv.x,
+                bestHit.uv.y,
+                mesh.textureNearest != 0);
+            bestHit.color = mul(bestHit.color, texColor);
+        } else {
+            // Use constant color from material, ignore vertex colors and textures
+            bestHit.color = material.base_color;
+        }
 
         // TODO: Sample normal map and transform to world space
         // This requires tangent/bitangent computation
@@ -544,7 +556,7 @@ __forceinline__ __device__ HitData traceRayGT(const Ray& ray,
                                                const Material& material) {
     HitData result;
     HitInfo hitInfo{false, 0.0f, Vec3(), Vec3(), Vec2(), -1, -1};
-    bool hit = traceMesh(ray, mesh, &hitInfo);
+    bool hit = traceMesh(ray, mesh, &hitInfo, true, material);
 
     result.hit = hit;
     if (hit) {
@@ -806,7 +818,7 @@ __global__ void traceGroundTruthBouncesKernel(const float* bounceOrigins,
         Ray bounceRay(origin, direction);
 
         HitInfo hitInfo{false, 0.0f, Vec3(), Vec3(), Vec2(), -1, -1};
-        bool hit = traceMesh(bounceRay, mesh, &hitInfo);
+        bool hit = traceMesh(bounceRay, mesh, &hitInfo, true, params.material);
 
         if (hit) {
             Vec3 hitPos = bounceRay.at(hitInfo.distance);
@@ -918,7 +930,7 @@ __global__ void traceHybridBouncesKernel(
 
         // If additional mesh is empty, only trace shells
         if (additionalMesh.triangleCount == 0) {
-            traceMesh(ray, outerShell, &closestHit, true);
+            traceMesh(ray, outerShell, &closestHit, true, params.material);
         } else {
             // Two-box early culling
             Vec3 invDir(1.0f/dir.x, 1.0f/dir.y, 1.0f/dir.z);
@@ -931,35 +943,35 @@ __global__ void traceHybridBouncesKernel(
                 if (tNearShells < tNearAdditional) {
                     // Check shells first
                     HitInfo shellHit;
-                    if (traceMesh(ray, outerShell, &shellHit, true) && shellHit.distance < closestT) {
+                    if (traceMesh(ray, outerShell, &shellHit, true, params.material) && shellHit.distance < closestT) {
                         closestHit = shellHit;
                         closestT = shellHit.distance;
                     }
                     // Only check additional if it could be closer
                     if (tNearAdditional < closestT) {
                         HitInfo addHit;
-                        if (traceMesh(ray, additionalMesh, &addHit, true) && addHit.distance < closestT) {
+                        if (traceMesh(ray, additionalMesh, &addHit, true, params.material) && addHit.distance < closestT) {
                             closestHit = addHit;
                         }
                     }
                 } else {
                     // Check additional first, then shells
                     HitInfo addHit;
-                    if (traceMesh(ray, additionalMesh, &addHit, true) && addHit.distance < closestT) {
+                    if (traceMesh(ray, additionalMesh, &addHit, true, params.material) && addHit.distance < closestT) {
                         closestHit = addHit;
                         closestT = addHit.distance;
                     }
                     if (tNearShells < closestT) {
                         HitInfo shellHit;
-                        if (traceMesh(ray, outerShell, &shellHit, true) && shellHit.distance < closestT) {
+                        if (traceMesh(ray, outerShell, &shellHit, true, params.material) && shellHit.distance < closestT) {
                             closestHit = shellHit;
                         }
                     }
                 }
             } else if (hitShellsBox) {
-                traceMesh(ray, outerShell, &closestHit, true);
+                traceMesh(ray, outerShell, &closestHit, true, params.material);
             } else if (hitAdditionalBox) {
-                traceMesh(ray, additionalMesh, &closestHit, true);
+                traceMesh(ray, additionalMesh, &closestHit, true, params.material);
             }
         }
 
@@ -1053,7 +1065,7 @@ __global__ void traceOuterShellEntryKernel(
 
         // Trace outer shell entry (FORWARD_ONLY: allow_backward=false, allow_forward=true)
         HitInfo outerHit{false, 0.0f, Vec3(), Vec3(), Vec2(), -1, -1};
-        bool hitOuter = traceMeshWithMode(ray, outerShell, &outerHit, TraceMode::FORWARD_ONLY, false);
+        bool hitOuter = traceMeshWithMode(ray, outerShell, &outerHit, TraceMode::FORWARD_ONLY, false, params.material);
 
         if (hitOuter) {
             Vec3 entryPos = ray.at(outerHit.distance);
@@ -1085,6 +1097,7 @@ __global__ void traceSegmentExitsKernel(
         int hitCount,
         MeshDeviceView outerShell,
         MeshDeviceView innerShell,
+        Material material,
         float* exitPositions,
         float* outerExitT,
         float* innerEnterT,
@@ -1110,7 +1123,7 @@ __global__ void traceSegmentExitsKernel(
 
     // Trace outer shell EXIT (BACKWARD_ONLY: allow_backward=true, allow_forward=false)
     HitInfo outerExit{false, 0.0f, Vec3(), Vec3(), Vec2(), -1, -1};
-    bool hitOuterExit = traceMeshWithMode(ray, outerShell, &outerExit, TraceMode::BACKWARD_ONLY, false);
+    bool hitOuterExit = traceMeshWithMode(ray, outerShell, &outerExit, TraceMode::BACKWARD_ONLY, false, material);
 
     float exitT;
     if (hitOuterExit) {
@@ -1123,7 +1136,7 @@ __global__ void traceSegmentExitsKernel(
 
     // Trace inner shell (ANY mode, allow_negative=True as in Python)
     HitInfo innerHit{false, 0.0f, Vec3(), Vec3(), Vec2(), -1, -1};
-    bool hitInner = traceMeshWithMode(ray, innerShell, &innerHit, TraceMode::ANY, true);
+    bool hitInner = traceMeshWithMode(ray, innerShell, &innerHit, TraceMode::ANY, true, material);
 
     float innerT;
     if (hitInner) {
@@ -1327,7 +1340,7 @@ __global__ void traceAdditionalMeshPrimaryRaysKernel(
 
         // Trace against additional mesh
         HitInfo hit;
-        if (traceMesh(ray, additionalMesh, &hit, true)) {
+        if (traceMesh(ray, additionalMesh, &hit, true, params.material)) {
             int base = sampleIdx * 3;
             Vec3 hitPos = ray.at(hit.distance);
             hitPositions[base+0] = hitPos.x;
@@ -1422,6 +1435,7 @@ __global__ void prepareNextIterationKernel(
         const int* hitIndices,
         int hitCount,
         MeshDeviceView outerShell,
+        Material material,
         float* entryPositions,
         int* activeFlags,
         float* accumT,
@@ -1452,7 +1466,7 @@ __global__ void prepareNextIterationKernel(
 
     // Trace outer shell for re-entry (FORWARD_ONLY)
     HitInfo reentry{false, 0.0f, Vec3(), Vec3(), Vec2(), -1, -1};
-    bool hitReentry = traceMeshWithMode(ray, outerShell, &reentry, TraceMode::FORWARD_ONLY, false);
+    bool hitReentry = traceMeshWithMode(ray, outerShell, &reentry, TraceMode::FORWARD_ONLY, false, material);
 
     // Remaining rays condition (matching Python):
     // mask_for_remaining_rays = ~pred_intersection_mask & (x_outer_enter_mask_new | x_inner_mask)
@@ -1582,6 +1596,7 @@ __global__ void lambertKernel(uchar4* output,
             } else {
                 normal = Vec3(0.0f, 1.0f, 0.0f);
             }
+            normal = Vec3(0.0f, 1.0f, 0.0f);
             if (dot(normal, primaryRay.direction) > 0.0f) {
                 color = Vec3(0.0f, 0.0f, 0.0f);
             } else {
@@ -2054,6 +2069,7 @@ void RendererNeural::render(const Vec3& camPos, std::vector<uchar4>& hostPixels)
                     activeCount,
                     outerView,
                     innerView,
+                    params.material,
                     segmentExitPos_,
                     outerExitT_,
                     innerEnterT_,
@@ -2181,6 +2197,7 @@ void RendererNeural::render(const Vec3& camPos, std::vector<uchar4>& hostPixels)
                     hitIndices_,
                     activeCount,
                     outerView,
+                    params.material,
                     currentEntryPos_,
                     rayActiveFlags_,
                     accumT_,

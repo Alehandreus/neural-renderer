@@ -136,18 +136,21 @@ int main(int argc, char** argv) {
     if (originalMesh.triangleCount() == 0) {
         GenerateUvSphere(&originalMesh, 48, 96, 1.0f);
     }
+    originalMesh.setUseTextureColor(config.original_mesh.use_texture_color);
 
     if (!config.inner_shell.path.empty() && loadMesh(config.inner_shell.path.c_str(), &innerShell, "inner shell",
                                                       config.rendering.normalize_meshes, false,
                                                       config.inner_shell.scale)) {
         innerShellLabel = config.inner_shell.path;
     }
+    innerShell.setUseTextureColor(config.inner_shell.use_texture_color);
 
     if (!config.outer_shell.path.empty() && loadMesh(config.outer_shell.path.c_str(), &outerShell, "outer shell",
                                                       config.rendering.normalize_meshes, false,
                                                       config.outer_shell.scale)) {
         outerShellLabel = config.outer_shell.path;
     }
+    outerShell.setUseTextureColor(config.outer_shell.use_texture_color);
 
     if (!config.additional_mesh.path.empty() && loadMesh(config.additional_mesh.path.c_str(), &additionalMesh, "additional mesh",
                                                           config.rendering.normalize_meshes,
@@ -155,15 +158,7 @@ int main(int argc, char** argv) {
                                                           config.additional_mesh.scale)) {
         additionalMeshLabel = config.additional_mesh.path;
     }
-
-    // Check if mesh has vertex colors, if not use material color from config
-    if (!originalMesh.hasVertexColors()) {
-        std::printf("Mesh has no vertex colors - using material.base_color from config: (%.3f, %.3f, %.3f)\n",
-                    config.material.base_color.x, config.material.base_color.y, config.material.base_color.z);
-        originalMesh.overrideVertexColors(config.material.base_color);
-    } else {
-        std::printf("Mesh has vertex colors - using vertex colors from mesh file\n");
-    }
+    additionalMesh.setUseTextureColor(config.additional_mesh.use_texture_color);
 
     std::string envError;
     if (!config.environment.hdri_path.empty() && !scene.environment().loadFromFile(config.environment.hdri_path.c_str(), &envError)) {
