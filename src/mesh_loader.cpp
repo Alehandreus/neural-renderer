@@ -22,12 +22,12 @@ inline uint3 makeUint3(unsigned int x, unsigned int y, unsigned int z) {
 #include <assimp/postprocess.h>
 #include <assimp/scene.h>
 
-// TinyGLTF (implementation is in tinygltf.cpp)
+// TinyGLTF (implementation is provided by ext/tinygltf)
 #include "stb_image.h"
 #define TINYGLTF_NO_STB_IMAGE
 #define TINYGLTF_NO_STB_IMAGE_WRITE
 #define TINYGLTF_NOEXCEPTION
-#include "../nbvh/ext/tinygltf/tiny_gltf.h"
+#include <tiny_gltf.h>
 
 namespace {
 

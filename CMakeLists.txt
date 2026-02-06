@@ -5,9 +5,7 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CUDA_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CUDA_STANDARD_REQUIRED ON)
-if (NOT DEFINED CMAKE_CUDA_ARCHITECTURES OR CMAKE_CUDA_ARCHITECTURES STREQUAL "")
-    set(CMAKE_CUDA_ARCHITECTURES native CACHE STRING "" FORCE)
-endif()
+set(CMAKE_CUDA_ARCHITECTURES 120 CACHE STRING "" FORCE)
 
 include(FetchContent)
 
@@ -99,6 +97,7 @@ FetchContent_MakeAvailable(nfd)
 # FLIP library
 set(FLIP_LIBRARY ON CACHE BOOL "" FORCE)
 add_subdirectory(ext/flip-cuda)
+add_subdirectory(ext/tinygltf)
 
 add_library(imgui STATIC
     ${imgui_SOURCE_DIR}/imgui.cpp
@@ -139,7 +138,6 @@ add_executable(imgui_renderer
     src/stb_image.cpp
     src/stb_image_write.cpp
     src/tinyexr.cpp
-    src/tinygltf.cpp
     src/triangle.h
     src/vec3.h
 )
@@ -149,6 +147,9 @@ target_include_directories(imgui_renderer PRIVATE
     ${stb_SOURCE_DIR}
 )
 target_link_libraries(imgui_renderer PRIVATE imgui glfw OpenGL::GL bvh tiny-cuda-nn nfd)
+if (TARGET tinygltf)
+    target_link_libraries(imgui_renderer PRIVATE tinygltf)
+endif()
 if (TARGET assimp::assimp)
     target_link_libraries(imgui_renderer PRIVATE assimp::assimp)
 else()
@@ -174,7 +175,6 @@ add_executable(evaluate
     src/scene.cu
     src/scene.h
     src/stb_image.cpp
-    src/tinygltf.cpp
     src/triangle.h
     src/vec3.h
 )
@@ -186,6 +186,9 @@ target_include_directories(evaluate PRIVATE
     ext/flip-cuda/common
 )
 target_link_libraries(evaluate PRIVATE bvh tiny-cuda-nn flip-cuda)
+if (TARGET tinygltf)
+    target_link_libraries(evaluate PRIVATE tinygltf)
+endif()
 if (TARGET assimp::assimp)
     target_link_libraries(evaluate PRIVATE assimp::assimp)
 else()
@@ -202,4 +205,3 @@ target_include_directories(compare_images PRIVATE
     ext/flip-cuda/common
 )
 target_link_libraries(compare_images PRIVATE flip-cuda)
-
