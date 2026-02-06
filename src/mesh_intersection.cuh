@@ -116,7 +116,6 @@ __device__ inline Vec3 sampleTextureRawDev(const TextureDeviceView& tex,
 
     u = u - floorf(u);
     v = v - floorf(v);
-    v = 1.0f - v;
 
     auto fetch = [&](int xi, int yi) {
         int idx = (yi * tex.width + xi) * tex.channels;

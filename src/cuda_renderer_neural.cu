@@ -113,7 +113,6 @@ __device__ inline Vec3 sampleTextureRaw(const TextureDeviceView& tex,
 
     u = u - floorf(u);
     v = v - floorf(v);
-    v = 1.0f - v;
 
     auto fetch = [&](int xi, int yi) {
         int idx = (yi * tex.width + xi) * tex.channels;
@@ -3007,4 +3006,25 @@ void RendererNeural::resetAccum() {
         checkCuda(cudaMemset(accum_, 0, accumPixels_ * sizeof(Vec3)), "cudaMemset accum");
     }
     accumSampleCount_ = 0;
+
+    auto zeroBuffer = [](auto* ptr, size_t bytes, const char* name) {
+        if (ptr && bytes > 0) {
+            checkCuda(cudaMemset(ptr, 0, bytes), name);
+        }
+    };
+
+    if (bufferElements_ > 0) {
+        zeroBuffer(pathRadiance_, bufferElements_ * sizeof(Vec3), "cudaMemset pathRadiance");
+        zeroBuffer(pathThroughput_, bufferElements_ * sizeof(Vec3), "cudaMemset pathThroughput");
+        zeroBuffer(pathActive_, bufferElements_ * sizeof(int), "cudaMemset pathActive");
+        zeroBuffer(hitFlags_, bufferElements_ * sizeof(int), "cudaMemset hitFlags");
+        zeroBuffer(hitPositions_, bufferElements_ * 3 * sizeof(float), "cudaMemset hitPositions");
+        zeroBuffer(hitNormals_, bufferElements_ * 3 * sizeof(float), "cudaMemset hitNormals");
+        zeroBuffer(hitColors_, bufferElements_ * 3 * sizeof(float), "cudaMemset hitColors");
+        zeroBuffer(hitMaterialParams_, bufferElements_ * 3 * sizeof(float), "cudaMemset hitMaterialParams");
+        zeroBuffer(additionalHitFlags_, bufferElements_ * sizeof(int), "cudaMemset additionalHitFlags");
+        zeroBuffer(additionalHitPositions_, bufferElements_ * 3 * sizeof(float), "cudaMemset additionalHitPositions");
+        zeroBuffer(additionalHitNormals_, bufferElements_ * 3 * sizeof(float), "cudaMemset additionalHitNormals");
+        zeroBuffer(additionalHitColors_, bufferElements_ * 3 * sizeof(float), "cudaMemset additionalHitColors");
+    }
 }
