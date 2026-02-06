@@ -344,11 +344,14 @@ bool LoadGltfWithMaterials(const std::string& path,
 
     auto multiplyMatrices = [](const std::array<float, 16>& a, const std::array<float, 16>& b) {
         std::array<float, 16> result = {};
-        for (int i = 0; i < 4; ++i) {
-            for (int j = 0; j < 4; ++j) {
+        // Both arrays store matrices in column-major (GLTF) layout.
+        for (int col = 0; col < 4; ++col) {
+            for (int row = 0; row < 4; ++row) {
+                float sum = 0.0f;
                 for (int k = 0; k < 4; ++k) {
-                    result[i * 4 + j] += a[i * 4 + k] * b[k * 4 + j];
+                    sum += a[k * 4 + row] * b[col * 4 + k];
                 }
+                result[col * 4 + row] = sum;
             }
         }
         return result;
@@ -448,7 +451,7 @@ bool LoadGltfWithMaterials(const std::string& path,
                     outMesh->vertices_.push_back(transformPoint(worldTransform, pos));
                 }
 
-                // Load normals if available
+                // Load normals if available, otherwise add defaults per-vertex
                 auto normIt = primitive.attributes.find("NORMAL");
                 if (normIt != primitive.attributes.end()) {
                     const tinygltf::Accessor& normAccessor = model.accessors[normIt->second];
@@ -463,9 +466,11 @@ bool LoadGltfWithMaterials(const std::string& path,
                         Vec3 norm(normals[i * normStride], normals[i * normStride + 1], normals[i * normStride + 2]);
                         outMesh->normals_.push_back(transformNormal(worldTransform, norm));
                     }
+                } else {
+                    outMesh->normals_.resize(outMesh->normals_.size() + vertexCount, Vec3(0, 1, 0));
                 }
 
-                // Load texcoords if available
+                // Load texcoords if available, otherwise add defaults per-vertex
                 auto uvIt = primitive.attributes.find("TEXCOORD_0");
                 if (uvIt != primitive.attributes.end()) {
                     const tinygltf::Accessor& uvAccessor = model.accessors[uvIt->second];
@@ -479,6 +484,8 @@ bool LoadGltfWithMaterials(const std::string& path,
                     for (size_t i = 0; i < vertexCount; ++i) {
                         outMesh->texcoords_.push_back(Vec2(uvs[i * uvStride], uvs[i * uvStride + 1]));
                     }
+                } else {
+                    outMesh->texcoords_.resize(outMesh->texcoords_.size() + vertexCount, Vec2(0, 0));
                 }
 
                 // Load indices
