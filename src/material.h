@@ -90,8 +90,8 @@ struct Material {
         Material mat;
         mat.base_color = MaterialParamVec3::constant(Vec3(0.8f, 0.8f, 0.8f));
         mat.metallic = MaterialParam::constant(0.0f);
-        mat.roughness = MaterialParam::constant(0.5f);
-        mat.specular = MaterialParam::constant(0.5f);
+        mat.roughness = MaterialParam::constant(0.0f);
+        mat.specular = MaterialParam::constant(0.0f);
         mat.specular_tint = MaterialParam::constant(0.0f);
         mat.anisotropy = MaterialParam::constant(0.0f);
         mat.sheen = MaterialParam::constant(0.0f);

@@ -2,6 +2,7 @@
 
 #include <cmath>
 #include <cfloat>
+#include <cstdio>
 #include <cstdlib>
 #include <algorithm>
 #include <filesystem>
@@ -226,6 +227,7 @@ bool LoadGltfWithMaterials(const std::string& path,
 
     // Load materials
     for (const auto& gltfMat : model.materials) {
+        size_t materialIndex = outMesh->materials_.size();
         Material mat = Material::defaultMaterial();
 
         // Base color
@@ -243,6 +245,15 @@ bool LoadGltfWithMaterials(const std::string& path,
                 mat.base_color.textureId = static_cast<uint32_t>(texIdx);
                 outMesh->textures_[texIdx].colorSpace = ColorSpace::SRGB;
             }
+        }
+
+        if (!mat.base_color.textured) {
+            fprintf(stderr,
+                    "[GLTF] material %zu constant base color = (%f, %f, %f)\n",
+                    materialIndex,
+                    mat.base_color.value.x,
+                    mat.base_color.value.y,
+                    mat.base_color.value.z);
         }
 
         // Metallic/Roughness
@@ -263,6 +274,25 @@ bool LoadGltfWithMaterials(const std::string& path,
 
                 outMesh->textures_[texIdx].colorSpace = ColorSpace::LINEAR;
             }
+        }
+
+        if (!mat.metallic.textured) {
+            fprintf(stderr,
+                    "[GLTF] material %zu constant metallic = %f\n",
+                    materialIndex,
+                    mat.metallic.value);
+        }
+        if (!mat.roughness.textured) {
+            fprintf(stderr,
+                    "[GLTF] material %zu constant roughness = %f\n",
+                    materialIndex,
+                    mat.roughness.value);
+        }
+        if (!mat.specular.textured) {
+            fprintf(stderr,
+                    "[GLTF] material %zu constant specular = %f\n",
+                    materialIndex,
+                    mat.specular.value);
         }
 
         // Normal map

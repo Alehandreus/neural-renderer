@@ -72,16 +72,6 @@ __device__ inline Vec3 mul(Vec3 a, Vec3 b) {
     return Vec3(a.x * b.x, a.y * b.y, a.z * b.z);
 }
 
-__device__ inline Vec3 srgbToLinear(Vec3 c) {
-    auto convert = [](float v) {
-        if (v <= 0.04045f) {
-            return v / 12.92f;
-        }
-        return powf((v + 0.055f) / 1.055f, 2.4f);
-    };
-    return Vec3(convert(c.x), convert(c.y), convert(c.z));
-}
-
 __device__ inline float linearToSrgb(float v) {
     // Clamp to prevent negative values
     v = fmaxf(0.0f, v);
@@ -101,106 +91,6 @@ __device__ inline float linearToSrgb(float v) {
 
 __device__ inline Vec3 encodeSrgb(Vec3 c) {
     return Vec3(linearToSrgb(c.x), linearToSrgb(c.y), linearToSrgb(c.z));
-}
-
-__device__ inline Vec3 sampleTextureRaw(const TextureDeviceView& tex,
-                                        float u,
-                                        float v,
-                                        bool nearestFilter) {
-    if (!tex.pixels || tex.width <= 0 || tex.height <= 0 || tex.channels <= 0) {
-        return Vec3(-1.0f, -1.0f, -1.0f);
-    }
-
-    u = u - floorf(u);
-    v = v - floorf(v);
-
-    auto fetch = [&](int xi, int yi) {
-        int idx = (yi * tex.width + xi) * tex.channels;
-        float r = tex.channels > 0 ? tex.pixels[idx + 0] * (1.0f / 255.0f) : 0.0f;
-        float g = tex.channels > 1 ? tex.pixels[idx + 1] * (1.0f / 255.0f) : 0.0f;
-        float b = tex.channels > 2 ? tex.pixels[idx + 2] * (1.0f / 255.0f) : 0.0f;
-        return Vec3(r, g, b);
-    };
-
-    if (nearestFilter) {
-        int x = static_cast<int>(u * static_cast<float>(tex.width));
-        int y = static_cast<int>(v * static_cast<float>(tex.height));
-        if (x < 0) {
-            x = 0;
-        } else if (x >= tex.width) {
-            x = tex.width - 1;
-        }
-        if (y < 0) {
-            y = 0;
-        } else if (y >= tex.height) {
-            y = tex.height - 1;
-        }
-        return fetch(x, y);
-    }
-
-    float x = u * static_cast<float>(tex.width - 1);
-    float y = v * static_cast<float>(tex.height - 1);
-    int x0 = static_cast<int>(floorf(x));
-    int y0 = static_cast<int>(floorf(y));
-    int x1 = min(x0 + 1, tex.width - 1);
-    int y1 = min(y0 + 1, tex.height - 1);
-    float tx = x - static_cast<float>(x0);
-    float ty = y - static_cast<float>(y0);
-
-    Vec3 c00 = fetch(x0, y0);
-    Vec3 c10 = fetch(x1, y0);
-    Vec3 c01 = fetch(x0, y1);
-    Vec3 c11 = fetch(x1, y1);
-    Vec3 c0 = lerp(c00, c10, tx);
-    Vec3 c1 = lerp(c01, c11, tx);
-    return lerp(c0, c1, ty);
-}
-
-__device__ inline float selectChannel(const Vec3& value, int channel) {
-    if (channel <= 0) {
-        return value.x;
-    } else if (channel == 1) {
-        return value.y;
-    }
-    return value.z;
-}
-
-__device__ inline float sampleTextureChannel(const TextureDeviceView* textures,
-                                             int textureCount,
-                                             int texId,
-                                             float u,
-                                             float v,
-                                             bool nearestFilter,
-                                             int channel) {
-    if (!textures || texId < 0 || texId >= textureCount || channel < 0) {
-        return -1.0f;
-    }
-    TextureDeviceView tex = textures[texId];
-    Vec3 sampled = sampleTextureRaw(tex, u, v, nearestFilter);
-    if (sampled.x < 0.0f) {
-        return -1.0f;
-    }
-    return selectChannel(sampled, channel);
-}
-
-__device__ inline Vec3 sampleTextureDevice(const TextureDeviceView* textures,
-                                           int textureCount,
-                                           int texId,
-                                           float u,
-                                           float v,
-                                           bool nearestFilter) {
-    if (!textures || texId < 0 || texId >= textureCount) {
-        return Vec3(-1.0f, -1.0f, -1.0f);
-    }
-    TextureDeviceView tex = textures[texId];
-    Vec3 raw = sampleTextureRaw(tex, u, v, nearestFilter);
-    if (raw.x < 0.0f) {
-        return raw;
-    }
-    if (tex.srgb != 0) {
-        return srgbToLinear(raw);
-    }
-    return raw;
 }
 
 __device__ inline Vec3 sampleEnvironment(EnvironmentDeviceView env, Vec3 dir) {
