@@ -43,18 +43,11 @@ void ensureDirectory(const char* path) {
 bool loadMesh(const char* path, Mesh* mesh, const char* label, bool normalize, bool nearestTex, float scale = 1.0f) {
     if (!path || path[0] == '\0') return false;
     std::string loadError;
-    std::filesystem::path meshPath(path);
-    std::string ext = meshPath.extension().string();
-    for (char& ch : ext) {
-        ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
-    }
-    bool loaded = false;
-    if (ext == ".gltf" || ext == ".glb") {
-        loaded = LoadTexturedGltfFromFile(path, mesh, &loadError, normalize, nearestTex, scale);
+    // Use LoadMeshAuto which auto-detects format
+    bool loaded = LoadMeshAuto(path, mesh, &loadError, normalize, scale);
+    if (loaded) {
+        mesh->setTextureNearest(nearestTex);
     } else {
-        loaded = LoadMeshFromFile(path, mesh, &loadError, normalize, scale);
-    }
-    if (!loaded) {
         std::fprintf(stderr, "Failed to load %s mesh '%s': %s\n", label, path, loadError.c_str());
     }
     return loaded;
@@ -254,44 +247,40 @@ int main(int argc, char** argv) {
         std::fprintf(stderr, "Failed to load original mesh: %s\n", config.original_mesh.path.c_str());
         return 1;
     }
-    std::printf("Loaded original mesh: %d triangles\n", originalMesh.triangleCount());
-    originalMesh.setUseTextureColor(config.original_mesh.use_texture_color);
+    std::printf("Loaded original mesh: %d triangles\n", originalMesh.numTriangles());
 
     if (!loadMesh(config.inner_shell.path.c_str(), &innerShell, "inner shell",
                   config.rendering.normalize_meshes, false, config.inner_shell.scale)) {
         std::fprintf(stderr, "Failed to load inner shell: %s\n", config.inner_shell.path.c_str());
         return 1;
     }
-    std::printf("Loaded inner shell: %d triangles\n", innerShell.triangleCount());
-    innerShell.setUseTextureColor(config.inner_shell.use_texture_color);
+    std::printf("Loaded inner shell: %d triangles\n", innerShell.numTriangles());
 
     if (!loadMesh(config.outer_shell.path.c_str(), &outerShell, "outer shell",
                   config.rendering.normalize_meshes, false, config.outer_shell.scale)) {
         std::fprintf(stderr, "Failed to load outer shell: %s\n", config.outer_shell.path.c_str());
         return 1;
     }
-    std::printf("Loaded outer shell: %d triangles\n", outerShell.triangleCount());
-    outerShell.setUseTextureColor(config.outer_shell.use_texture_color);
+    std::printf("Loaded outer shell: %d triangles\n", outerShell.numTriangles());
 
     if (!config.additional_mesh.path.empty() &&
         loadMesh(config.additional_mesh.path.c_str(), &additionalMesh, "additional mesh",
                  config.rendering.normalize_meshes, config.rendering.nearest_texture_sampling,
                  config.additional_mesh.scale)) {
-        std::printf("Loaded additional mesh: %d triangles\n", additionalMesh.triangleCount());
+        std::printf("Loaded additional mesh: %d triangles\n", additionalMesh.numTriangles());
     }
-    additionalMesh.setUseTextureColor(config.additional_mesh.use_texture_color);
 
-    // Apply material config to scene
-    scene.material().base_color = config.material.base_color;
-    scene.material().roughness = config.material.roughness;
-    scene.material().metallic = config.material.metallic;
-    scene.material().specular = config.material.specular;
-    scene.material().specular_tint = config.material.specular_tint;
-    scene.material().anisotropy = config.material.anisotropy;
-    scene.material().sheen = config.material.sheen;
-    scene.material().sheen_tint = config.material.sheen_tint;
-    scene.material().clearcoat = config.material.clearcoat;
-    scene.material().clearcoat_gloss = config.material.clearcoat_gloss;
+    // Apply material config to scene (use global material for non-GLTF meshes)
+    scene.globalMaterial().base_color = MaterialParamVec3::constant(config.material.base_color);
+    scene.globalMaterial().roughness = MaterialParam::constant(config.material.roughness);
+    scene.globalMaterial().metallic = MaterialParam::constant(config.material.metallic);
+    scene.globalMaterial().specular = MaterialParam::constant(config.material.specular);
+    scene.globalMaterial().specular_tint = MaterialParam::constant(config.material.specular_tint);
+    scene.globalMaterial().anisotropy = MaterialParam::constant(config.material.anisotropy);
+    scene.globalMaterial().sheen = MaterialParam::constant(config.material.sheen);
+    scene.globalMaterial().sheen_tint = MaterialParam::constant(config.material.sheen_tint);
+    scene.globalMaterial().clearcoat = MaterialParam::constant(config.material.clearcoat);
+    scene.globalMaterial().clearcoat_gloss = MaterialParam::constant(config.material.clearcoat_gloss);
 
     // Load environment.
     std::string envError;

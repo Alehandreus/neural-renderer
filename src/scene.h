@@ -66,8 +66,8 @@ public:
     EnvironmentMap& environment() { return environment_; }
     const EnvironmentMap& environment() const { return environment_; }
 
-    Material& material() { return material_; }
-    const Material& material() const { return material_; }
+    Material& globalMaterial() { return globalMaterial_; }
+    const Material& globalMaterial() const { return globalMaterial_; }
 
 private:
     Mesh originalMesh_;
@@ -75,5 +75,5 @@ private:
     Mesh outerShell_;
     Mesh additionalMesh_;
     EnvironmentMap environment_;
-    Material material_;
+    Material globalMaterial_ = Material::defaultMaterial();  // For non-GLTF meshes and neural rendering
 };

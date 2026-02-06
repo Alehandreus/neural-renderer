@@ -5,30 +5,34 @@
 #include <cstdlib>
 #include <algorithm>
 #include <filesystem>
+#include <functional>
 #include <string>
-#include <unordered_map>
 #include <vector>
 
+// Helper to create uint3 (since makeUint3 is CUDA-only)
+inline uint3 makeUint3(unsigned int x, unsigned int y, unsigned int z) {
+    uint3 result;
+    result.x = x;
+    result.y = y;
+    result.z = z;
+    return result;
+}
+
 #include <assimp/Importer.hpp>
-#include <assimp/material.h>
 #include <assimp/postprocess.h>
 #include <assimp/scene.h>
 
-#include "material.h"
+// TinyGLTF (implementation is in tinygltf.cpp)
 #include "stb_image.h"
+#define TINYGLTF_NO_STB_IMAGE
+#define TINYGLTF_NO_STB_IMAGE_WRITE
+#define TINYGLTF_NOEXCEPTION
+#include "../nbvh/ext/tinygltf/tiny_gltf.h"
 
 namespace {
 
 Vec3 toVec3(const aiVector3D& v) {
     return Vec3(v.x, v.y, v.z);
-}
-
-Vec3 toVec3(const aiColor4D& c) {
-    return Vec3(c.r, c.g, c.b);
-}
-
-Vec2 toVec2(const aiVector3D& v) {
-    return Vec2(v.x, v.y);
 }
 
 Vec3 normalizeSafe(const Vec3& v, const Vec3& fallback) {
@@ -39,28 +43,6 @@ Vec3 normalizeSafe(const Vec3& v, const Vec3& fallback) {
     return fallback;
 }
 
-Vec3 srgbToLinear(Vec3 c) {
-    auto toLinear = [](float v) {
-        if (v <= 0.04045f) {
-            return v / 12.92f;
-        }
-        return powf((v + 0.055f) / 1.055f, 2.4f);
-    };
-    return Vec3(toLinear(c.x), toLinear(c.y), toLinear(c.z));
-}
-
-Vec3 mul(Vec3 a, Vec3 b) {
-    return Vec3(a.x * b.x, a.y * b.y, a.z * b.z);
-}
-
-struct ImageData {
-    int width = 0;
-    int height = 0;
-    int channels = 0;
-    bool srgb = true;
-    std::vector<unsigned char> pixels;
-};
-
 void expandBounds(const Vec3& v, Vec3* minV, Vec3* maxV) {
     minV->x = fminf(minV->x, v.x);
     minV->y = fminf(minV->y, v.y);
@@ -70,158 +52,477 @@ void expandBounds(const Vec3& v, Vec3* minV, Vec3* maxV) {
     maxV->z = fmaxf(maxV->z, v.z);
 }
 
-void normalizeTriangles(std::vector<Triangle>& triangles) {
-    if (triangles.empty()) {
-        return;
-    }
+void normalizeMesh(Mesh* mesh) {
+    if (mesh->vertices_.empty()) return;
 
     Vec3 minV(FLT_MAX, FLT_MAX, FLT_MAX);
     Vec3 maxV(-FLT_MAX, -FLT_MAX, -FLT_MAX);
-    for (const Triangle& tri : triangles) {
-        expandBounds(tri.v0, &minV, &maxV);
-        expandBounds(tri.v1, &minV, &maxV);
-        expandBounds(tri.v2, &minV, &maxV);
+    for (const Vec3& v : mesh->vertices_) {
+        expandBounds(v, &minV, &maxV);
     }
 
     Vec3 size = maxV - minV;
     float maxExtent = fmaxf(size.x, fmaxf(size.y, size.z));
-    if (maxExtent <= 0.0f) {
-        return;
-    }
+    if (maxExtent <= 0.0f) return;
 
     Vec3 center = (minV + maxV) * 0.5f;
     float scale = 2.0f / maxExtent * 5.0f;
-    for (Triangle& tri : triangles) {
-        tri.v0 = (tri.v0 - center) * scale;
-        tri.v1 = (tri.v1 - center) * scale;
-        tri.v2 = (tri.v2 - center) * scale;
-        tri.normal = normalizeSafe(cross(tri.v1 - tri.v0, tri.v2 - tri.v0), tri.normal);
-        tri.n0 = normalizeSafe(tri.n0, tri.normal);
-        tri.n1 = normalizeSafe(tri.n1, tri.normal);
-        tri.n2 = normalizeSafe(tri.n2, tri.normal);
+
+    for (Vec3& v : mesh->vertices_) {
+        v = (v - center) * scale;
     }
 }
 
-void scaleTriangles(std::vector<Triangle>& triangles, float scale) {
-    if (triangles.empty() || scale == 1.0f) {
-        return;
-    }
-
-    for (Triangle& tri : triangles) {
-        tri.v0 = tri.v0 * scale;
-        tri.v1 = tri.v1 * scale;
-        tri.v2 = tri.v2 * scale;
+void scaleMesh(Mesh* mesh, float scale) {
+    if (scale == 1.0f) return;
+    for (Vec3& v : mesh->vertices_) {
+        v = v * scale;
     }
 }
 
-bool loadImageFromFile(const std::filesystem::path& path, ImageData* outImage, std::string* error) {
+// Helper to load image data using stb_image
+struct ImageData {
+    std::vector<unsigned char> pixels;
     int width = 0;
     int height = 0;
     int channels = 0;
-    stbi_uc* data = stbi_load(path.string().c_str(), &width, &height, &channels, 4);
-    if (!data) {
-        if (error) {
-            *error = stbi_failure_reason() ? stbi_failure_reason() : "Failed to load image file.";
-        }
-        return false;
-    }
-    outImage->width = width;
-    outImage->height = height;
-    outImage->channels = 4;
-    outImage->pixels.assign(data, data + static_cast<size_t>(width) * static_cast<size_t>(height) * 4);
-    stbi_image_free(data);
+};
+
+bool loadImageFromMemory(const unsigned char* data, int dataSize, ImageData* out) {
+    int w, h, c;
+    unsigned char* pixels = stbi_load_from_memory(data, dataSize, &w, &h, &c, 4);
+    if (!pixels) return false;
+
+    out->width = w;
+    out->height = h;
+    out->channels = 4;
+    out->pixels.assign(pixels, pixels + w * h * 4);
+    stbi_image_free(pixels);
     return true;
 }
 
-bool loadImageFromEmbedded(const aiTexture* texture, ImageData* outImage, std::string* error) {
-    if (!texture) {
-        if (error) {
-            *error = "Embedded texture is null.";
-        }
-        return false;
-    }
-    if (texture->mHeight == 0) {
-        int width = 0;
-        int height = 0;
-        int channels = 0;
-        const auto* data = reinterpret_cast<const stbi_uc*>(texture->pcData);
-        stbi_uc* decoded = stbi_load_from_memory(
-            data,
-            static_cast<int>(texture->mWidth),
-            &width,
-            &height,
-            &channels,
-            4);
-        if (!decoded) {
-            if (error) {
-                *error = stbi_failure_reason() ? stbi_failure_reason() : "Failed to decode embedded texture.";
-            }
-            return false;
-        }
-        outImage->width = width;
-        outImage->height = height;
-        outImage->channels = 4;
-        outImage->pixels.assign(decoded, decoded + static_cast<size_t>(width) * static_cast<size_t>(height) * 4);
-        stbi_image_free(decoded);
-        return true;
-    }
+bool loadImageFromFile(const std::string& path, ImageData* out) {
+    int w, h, c;
+    unsigned char* pixels = stbi_load(path.c_str(), &w, &h, &c, 4);
+    if (!pixels) return false;
 
-    int width = static_cast<int>(texture->mWidth);
-    int height = static_cast<int>(texture->mHeight);
-    outImage->width = width;
-    outImage->height = height;
-    outImage->channels = 4;
-    outImage->pixels.resize(static_cast<size_t>(width) * static_cast<size_t>(height) * 4);
-    for (int y = 0; y < height; ++y) {
-        for (int x = 0; x < width; ++x) {
-            const aiTexel& texel = texture->pcData[static_cast<size_t>(y) * width + x];
-            size_t idx = (static_cast<size_t>(y) * width + x) * 4;
-            outImage->pixels[idx + 0] = texel.r;
-            outImage->pixels[idx + 1] = texel.g;
-            outImage->pixels[idx + 2] = texel.b;
-            outImage->pixels[idx + 3] = texel.a;
-        }
-    }
+    out->width = w;
+    out->height = h;
+    out->channels = 4;
+    out->pixels.assign(pixels, pixels + w * h * 4);
+    stbi_image_free(pixels);
     return true;
-}
-
-Vec3 sampleTexture(const ImageData& image, float u, float v) {
-    if (image.width <= 0 || image.height <= 0 || image.pixels.empty()) {
-        return Vec3(1.0f, 1.0f, 1.0f);
-    }
-
-    u = u - floorf(u);
-    v = v - floorf(v);
-    v = 1.0f - v;
-
-    float x = u * static_cast<float>(image.width - 1);
-    float y = v * static_cast<float>(image.height - 1);
-    int x0 = static_cast<int>(floorf(x));
-    int y0 = static_cast<int>(floorf(y));
-    int x1 = std::min(x0 + 1, image.width - 1);
-    int y1 = std::min(y0 + 1, image.height - 1);
-    float tx = x - static_cast<float>(x0);
-    float ty = y - static_cast<float>(y0);
-
-    auto fetch = [&](int xi, int yi) {
-        size_t idx = (static_cast<size_t>(yi) * image.width + xi) * 4;
-        Vec3 c(
-            image.pixels[idx + 0] / 255.0f,
-            image.pixels[idx + 1] / 255.0f,
-            image.pixels[idx + 2] / 255.0f);
-        return image.srgb ? srgbToLinear(c) : c;
-    };
-
-    Vec3 c00 = fetch(x0, y0);
-    Vec3 c10 = fetch(x1, y0);
-    Vec3 c01 = fetch(x0, y1);
-    Vec3 c11 = fetch(x1, y1);
-    Vec3 c0 = lerp(c00, c10, tx);
-    Vec3 c1 = lerp(c01, c11, tx);
-    return lerp(c0, c1, ty);
 }
 
 }  // namespace
+
+// =============================================================================
+// GLTF Loading with TinyGLTF
+// =============================================================================
+
+bool LoadGltfWithMaterials(const std::string& path,
+                           Mesh* outMesh,
+                           std::string* error,
+                           bool normalize,
+                           float scale) {
+    if (!outMesh) {
+        if (error) *error = "Output mesh pointer is null.";
+        return false;
+    }
+
+    outMesh->clear();
+
+    tinygltf::Model model;
+    tinygltf::TinyGLTF loader;
+    std::string err, warn;
+
+    std::filesystem::path filePath(path);
+    bool loadOk = false;
+
+    if (filePath.extension() == ".glb") {
+        loadOk = loader.LoadBinaryFromFile(&model, &err, &warn, path);
+    } else {
+        loadOk = loader.LoadASCIIFromFile(&model, &err, &warn, path);
+    }
+
+    if (!warn.empty()) {
+        fprintf(stderr, "GLTF Warning: %s\n", warn.c_str());
+    }
+
+    if (!loadOk) {
+        if (error) *error = err.empty() ? "Failed to load GLTF file" : err;
+        return false;
+    }
+
+    // Load textures from images
+    std::filesystem::path baseDir = filePath.parent_path();
+    for (const auto& image : model.images) {
+        MeshTexture tex;
+
+        if (!image.image.empty()) {
+            // Image data is already loaded by TinyGLTF
+            tex.width = image.width;
+            tex.height = image.height;
+            tex.channels = image.component;
+            tex.pixels = image.image;
+            tex.colorSpace = ColorSpace::LINEAR;  // Will be set to SRGB for color textures
+        } else if (!image.uri.empty()) {
+            // Load from external file
+            ImageData imgData;
+            std::filesystem::path imgPath = baseDir / image.uri;
+            if (loadImageFromFile(imgPath.string(), &imgData)) {
+                tex.width = imgData.width;
+                tex.height = imgData.height;
+                tex.channels = imgData.channels;
+                tex.pixels = std::move(imgData.pixels);
+                tex.colorSpace = ColorSpace::LINEAR;
+            }
+        }
+
+        outMesh->textures_.push_back(std::move(tex));
+    }
+
+    // Load materials
+    for (const auto& gltfMat : model.materials) {
+        Material mat = Material::defaultMaterial();
+
+        // Base color
+        const auto& pbr = gltfMat.pbrMetallicRoughness;
+        mat.base_color.value = Vec3(
+            static_cast<float>(pbr.baseColorFactor[0]),
+            static_cast<float>(pbr.baseColorFactor[1]),
+            static_cast<float>(pbr.baseColorFactor[2]));
+        mat.base_color.textured = false;
+
+        if (pbr.baseColorTexture.index >= 0) {
+            int texIdx = model.textures[pbr.baseColorTexture.index].source;
+            if (texIdx >= 0 && texIdx < static_cast<int>(outMesh->textures_.size())) {
+                mat.base_color.textured = true;
+                mat.base_color.textureId = static_cast<uint32_t>(texIdx);
+                outMesh->textures_[texIdx].colorSpace = ColorSpace::SRGB;
+            }
+        }
+
+        // Metallic/Roughness
+        mat.metallic.value = static_cast<float>(pbr.metallicFactor);
+        mat.roughness.value = static_cast<float>(pbr.roughnessFactor);
+
+        if (pbr.metallicRoughnessTexture.index >= 0) {
+            int texIdx = model.textures[pbr.metallicRoughnessTexture.index].source;
+            if (texIdx >= 0 && texIdx < static_cast<int>(outMesh->textures_.size())) {
+                // Metallic in blue channel, roughness in green channel
+                mat.metallic.textured = true;
+                mat.metallic.textureId = static_cast<uint32_t>(texIdx);
+                mat.metallic.channel = 2;  // Blue
+
+                mat.roughness.textured = true;
+                mat.roughness.textureId = static_cast<uint32_t>(texIdx);
+                mat.roughness.channel = 1;  // Green
+
+                outMesh->textures_[texIdx].colorSpace = ColorSpace::LINEAR;
+            }
+        }
+
+        // Normal map
+        if (gltfMat.normalTexture.index >= 0) {
+            int texIdx = model.textures[gltfMat.normalTexture.index].source;
+            if (texIdx >= 0 && texIdx < static_cast<int>(outMesh->textures_.size())) {
+                mat.normal.textured = true;
+                mat.normal.textureId = static_cast<uint32_t>(texIdx);
+                outMesh->textures_[texIdx].colorSpace = ColorSpace::LINEAR;
+            }
+        }
+
+        // Emission
+        if (!gltfMat.emissiveFactor.empty()) {
+            mat.base_emission.value = Vec3(
+                static_cast<float>(gltfMat.emissiveFactor[0]),
+                static_cast<float>(gltfMat.emissiveFactor[1]),
+                static_cast<float>(gltfMat.emissiveFactor[2]));
+
+            if (gltfMat.emissiveTexture.index >= 0) {
+                int texIdx = model.textures[gltfMat.emissiveTexture.index].source;
+                if (texIdx >= 0 && texIdx < static_cast<int>(outMesh->textures_.size())) {
+                    mat.base_emission.textured = true;
+                    mat.base_emission.textureId = static_cast<uint32_t>(texIdx);
+                    outMesh->textures_[texIdx].colorSpace = ColorSpace::SRGB;
+                }
+            }
+        }
+
+        // Extensions: transmission
+        auto transIt = gltfMat.extensions.find("KHR_materials_transmission");
+        if (transIt != gltfMat.extensions.end()) {
+            if (transIt->second.Has("transmissionFactor")) {
+                mat.specular_transmission = static_cast<float>(
+                    transIt->second.Get("transmissionFactor").GetNumberAsDouble());
+            }
+        }
+
+        // Extensions: IOR
+        auto iorIt = gltfMat.extensions.find("KHR_materials_ior");
+        if (iorIt != gltfMat.extensions.end()) {
+            if (iorIt->second.Has("ior")) {
+                mat.ior = static_cast<float>(iorIt->second.Get("ior").GetNumberAsDouble());
+            }
+        }
+
+        // Extensions: emissive strength
+        auto emStrIt = gltfMat.extensions.find("KHR_materials_emissive_strength");
+        if (emStrIt != gltfMat.extensions.end()) {
+            if (emStrIt->second.Has("emissiveStrength")) {
+                mat.emission_scale = static_cast<float>(
+                    emStrIt->second.Get("emissiveStrength").GetNumberAsDouble());
+            }
+        }
+
+        outMesh->materials_.push_back(mat);
+    }
+
+    // Add default material if none exist
+    if (outMesh->materials_.empty()) {
+        outMesh->materials_.push_back(Material::defaultMaterial());
+    }
+
+    // Load mesh geometry
+    // Process all scenes and nodes
+    std::function<void(int, const std::array<float, 16>&)> processNode;
+
+    auto matrixFromGltf = [](const std::vector<double>& m) -> std::array<float, 16> {
+        std::array<float, 16> result;
+        for (int i = 0; i < 16; ++i) {
+            result[i] = static_cast<float>(m[i]);
+        }
+        return result;
+    };
+
+    auto identityMatrix = []() -> std::array<float, 16> {
+        return {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
+    };
+
+    auto multiplyMatrices = [](const std::array<float, 16>& a, const std::array<float, 16>& b) {
+        std::array<float, 16> result = {};
+        for (int i = 0; i < 4; ++i) {
+            for (int j = 0; j < 4; ++j) {
+                for (int k = 0; k < 4; ++k) {
+                    result[i * 4 + j] += a[i * 4 + k] * b[k * 4 + j];
+                }
+            }
+        }
+        return result;
+    };
+
+    auto transformPoint = [](const std::array<float, 16>& m, const Vec3& p) {
+        float x = m[0] * p.x + m[4] * p.y + m[8] * p.z + m[12];
+        float y = m[1] * p.x + m[5] * p.y + m[9] * p.z + m[13];
+        float z = m[2] * p.x + m[6] * p.y + m[10] * p.z + m[14];
+        return Vec3(x, y, z);
+    };
+
+    auto transformNormal = [](const std::array<float, 16>& m, const Vec3& n) {
+        // For normals, use inverse transpose (assuming uniform scale, just use upper 3x3)
+        float x = m[0] * n.x + m[4] * n.y + m[8] * n.z;
+        float y = m[1] * n.x + m[5] * n.y + m[9] * n.z;
+        float z = m[2] * n.x + m[6] * n.y + m[10] * n.z;
+        return normalizeSafe(Vec3(x, y, z), Vec3(0, 1, 0));
+    };
+
+    processNode = [&](int nodeIdx, const std::array<float, 16>& parentTransform) {
+        const tinygltf::Node& node = model.nodes[nodeIdx];
+
+        // Compute node transform
+        std::array<float, 16> nodeTransform = identityMatrix();
+        if (!node.matrix.empty()) {
+            nodeTransform = matrixFromGltf(node.matrix);
+        } else {
+            // TRS
+            std::array<float, 16> T = identityMatrix();
+            std::array<float, 16> R = identityMatrix();
+            std::array<float, 16> S = identityMatrix();
+
+            if (!node.translation.empty()) {
+                T[12] = static_cast<float>(node.translation[0]);
+                T[13] = static_cast<float>(node.translation[1]);
+                T[14] = static_cast<float>(node.translation[2]);
+            }
+
+            if (!node.rotation.empty()) {
+                // Quaternion to rotation matrix
+                float qx = static_cast<float>(node.rotation[0]);
+                float qy = static_cast<float>(node.rotation[1]);
+                float qz = static_cast<float>(node.rotation[2]);
+                float qw = static_cast<float>(node.rotation[3]);
+
+                R[0] = 1 - 2 * (qy * qy + qz * qz);
+                R[1] = 2 * (qx * qy + qz * qw);
+                R[2] = 2 * (qx * qz - qy * qw);
+                R[4] = 2 * (qx * qy - qz * qw);
+                R[5] = 1 - 2 * (qx * qx + qz * qz);
+                R[6] = 2 * (qy * qz + qx * qw);
+                R[8] = 2 * (qx * qz + qy * qw);
+                R[9] = 2 * (qy * qz - qx * qw);
+                R[10] = 1 - 2 * (qx * qx + qy * qy);
+            }
+
+            if (!node.scale.empty()) {
+                S[0] = static_cast<float>(node.scale[0]);
+                S[5] = static_cast<float>(node.scale[1]);
+                S[10] = static_cast<float>(node.scale[2]);
+            }
+
+            nodeTransform = multiplyMatrices(T, multiplyMatrices(R, S));
+        }
+
+        std::array<float, 16> worldTransform = multiplyMatrices(parentTransform, nodeTransform);
+
+        // Process mesh if present
+        if (node.mesh >= 0) {
+            const tinygltf::Mesh& gltfMesh = model.meshes[node.mesh];
+
+            for (const auto& primitive : gltfMesh.primitives) {
+                if (primitive.mode != TINYGLTF_MODE_TRIANGLES) continue;
+
+                // Record start of this primitive
+                outMesh->materialMap_.push_back(static_cast<uint32_t>(outMesh->indices_.size()));
+
+                uint32_t baseVertex = static_cast<uint32_t>(outMesh->vertices_.size());
+
+                // Get accessors
+                auto posIt = primitive.attributes.find("POSITION");
+                if (posIt == primitive.attributes.end()) continue;
+
+                const tinygltf::Accessor& posAccessor = model.accessors[posIt->second];
+                const tinygltf::BufferView& posView = model.bufferViews[posAccessor.bufferView];
+                const tinygltf::Buffer& posBuffer = model.buffers[posView.buffer];
+                const float* positions = reinterpret_cast<const float*>(
+                    posBuffer.data.data() + posView.byteOffset + posAccessor.byteOffset);
+
+                size_t vertexCount = posAccessor.count;
+                size_t posStride = posView.byteStride ? posView.byteStride / sizeof(float) : 3;
+
+                // Load positions
+                for (size_t i = 0; i < vertexCount; ++i) {
+                    Vec3 pos(positions[i * posStride], positions[i * posStride + 1], positions[i * posStride + 2]);
+                    outMesh->vertices_.push_back(transformPoint(worldTransform, pos));
+                }
+
+                // Load normals if available
+                auto normIt = primitive.attributes.find("NORMAL");
+                if (normIt != primitive.attributes.end()) {
+                    const tinygltf::Accessor& normAccessor = model.accessors[normIt->second];
+                    const tinygltf::BufferView& normView = model.bufferViews[normAccessor.bufferView];
+                    const tinygltf::Buffer& normBuffer = model.buffers[normView.buffer];
+                    const float* normals = reinterpret_cast<const float*>(
+                        normBuffer.data.data() + normView.byteOffset + normAccessor.byteOffset);
+
+                    size_t normStride = normView.byteStride ? normView.byteStride / sizeof(float) : 3;
+
+                    for (size_t i = 0; i < vertexCount; ++i) {
+                        Vec3 norm(normals[i * normStride], normals[i * normStride + 1], normals[i * normStride + 2]);
+                        outMesh->normals_.push_back(transformNormal(worldTransform, norm));
+                    }
+                }
+
+                // Load texcoords if available
+                auto uvIt = primitive.attributes.find("TEXCOORD_0");
+                if (uvIt != primitive.attributes.end()) {
+                    const tinygltf::Accessor& uvAccessor = model.accessors[uvIt->second];
+                    const tinygltf::BufferView& uvView = model.bufferViews[uvAccessor.bufferView];
+                    const tinygltf::Buffer& uvBuffer = model.buffers[uvView.buffer];
+                    const float* uvs = reinterpret_cast<const float*>(
+                        uvBuffer.data.data() + uvView.byteOffset + uvAccessor.byteOffset);
+
+                    size_t uvStride = uvView.byteStride ? uvView.byteStride / sizeof(float) : 2;
+
+                    for (size_t i = 0; i < vertexCount; ++i) {
+                        outMesh->texcoords_.push_back(Vec2(uvs[i * uvStride], uvs[i * uvStride + 1]));
+                    }
+                }
+
+                // Load indices
+                if (primitive.indices >= 0) {
+                    const tinygltf::Accessor& idxAccessor = model.accessors[primitive.indices];
+                    const tinygltf::BufferView& idxView = model.bufferViews[idxAccessor.bufferView];
+                    const tinygltf::Buffer& idxBuffer = model.buffers[idxView.buffer];
+                    const unsigned char* idxData = idxBuffer.data.data() + idxView.byteOffset + idxAccessor.byteOffset;
+
+                    size_t indexCount = idxAccessor.count;
+
+                    for (size_t i = 0; i < indexCount; i += 3) {
+                        uint32_t i0, i1, i2;
+
+                        if (idxAccessor.componentType == TINYGLTF_COMPONENT_TYPE_UNSIGNED_SHORT) {
+                            const uint16_t* indices16 = reinterpret_cast<const uint16_t*>(idxData);
+                            i0 = indices16[i];
+                            i1 = indices16[i + 1];
+                            i2 = indices16[i + 2];
+                        } else if (idxAccessor.componentType == TINYGLTF_COMPONENT_TYPE_UNSIGNED_INT) {
+                            const uint32_t* indices32 = reinterpret_cast<const uint32_t*>(idxData);
+                            i0 = indices32[i];
+                            i1 = indices32[i + 1];
+                            i2 = indices32[i + 2];
+                        } else if (idxAccessor.componentType == TINYGLTF_COMPONENT_TYPE_UNSIGNED_BYTE) {
+                            i0 = idxData[i];
+                            i1 = idxData[i + 1];
+                            i2 = idxData[i + 2];
+                        } else {
+                            continue;
+                        }
+
+                        outMesh->indices_.push_back(makeUint3(baseVertex + i0, baseVertex + i1, baseVertex + i2));
+                    }
+                }
+
+                // Material ID for this primitive
+                int matId = primitive.material >= 0 ? primitive.material : 0;
+                outMesh->materialIds_.push_back(matId);
+            }
+        }
+
+        // Process children
+        for (int childIdx : node.children) {
+            processNode(childIdx, worldTransform);
+        }
+    };
+
+    // Process all scenes
+    for (const auto& scene : model.scenes) {
+        for (int nodeIdx : scene.nodes) {
+            processNode(nodeIdx, identityMatrix());
+        }
+    }
+
+    if (outMesh->indices_.empty()) {
+        if (error) *error = "No triangles found in GLTF file.";
+        return false;
+    }
+
+    // Ensure normals array matches vertices if partially filled
+    if (!outMesh->normals_.empty() && outMesh->normals_.size() != outMesh->vertices_.size()) {
+        // Pad with computed face normals or truncate
+        outMesh->normals_.resize(outMesh->vertices_.size(), Vec3(0, 1, 0));
+    }
+
+    // Ensure texcoords array matches vertices if partially filled
+    if (!outMesh->texcoords_.empty() && outMesh->texcoords_.size() != outMesh->vertices_.size()) {
+        outMesh->texcoords_.resize(outMesh->vertices_.size(), Vec2(0, 0));
+    }
+
+    outMesh->hasMeshMaterials_ = true;
+
+    if (normalize) {
+        normalizeMesh(outMesh);
+    }
+    if (scale != 1.0f) {
+        scaleMesh(outMesh, scale);
+    }
+
+    return true;
+}
+
+// =============================================================================
+// Assimp Loading (OBJ, FBX, etc.) - No textures, no materials
+// =============================================================================
 
 bool LoadMeshFromFile(const std::string& path,
                       Mesh* outMesh,
@@ -229,415 +530,152 @@ bool LoadMeshFromFile(const std::string& path,
                       bool normalize,
                       float scale) {
     if (!outMesh) {
-        if (error) {
-            *error = "Output mesh pointer is null.";
-        }
+        if (error) *error = "Output mesh pointer is null.";
         return false;
     }
 
-    const Material defaultMaterial;
-    const Vec3 defaultColor = defaultMaterial.base_color;
-    Assimp::Importer importer;
-    unsigned int flags = aiProcess_Triangulate |
-            aiProcess_JoinIdenticalVertices |
-            aiProcess_ImproveCacheLocality |
-            aiProcess_PreTransformVertices |
-            aiProcess_GenNormals;
-    const aiScene* scene = importer.ReadFile(path, flags);
-    if (!scene || !scene->HasMeshes()) {
-        if (error) {
-            *error = importer.GetErrorString();
-        }
-        return false;
-    }
-
-    std::vector<Triangle> triangles;
-    triangles.reserve(1024);
-
-    for (unsigned int meshIndex = 0; meshIndex < scene->mNumMeshes; ++meshIndex) {
-        const aiMesh* mesh = scene->mMeshes[meshIndex];
-        if (!mesh || mesh->mNumFaces == 0 || mesh->mNumVertices == 0 || !mesh->mVertices || !mesh->mFaces) {
-            continue;
-        }
-
-        for (unsigned int faceIndex = 0; faceIndex < mesh->mNumFaces; ++faceIndex) {
-            const aiFace& face = mesh->mFaces[faceIndex];
-            if (face.mNumIndices != 3) {
-                continue;
-            }
-
-            unsigned int i0 = face.mIndices[0];
-            unsigned int i1 = face.mIndices[1];
-            unsigned int i2 = face.mIndices[2];
-            Vec3 v0 = toVec3(mesh->mVertices[i0]);
-            Vec3 v1 = toVec3(mesh->mVertices[i1]);
-            Vec3 v2 = toVec3(mesh->mVertices[i2]);
-            Vec3 faceNormal = normalizeSafe(cross(v1 - v0, v2 - v0), Vec3(0.0f, 1.0f, 0.0f));
-            Vec3 n0 = faceNormal;
-            Vec3 n1 = faceNormal;
-            Vec3 n2 = faceNormal;
-            if (mesh->HasNormals()) {
-                n0 = normalizeSafe(toVec3(mesh->mNormals[i0]), faceNormal);
-                n1 = normalizeSafe(toVec3(mesh->mNormals[i1]), faceNormal);
-                n2 = normalizeSafe(toVec3(mesh->mNormals[i2]), faceNormal);
-            }
-
-            Vec3 c0 = defaultColor;
-            Vec3 c1 = defaultColor;
-            Vec3 c2 = defaultColor;
-            if (mesh->HasVertexColors(0)) {
-                c0 = toVec3(mesh->mColors[0][i0]);
-                c1 = toVec3(mesh->mColors[0][i1]);
-                c2 = toVec3(mesh->mColors[0][i2]);
-            }
-
-            Triangle tri;
-            tri.v0 = v0;
-            tri.v1 = v1;
-            tri.v2 = v2;
-            tri.normal = faceNormal;
-            tri.n0 = n0;
-            tri.n1 = n1;
-            tri.n2 = n2;
-            tri.c0 = c0;
-            tri.c1 = c1;
-            tri.c2 = c2;
-            tri.uv0 = Vec2();
-            tri.uv1 = Vec2();
-            tri.uv2 = Vec2();
-            tri.texId = -1;
-            tri.normalTexId = -1;
-            tri.paramTexId = -1;
-            tri.metallicChannel = -1;
-            tri.roughnessChannel = -1;
-            tri.specularChannel = -1;
-            triangles.push_back(tri);
-        }
-    }
-
-    if (triangles.empty()) {
-        if (error) {
-            *error = "No triangles found in mesh.";
-        }
-        return false;
-    }
-
-    if (normalize) {
-        normalizeTriangles(triangles);
-    }
-    if (scale != 1.0f) {
-        scaleTriangles(triangles, scale);
-    }
-    outMesh->setTriangles(std::move(triangles));
-    outMesh->setTextures({});
-    outMesh->setTextureNearest(false);
-    return true;
-}
-
-bool LoadTexturedGltfFromFile(const std::string& path,
-                              Mesh* outMesh,
-                              std::string* error,
-                              bool normalize,
-                              bool nearestFilter,
-                              float scale) {
-    if (!outMesh) {
-        if (error) {
-            *error = "Output mesh pointer is null.";
-        }
-        return false;
-    }
+    outMesh->clear();
 
     Assimp::Importer importer;
     unsigned int flags = aiProcess_Triangulate |
-            aiProcess_JoinIdenticalVertices |
-            aiProcess_ImproveCacheLocality |
-            aiProcess_PreTransformVertices |
-            aiProcess_GenNormals;
+                         aiProcess_JoinIdenticalVertices |
+                         aiProcess_ImproveCacheLocality |
+                         aiProcess_PreTransformVertices |
+                         aiProcess_GenNormals;
+
     const aiScene* scene = importer.ReadFile(path, flags);
     if (!scene || !scene->HasMeshes()) {
-        if (error) {
-            *error = importer.GetErrorString();
-        }
+        if (error) *error = importer.GetErrorString();
         return false;
     }
 
-    struct MaterialInfo {
-        Vec3 baseColor{1.0f, 1.0f, 1.0f};
-        int textureIndex = -1;
-        int normalTexIndex = -1;
-        int metallicRoughnessTexIndex = -1;
-        int metallicChannel = -1;
-        int roughnessChannel = -1;
-        int specularChannel = -1;
-    };
+    // Single primitive for the entire mesh
+    outMesh->materialMap_.push_back(0);
+    outMesh->materialIds_.push_back(-1);  // Use global material
 
-    std::unordered_map<std::string, int> textureCache;
-    std::vector<ImageData> textures;
-    std::vector<MaterialInfo> materials(scene->mNumMaterials);
-    std::filesystem::path baseDir = std::filesystem::path(path).parent_path();
+    uint32_t baseVertex = 0;
 
-    auto loadTexture = [&](const aiString& texPath, std::string* texError, bool isSRGB = true) -> int {
-        if (texPath.length == 0) {
-            return -1;
-        }
-        std::string key = texPath.C_Str();
-        auto it = textureCache.find(key);
-        if (it != textureCache.end()) {
-            return it->second;
+    for (unsigned int meshIdx = 0; meshIdx < scene->mNumMeshes; ++meshIdx) {
+        const aiMesh* mesh = scene->mMeshes[meshIdx];
+        if (!mesh || mesh->mNumFaces == 0 || mesh->mNumVertices == 0) continue;
+
+        // Load vertices
+        for (unsigned int i = 0; i < mesh->mNumVertices; ++i) {
+            outMesh->vertices_.push_back(toVec3(mesh->mVertices[i]));
         }
 
-        ImageData image;
-        bool loaded = false;
-        if (!key.empty() && key[0] == '*') {
-            int index = std::atoi(key.c_str() + 1);
-            if (index >= 0 && static_cast<unsigned int>(index) < scene->mNumTextures) {
-                loaded = loadImageFromEmbedded(scene->mTextures[index], &image, texError);
+        // Load normals
+        if (mesh->HasNormals()) {
+            for (unsigned int i = 0; i < mesh->mNumVertices; ++i) {
+                outMesh->normals_.push_back(normalizeSafe(toVec3(mesh->mNormals[i]), Vec3(0, 1, 0)));
             }
-        } else {
-            std::filesystem::path texFile = baseDir / key;
-            loaded = loadImageFromFile(texFile, &image, texError);
         }
 
-        if (!loaded) {
-            return -1;
-        }
-        image.srgb = isSRGB;
-        int id = static_cast<int>(textures.size());
-        textures.push_back(std::move(image));
-        textureCache[key] = id;
-        return id;
-    };
+        // Load faces as indices
+        for (unsigned int i = 0; i < mesh->mNumFaces; ++i) {
+            const aiFace& face = mesh->mFaces[i];
+            if (face.mNumIndices != 3) continue;
 
-    for (unsigned int i = 0; i < scene->mNumMaterials; ++i) {
-        const aiMaterial* mat = scene->mMaterials[i];
-        if (!mat) {
-            continue;
-        }
-        MaterialInfo info;
-        aiColor4D baseColor(1.0f, 1.0f, 1.0f, 1.0f);
-        if (aiGetMaterialColor(mat, AI_MATKEY_BASE_COLOR, &baseColor) == AI_SUCCESS) {
-            info.baseColor = toVec3(baseColor);
-        } else if (aiGetMaterialColor(mat, AI_MATKEY_COLOR_DIFFUSE, &baseColor) == AI_SUCCESS) {
-            info.baseColor = toVec3(baseColor);
+            outMesh->indices_.push_back(makeUint3(
+                baseVertex + face.mIndices[0],
+                baseVertex + face.mIndices[1],
+                baseVertex + face.mIndices[2]));
         }
 
-        aiString texPath;
-        if (mat->GetTexture(aiTextureType_BASE_COLOR, 0, &texPath) == AI_SUCCESS) {
-            info.textureIndex = loadTexture(texPath, error, true);
-        }
-        if (info.textureIndex < 0 &&
-            mat->GetTexture(aiTextureType_DIFFUSE, 0, &texPath) == AI_SUCCESS) {
-            info.textureIndex = loadTexture(texPath, error, true);
-        }
-
-        // Load normal map (linear space, not sRGB) - TODO: implement normal mapping
-        if (mat->GetTexture(aiTextureType_NORMALS, 0, &texPath) == AI_SUCCESS) {
-            info.normalTexIndex = loadTexture(texPath, error, false);
-        } else if (mat->GetTexture(aiTextureType_HEIGHT, 0, &texPath) == AI_SUCCESS) {
-            info.normalTexIndex = loadTexture(texPath, error, false);
-        }
-
-        if (mat->GetTexture(aiTextureType_METALNESS, 0, &texPath) == AI_SUCCESS) {
-            info.metallicRoughnessTexIndex = loadTexture(texPath, error, false);
-        } else if (mat->GetTexture(aiTextureType_DIFFUSE_ROUGHNESS, 0, &texPath) == AI_SUCCESS) {
-            info.metallicRoughnessTexIndex = loadTexture(texPath, error, false);
-        }
-        if (info.metallicRoughnessTexIndex >= 0) {
-            info.metallicChannel = 2;    // glTF metallic in B
-            info.roughnessChannel = 1;   // glTF roughness in G
-            info.specularChannel = -1;
-        }
-
-        materials[i] = info;
+        baseVertex = static_cast<uint32_t>(outMesh->vertices_.size());
     }
 
-    std::vector<Triangle> triangles;
-    triangles.reserve(1024);
-
-    for (unsigned int meshIndex = 0; meshIndex < scene->mNumMeshes; ++meshIndex) {
-        const aiMesh* mesh = scene->mMeshes[meshIndex];
-        if (!mesh || mesh->mNumFaces == 0 || mesh->mNumVertices == 0 || !mesh->mVertices || !mesh->mFaces) {
-            continue;
-        }
-
-        MaterialInfo matInfo;
-        if (mesh->mMaterialIndex < materials.size()) {
-            matInfo = materials[mesh->mMaterialIndex];
-        }
-
-        for (unsigned int faceIndex = 0; faceIndex < mesh->mNumFaces; ++faceIndex) {
-            const aiFace& face = mesh->mFaces[faceIndex];
-            if (face.mNumIndices != 3) {
-                continue;
-            }
-
-            unsigned int i0 = face.mIndices[0];
-            unsigned int i1 = face.mIndices[1];
-            unsigned int i2 = face.mIndices[2];
-            Vec3 v0 = toVec3(mesh->mVertices[i0]);
-            Vec3 v1 = toVec3(mesh->mVertices[i1]);
-            Vec3 v2 = toVec3(mesh->mVertices[i2]);
-            Vec3 faceNormal = normalizeSafe(cross(v1 - v0, v2 - v0), Vec3(0.0f, 1.0f, 0.0f));
-            Vec3 n0 = faceNormal;
-            Vec3 n1 = faceNormal;
-            Vec3 n2 = faceNormal;
-            if (mesh->HasNormals()) {
-                n0 = normalizeSafe(toVec3(mesh->mNormals[i0]), faceNormal);
-                n1 = normalizeSafe(toVec3(mesh->mNormals[i1]), faceNormal);
-                n2 = normalizeSafe(toVec3(mesh->mNormals[i2]), faceNormal);
-            }
-
-            Vec3 c0 = matInfo.baseColor;
-            Vec3 c1 = matInfo.baseColor;
-            Vec3 c2 = matInfo.baseColor;
-            if (mesh->HasVertexColors(0)) {
-                c0 = mul(c0, toVec3(mesh->mColors[0][i0]));
-                c1 = mul(c1, toVec3(mesh->mColors[0][i1]));
-                c2 = mul(c2, toVec3(mesh->mColors[0][i2]));
-            }
-            Vec2 uv0;
-            Vec2 uv1;
-            Vec2 uv2;
-            int texId = -1;
-            int normalTexId = -1;
-            int paramTexId = -1;
-            int metallicChannel = -1;
-            int roughnessChannel = -1;
-            int specularChannel = -1;
-            if (mesh->HasTextureCoords(0)) {
-                const aiVector3D tuv0 = mesh->mTextureCoords[0][i0];
-                const aiVector3D tuv1 = mesh->mTextureCoords[0][i1];
-                const aiVector3D tuv2 = mesh->mTextureCoords[0][i2];
-                uv0 = Vec2(tuv0.x, tuv0.y);
-                uv1 = Vec2(tuv1.x, tuv1.y);
-                uv2 = Vec2(tuv2.x, tuv2.y);
-                if (matInfo.textureIndex >= 0) {
-                    texId = matInfo.textureIndex;
-                }
-                if (matInfo.normalTexIndex >= 0) {
-                    normalTexId = matInfo.normalTexIndex;
-                }
-                if (matInfo.metallicRoughnessTexIndex >= 0) {
-                    paramTexId = matInfo.metallicRoughnessTexIndex;
-                    metallicChannel = matInfo.metallicChannel;
-                    roughnessChannel = matInfo.roughnessChannel;
-                    specularChannel = matInfo.specularChannel;
-                }
-            }
-
-            Triangle tri;
-            tri.v0 = v0;
-            tri.v1 = v1;
-            tri.v2 = v2;
-            tri.normal = faceNormal;
-            tri.n0 = n0;
-            tri.n1 = n1;
-            tri.n2 = n2;
-            tri.c0 = c0;
-            tri.c1 = c1;
-            tri.c2 = c2;
-            tri.uv0 = uv0;
-            tri.uv1 = uv1;
-            tri.uv2 = uv2;
-            tri.texId = texId;
-            tri.normalTexId = normalTexId;
-            tri.paramTexId = paramTexId;
-            tri.metallicChannel = metallicChannel;
-            tri.roughnessChannel = roughnessChannel;
-            tri.specularChannel = specularChannel;
-            tri._pad1 = 0;
-            tri._pad2 = 0;
-            triangles.push_back(tri);
-        }
-    }
-
-    if (triangles.empty()) {
-        if (error) {
-            *error = "No triangles found in mesh.";
-        }
+    if (outMesh->indices_.empty()) {
+        if (error) *error = "No triangles found in mesh.";
         return false;
     }
+
+    // Ensure normals match vertices
+    if (!outMesh->normals_.empty() && outMesh->normals_.size() != outMesh->vertices_.size()) {
+        outMesh->normals_.resize(outMesh->vertices_.size(), Vec3(0, 1, 0));
+    }
+
+    outMesh->hasMeshMaterials_ = false;
 
     if (normalize) {
-        normalizeTriangles(triangles);
+        normalizeMesh(outMesh);
     }
     if (scale != 1.0f) {
-        scaleTriangles(triangles, scale);
+        scaleMesh(outMesh, scale);
     }
-    std::vector<MeshTexture> meshTextures;
-    meshTextures.reserve(textures.size());
-    for (ImageData& image : textures) {
-        MeshTexture tex;
-        tex.width = image.width;
-        tex.height = image.height;
-        tex.channels = image.channels;
-        tex.srgb = image.srgb;
-        tex.pixels = std::move(image.pixels);
-        meshTextures.push_back(std::move(tex));
-    }
-    outMesh->setTriangles(std::move(triangles));
-    outMesh->setTextures(std::move(meshTextures));
-    outMesh->setTextureNearest(nearestFilter);
+
     return true;
 }
+
+// =============================================================================
+// Auto-detect and load
+// =============================================================================
+
+bool LoadMeshAuto(const std::string& path,
+                  Mesh* outMesh,
+                  std::string* error,
+                  bool normalize,
+                  float scale) {
+    std::filesystem::path filePath(path);
+    std::string ext = filePath.extension().string();
+
+    // Convert to lowercase
+    std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
+
+    if (ext == ".gltf" || ext == ".glb") {
+        return LoadGltfWithMaterials(path, outMesh, error, normalize, scale);
+    } else {
+        return LoadMeshFromFile(path, outMesh, error, normalize, scale);
+    }
+}
+
+// =============================================================================
+// UV Sphere generation
+// =============================================================================
 
 void GenerateUvSphere(Mesh* outMesh, int stacks, int slices, float radius) {
-    if (!outMesh) {
-        return;
-    }
+    if (!outMesh) return;
 
-    if (stacks < 2 || slices < 3) {
-        outMesh->setTriangles({});
-        return;
-    }
+    outMesh->clear();
 
-    const Material defaultMaterial;
-    const Vec3 defaultColor = defaultMaterial.base_color;
+    if (stacks < 2 || slices < 3) return;
+
     const float kPi = 3.14159265358979323846f;
-    std::vector<Triangle> triangles;
-    triangles.reserve(static_cast<size_t>(stacks) * static_cast<size_t>(slices) * 2);
 
-    for (int i = 0; i < stacks; ++i) {
-        float v0 = static_cast<float>(i) / static_cast<float>(stacks);
-        float v1 = static_cast<float>(i + 1) / static_cast<float>(stacks);
-        float phi0 = v0 * kPi;
-        float phi1 = v1 * kPi;
+    // Generate vertices and normals
+    for (int i = 0; i <= stacks; ++i) {
+        float v = static_cast<float>(i) / static_cast<float>(stacks);
+        float phi = v * kPi;
 
-        for (int j = 0; j < slices; ++j) {
-            float u0 = static_cast<float>(j) / static_cast<float>(slices);
-            float u1 = static_cast<float>(j + 1) / static_cast<float>(slices);
-            float theta0 = u0 * 2.0f * kPi;
-            float theta1 = u1 * 2.0f * kPi;
+        for (int j = 0; j <= slices; ++j) {
+            float u = static_cast<float>(j) / static_cast<float>(slices);
+            float theta = u * 2.0f * kPi;
 
-            Vec3 p00(
-                    radius * sinf(phi0) * cosf(theta0),
-                    radius * cosf(phi0),
-                    radius * sinf(phi0) * sinf(theta0));
-            Vec3 p01(
-                    radius * sinf(phi0) * cosf(theta1),
-                    radius * cosf(phi0),
-                    radius * sinf(phi0) * sinf(theta1));
-            Vec3 p10(
-                    radius * sinf(phi1) * cosf(theta0),
-                    radius * cosf(phi1),
-                    radius * sinf(phi1) * sinf(theta0));
-            Vec3 p11(
-                    radius * sinf(phi1) * cosf(theta1),
-                    radius * cosf(phi1),
-                    radius * sinf(phi1) * sinf(theta1));
+            float x = sinf(phi) * cosf(theta);
+            float y = cosf(phi);
+            float z = sinf(phi) * sinf(theta);
 
-            Triangle tri0 = makeTriangle(p00, p10, p11);
-            tri0.c0 = defaultColor;
-            tri0.c1 = defaultColor;
-            tri0.c2 = defaultColor;
-            Triangle tri1 = makeTriangle(p00, p11, p01);
-            tri1.c0 = defaultColor;
-            tri1.c1 = defaultColor;
-            tri1.c2 = defaultColor;
-            triangles.push_back(tri0);
-            triangles.push_back(tri1);
+            outMesh->vertices_.push_back(Vec3(x * radius, y * radius, z * radius));
+            outMesh->normals_.push_back(Vec3(x, y, z));
+            outMesh->texcoords_.push_back(Vec2(u, v));
         }
     }
 
-    outMesh->setTriangles(std::move(triangles));
+    // Generate indices
+    for (int i = 0; i < stacks; ++i) {
+        for (int j = 0; j < slices; ++j) {
+            uint32_t p0 = i * (slices + 1) + j;
+            uint32_t p1 = p0 + 1;
+            uint32_t p2 = p0 + (slices + 1);
+            uint32_t p3 = p2 + 1;
+
+            outMesh->indices_.push_back(makeUint3(p0, p2, p1));
+            outMesh->indices_.push_back(makeUint3(p1, p2, p3));
+        }
+    }
+
+    // Single primitive, use global material
+    outMesh->materialMap_.push_back(0);
+    outMesh->materialIds_.push_back(-1);
+    outMesh->hasMeshMaterials_ = false;
 }

@@ -17,6 +17,9 @@
 #include "config_loader.h"
 #include "scene.h"
 #include "disney_brdf.cuh"
+#include "mesh_intersection.cuh"
+#include "hit_info.h"
+#include "ray.h"
 
 struct RenderParams {
     Vec3 camPos;
@@ -347,26 +350,36 @@ __device__ inline bool intersectAabb(const Ray& ray,
 // FORWARD_ONLY: Only faces facing the camera (normal dot direction < 0) - for shell entry
 // BACKWARD_ONLY: Only faces facing away (normal dot direction > 0) - for shell exit
 // ANY: All faces regardless of orientation
-// ALLOW_NEGATIVE: Also accept hits with t < 0 (behind ray origin)
 enum class TraceMode {
     ANY,
     FORWARD_ONLY,
     BACKWARD_ONLY,
 };
 
+// Helper to compute geometric normal for a triangle (for face culling)
+__device__ inline Vec3 getTriangleNormal(const MeshDeviceView& mesh, int triIdx) {
+    uint3 idx = mesh.indices[triIdx];
+    Vec3 v0 = mesh.vertices[idx.x];
+    Vec3 v1 = mesh.vertices[idx.y];
+    Vec3 v2 = mesh.vertices[idx.z];
+    return normalize(cross(v1 - v0, v2 - v0));
+}
+
+// Trace mesh with indexed geometry - returns HitInfo with full intersection data
 __device__ inline bool traceMeshWithMode(const Ray& ray,
                                          MeshDeviceView mesh,
                                          HitInfo* outHit,
                                          TraceMode mode,
                                          bool allowNegative,
-                                         const Material& material) {
-    if (mesh.nodeCount <= 0 || mesh.triangleCount <= 0) {
+                                         const Material& globalMaterial) {
+    if (mesh.numBvhNodes <= 0 || mesh.numTriangles <= 0) {
         return false;
     }
 
-    HitInfo bestHit{false, 0.0f, Vec3(), Vec3(), Vec3(), Vec2(), -1, -1, -1};
-    float closestT = 1e30f;
-    float minT = allowNegative ? -1e30f : 0.0f;
+    PreliminaryHitInfo bestPi;
+    bestPi.t = 1e30f;
+    uint32_t bestTriIdx = 0;
+    float minT = allowNegative ? -1e30f : 1e-6f;
     Vec3 invDir(
         1.0f / ray.direction.x,
         1.0f / ray.direction.y,
@@ -379,13 +392,13 @@ __device__ inline bool traceMeshWithMode(const Ray& ray,
 
     while (stackSize > 0) {
         int nodeIndex = stack[--stackSize];
-        if (nodeIndex < 0 || nodeIndex >= mesh.nodeCount) {
+        if (nodeIndex < 0 || nodeIndex >= mesh.numBvhNodes) {
             continue;
         }
 
-        const BvhNode node = mesh.nodes[nodeIndex];
+        const BvhNode node = mesh.bvhNodes[nodeIndex];
         float nodeTNear = 0.0f;
-        if (!intersectAabb(ray, invDir, node.boundsMin, node.boundsMax, closestT, &nodeTNear)) {
+        if (!intersectAabb(ray, invDir, node.boundsMin, node.boundsMax, bestPi.t, &nodeTNear)) {
             continue;
         }
 
@@ -393,8 +406,15 @@ __device__ inline bool traceMeshWithMode(const Ray& ray,
             int start = node.first;
             int end = start + node.count;
             for (int i = start; i < end; ++i) {
-                const Triangle& tri = mesh.triangles[i];
-                float facingDot = dot(tri.normal, ray.direction);
+                // Get triangle vertices
+                uint3 idx = mesh.indices[i];
+                Vec3 v0 = mesh.vertices[idx.x];
+                Vec3 v1 = mesh.vertices[idx.y];
+                Vec3 v2 = mesh.vertices[idx.z];
+
+                // Compute geometric normal for face culling
+                Vec3 triNormal = normalize(cross(v1 - v0, v2 - v0));
+                float facingDot = dot(triNormal, ray.direction);
 
                 // Apply trace mode filter
                 if (mode == TraceMode::FORWARD_ONLY && facingDot >= 0.0f) {
@@ -404,11 +424,11 @@ __device__ inline bool traceMeshWithMode(const Ray& ray,
                     continue;  // Skip front-facing triangles
                 }
 
-                HitInfo hit = intersectTriangle(ray, tri);
-                if (hit.hit && hit.distance > minT && hit.distance < closestT) {
-                    closestT = hit.distance;
-                    bestHit = hit;
-                    bestHit.triIndex = i;
+                // Intersect with indexed geometry
+                PreliminaryHitInfo pi = intersectTriangleIndexed(ray, v0, v1, v2);
+                if (pi.valid() && pi.t > minT && pi.t < bestPi.t) {
+                    bestPi = pi;
+                    bestTriIdx = static_cast<uint32_t>(i);
                 }
             }
         } else {
@@ -418,13 +438,13 @@ __device__ inline bool traceMeshWithMode(const Ray& ray,
             float rightNear = 0.0f;
             bool hitLeft = false;
             bool hitRight = false;
-            if (left >= 0 && left < mesh.nodeCount) {
-                const BvhNode leftNode = mesh.nodes[left];
-                hitLeft = intersectAabb(ray, invDir, leftNode.boundsMin, leftNode.boundsMax, closestT, &leftNear);
+            if (left >= 0 && left < mesh.numBvhNodes) {
+                const BvhNode leftNode = mesh.bvhNodes[left];
+                hitLeft = intersectAabb(ray, invDir, leftNode.boundsMin, leftNode.boundsMax, bestPi.t, &leftNear);
             }
-            if (right >= 0 && right < mesh.nodeCount) {
-                const BvhNode rightNode = mesh.nodes[right];
-                hitRight = intersectAabb(ray, invDir, rightNode.boundsMin, rightNode.boundsMax, closestT, &rightNear);
+            if (right >= 0 && right < mesh.numBvhNodes) {
+                const BvhNode rightNode = mesh.bvhNodes[right];
+                hitRight = intersectAabb(ray, invDir, rightNode.boundsMin, rightNode.boundsMax, bestPi.t, &rightNear);
             }
 
             if (hitLeft && hitRight) {
@@ -452,173 +472,27 @@ __device__ inline bool traceMeshWithMode(const Ray& ray,
         }
     }
 
-    if (bestHit.hit) {
-        if (mesh.useTextureColor) {
-            // Use vertex colors × texture
-            Vec3 texColor = sampleTextureDevice(
-                mesh.textures,
-                mesh.textureCount,
-                bestHit.texId,
-                bestHit.uv.x,
-                bestHit.uv.y,
-                mesh.textureNearest != 0);
-            if (texColor.x < 0.0f) {
-                bestHit.color = material.base_color;  // Fallback to material color if texture sampling failed
-            } else {
-                bestHit.color = mul(bestHit.color, texColor);
-            }            
-        } else {
-            // Use constant color from material, ignore vertex colors and textures
-            bestHit.color = material.base_color;
+    if (bestPi.valid()) {
+        // Compute full hit data from preliminary info
+        bestPi.primIdx = bestTriIdx;
+        HitInfo hitInfo = computeHitData(bestPi, bestTriIdx, ray, mesh);
+        if (outHit) {
+            *outHit = hitInfo;
         }
+        return true;
     }
-    if (outHit) {
-        *outHit = bestHit;
-    }
-    return bestHit.hit;
+
+    return false;
 }
 
+// Main trace function with indexed geometry
 __device__ inline bool traceMesh(const Ray& ray,
                                  MeshDeviceView mesh,
                                  HitInfo* outHit,
                                  bool cullBackfaces,
-                                 const Material& material) {
-    if (mesh.nodeCount <= 0 || mesh.triangleCount <= 0) {
-        return false;
-    }
-
-    HitInfo bestHit{false, 0.0f, Vec3(), Vec3(), Vec3(), Vec2(), -1, -1, -1};
-    float closestT = 1e30f;
-    Vec3 invDir(
-        1.0f / ray.direction.x,
-        1.0f / ray.direction.y,
-        1.0f / ray.direction.z);
-
-    constexpr int kMaxStack = 256;
-    int stack[kMaxStack];
-    int stackSize = 0;
-    stack[stackSize++] = 0;
-
-    while (stackSize > 0) {
-        int nodeIndex = stack[--stackSize];
-        if (nodeIndex < 0 || nodeIndex >= mesh.nodeCount) {
-            continue;
-        }
-
-        const BvhNode node = mesh.nodes[nodeIndex];
-        float nodeTNear = 0.0f;
-        if (!intersectAabb(ray, invDir, node.boundsMin, node.boundsMax, closestT, &nodeTNear)) {
-            continue;
-        }
-
-        if (node.isLeaf) {
-            int start = node.first;
-            int end = start + node.count;
-            for (int i = start; i < end; ++i) {
-                const Triangle& tri = mesh.triangles[i];
-                if (cullBackfaces && dot(tri.normal, ray.direction) >= 0.0f) {
-                    continue;
-                }
-                HitInfo hit = intersectTriangle(ray, tri);
-                if (hit.hit && hit.distance < closestT) {
-                    closestT = hit.distance;
-                    bestHit = hit;
-                    bestHit.triIndex = i;
-                }
-            }
-        } else {
-            int left = node.left;
-            int right = node.right;
-            float leftNear = 0.0f;
-            float rightNear = 0.0f;
-            bool hitLeft = false;
-            bool hitRight = false;
-            if (left >= 0 && left < mesh.nodeCount) {
-                const BvhNode leftNode = mesh.nodes[left];
-                hitLeft = intersectAabb(ray, invDir, leftNode.boundsMin, leftNode.boundsMax, closestT, &leftNear);
-            }
-            if (right >= 0 && right < mesh.nodeCount) {
-                const BvhNode rightNode = mesh.nodes[right];
-                hitRight = intersectAabb(ray, invDir, rightNode.boundsMin, rightNode.boundsMax, closestT, &rightNear);
-            }
-
-            if (hitLeft && hitRight) {
-                int first = left;
-                int second = right;
-                if (rightNear < leftNear) {
-                    first = right;
-                    second = left;
-                }
-                if (stackSize < kMaxStack) {
-                    stack[stackSize++] = second;
-                }
-                if (stackSize < kMaxStack) {
-                    stack[stackSize++] = first;
-                }
-            } else if (hitLeft) {
-                if (stackSize < kMaxStack) {
-                    stack[stackSize++] = left;
-                }
-            } else if (hitRight) {
-                if (stackSize < kMaxStack) {
-                    stack[stackSize++] = right;
-                }
-            }
-        }
-    }
-
-    if (bestHit.hit) {
-        if (mesh.useTextureColor) {
-            // Use vertex colors × texture
-            Vec3 texColor = sampleTextureDevice(
-                mesh.textures,
-                mesh.textureCount,
-                bestHit.texId,
-                bestHit.uv.x,
-                bestHit.uv.y,
-                mesh.textureNearest != 0);
-            if (texColor.x < 0.0f) {
-                bestHit.color = material.base_color;  // Fallback to material color if texture sampling failed
-            } else {
-                bestHit.color = texColor;
-            }  
-        } else {
-            // Use constant color from material, ignore vertex colors and textures
-            bestHit.color = material.base_color;
-        }
-
-        Vec3 materialParams(material.metallic, material.roughness, material.specular);
-        if (bestHit.triIndex >= 0) {
-            const Triangle& hitTri = mesh.triangles[bestHit.triIndex];
-            if (hitTri.paramTexId >= 0) {
-                Vec3 paramSample = sampleTextureRaw(
-                    mesh.textures[hitTri.paramTexId],
-                    bestHit.uv.x,
-                    bestHit.uv.y,
-                    mesh.textureNearest != 0);
-                // Work around invalid result
-                if (paramSample.x >= 0.0f) {
-                    if (hitTri.metallicChannel >= 0) {
-                        materialParams.x = clampf(selectChannel(paramSample, hitTri.metallicChannel), 0.0f, 1.0f);
-                    }
-                    if (hitTri.roughnessChannel >= 0) {
-                        materialParams.y = clampf(selectChannel(paramSample, hitTri.roughnessChannel), 0.0f, 1.0f);
-                    }
-                    if (hitTri.specularChannel >= 0) {
-                        materialParams.z = clampf(selectChannel(paramSample, hitTri.specularChannel), 0.0f, 1.0f);
-                    }
-                }
-            }
-        }
-        bestHit.materialParams = materialParams;
-
-        // TODO: Sample normal map and transform to world space
-        // This requires tangent/bitangent computation
-    }
-    if (outHit) {
-        *outHit = bestHit;
-    }
-    return bestHit.hit;
+                                 const Material& globalMaterial) {
+    TraceMode mode = cullBackfaces ? TraceMode::FORWARD_ONLY : TraceMode::ANY;
+    return traceMeshWithMode(ray, mesh, outHit, mode, false, globalMaterial);
 }
 
 // ---------------------------------------------------------------------------
@@ -628,18 +502,26 @@ __device__ inline bool traceMesh(const Ray& ray,
 // Device function: Trace a single ray against GT mesh and return HitData
 __forceinline__ __device__ HitData traceRayGT(const Ray& ray,
                                                MeshDeviceView mesh,
-                                               const Material& material) {
+                                               const Material& globalMaterial) {
     HitData result;
-    HitInfo hitInfo{false, 0.0f, Vec3(), Vec3(), Vec3(), Vec2(), -1, -1, -1};
-    bool hit = traceMesh(ray, mesh, &hitInfo, true, material);
+    HitInfo hitInfo;
+    bool hit = traceMesh(ray, mesh, &hitInfo, true, globalMaterial);
 
     result.hit = hit;
     if (hit) {
-        result.position = ray.at(hitInfo.distance);
-        result.normal = hitInfo.normal;
-        result.albedo = hitInfo.color;
-        result.materialParams = hitInfo.materialParams;
-        result.distance = hitInfo.distance;
+        result.position = hitInfo.position;
+        result.normal = hitInfo.shadingNormal;
+
+        // Resolve material at hit point
+        const Material* mat = &globalMaterial;
+        if (hitInfo.materialId >= 0 && hitInfo.materialId < mesh.numMaterials && mesh.materials) {
+            mat = &mesh.materials[hitInfo.materialId];
+        }
+        ResolvedMaterial resolved = resolveMaterial(*mat, hitInfo.uv, mesh);
+
+        result.albedo = resolved.base_color;
+        result.materialParams = Vec3(resolved.metallic, resolved.roughness, resolved.specular);
+        result.distance = hitInfo.t;
     } else {
         result.position = Vec3(0.0f, 0.0f, 0.0f);
         result.normal = Vec3(0.0f, 0.0f, 0.0f);
@@ -701,9 +583,9 @@ __global__ void intersectGroundTruthKernel(float* hitPositions,
             hitColors[base + 0] = 0.0f;
             hitColors[base + 1] = 0.0f;
             hitColors[base + 2] = 0.0f;
-            hitMaterialParams[base + 0] = params.material.metallic;
-            hitMaterialParams[base + 1] = params.material.roughness;
-            hitMaterialParams[base + 2] = params.material.specular;
+            hitMaterialParams[base + 0] = params.material.metallic.value;
+            hitMaterialParams[base + 1] = params.material.roughness.value;
+            hitMaterialParams[base + 2] = params.material.specular.value;
             hitFlags[sampleIdx] = 0;
         }
     }
@@ -829,7 +711,7 @@ __global__ void sampleBounceDirectionsKernel(const float* hitPositions,
         Vec3 tangent, bitangent;
         buildTangentSpace(normal, &tangent, &bitangent);
 
-        Vec3 materialParams(params.material.metallic, params.material.roughness, params.material.specular);
+        Vec3 materialParams(params.material.metallic.value, params.material.roughness.value, params.material.specular.value);
         if (hitMaterialParams) {
             materialParams.x = hitMaterialParams[base + 0];
             materialParams.y = hitMaterialParams[base + 1];
@@ -838,10 +720,10 @@ __global__ void sampleBounceDirectionsKernel(const float* hitPositions,
 
         // Create material with texture-modulated base color
         Material surfaceMat = params.material;
-        surfaceMat.base_color = albedo;
-        surfaceMat.metallic = materialParams.x;
-        surfaceMat.roughness = materialParams.y;
-        surfaceMat.specular = materialParams.z;
+        surfaceMat.base_color = MaterialParamVec3::constant(albedo);
+        surfaceMat.metallic = MaterialParam::constant(materialParams.x);
+        surfaceMat.roughness = MaterialParam::constant(materialParams.y);
+        surfaceMat.specular = MaterialParam::constant(materialParams.z);
 
         // Sample Disney BRDF for bounce direction
         Vec3 wo = primaryRay.direction * -1.0f;
@@ -912,29 +794,36 @@ __global__ void traceGroundTruthBouncesKernel(const float* bounceOrigins,
         Vec3 direction(bounceDirections[base + 0], bounceDirections[base + 1], bounceDirections[base + 2]);
         Ray bounceRay(origin, direction);
 
-        HitInfo hitInfo{false, 0.0f, Vec3(), Vec3(), Vec3(), Vec2(), -1, -1, -1};
+        HitInfo hitInfo;
         bool hit = traceMesh(bounceRay, mesh, &hitInfo, true, params.material);
 
         if (hit) {
-            Vec3 hitPos = bounceRay.at(hitInfo.distance);
-            bounceHitPositions[base + 0] = hitPos.x;
-            bounceHitPositions[base + 1] = hitPos.y;
-            bounceHitPositions[base + 2] = hitPos.z;
-            bounceHitNormals[base + 0] = hitInfo.normal.x;
-            bounceHitNormals[base + 1] = hitInfo.normal.y;
-            bounceHitNormals[base + 2] = hitInfo.normal.z;
-            bounceHitColors[base + 0] = hitInfo.color.x;
-            bounceHitColors[base + 1] = hitInfo.color.y;
-            bounceHitColors[base + 2] = hitInfo.color.z;
-            bounceMaterialParams[base + 0] = hitInfo.materialParams.x;
-            bounceMaterialParams[base + 1] = hitInfo.materialParams.y;
-            bounceMaterialParams[base + 2] = hitInfo.materialParams.z;
+            bounceHitPositions[base + 0] = hitInfo.position.x;
+            bounceHitPositions[base + 1] = hitInfo.position.y;
+            bounceHitPositions[base + 2] = hitInfo.position.z;
+            bounceHitNormals[base + 0] = hitInfo.shadingNormal.x;
+            bounceHitNormals[base + 1] = hitInfo.shadingNormal.y;
+            bounceHitNormals[base + 2] = hitInfo.shadingNormal.z;
+
+            // Resolve material at hit point
+            const Material* mat = &params.material;
+            if (hitInfo.materialId >= 0 && hitInfo.materialId < mesh.numMaterials && mesh.materials) {
+                mat = &mesh.materials[hitInfo.materialId];
+            }
+            ResolvedMaterial resolved = resolveMaterial(*mat, hitInfo.uv, mesh);
+
+            bounceHitColors[base + 0] = resolved.base_color.x;
+            bounceHitColors[base + 1] = resolved.base_color.y;
+            bounceHitColors[base + 2] = resolved.base_color.z;
+            bounceMaterialParams[base + 0] = resolved.metallic;
+            bounceMaterialParams[base + 1] = resolved.roughness;
+            bounceMaterialParams[base + 2] = resolved.specular;
             bounceHitFlags[sampleIdx] = 1;
         } else {
             bounceHitFlags[sampleIdx] = 0;
-            bounceMaterialParams[base + 0] = params.material.metallic;
-            bounceMaterialParams[base + 1] = params.material.roughness;
-            bounceMaterialParams[base + 2] = params.material.specular;
+            bounceMaterialParams[base + 0] = params.material.metallic.value;
+            bounceMaterialParams[base + 1] = params.material.roughness.value;
+            bounceMaterialParams[base + 2] = params.material.specular.value;
         }
     }
 }
@@ -1025,11 +914,12 @@ __global__ void traceHybridBouncesKernel(
         Vec3 dir(bounceDirections[base+0], bounceDirections[base+1], bounceDirections[base+2]);
         Ray ray(origin, dir);
 
-        HitInfo closestHit{false, 0.0f, Vec3(), Vec3(), Vec3(), Vec2(), -1, -1, -1};
+        HitInfo closestHit;
+        MeshDeviceView hitMesh = outerShell;  // Track which mesh we hit for material resolution
         float closestT = 1e30f;
 
         // If additional mesh is empty, only trace shells
-        if (additionalMesh.triangleCount == 0) {
+        if (additionalMesh.numTriangles == 0) {
             traceMesh(ray, outerShell, &closestHit, true, params.material);
         } else {
             // Two-box early culling
@@ -1043,50 +933,62 @@ __global__ void traceHybridBouncesKernel(
                 if (tNearShells < tNearAdditional) {
                     // Check shells first
                     HitInfo shellHit;
-                    if (traceMesh(ray, outerShell, &shellHit, true, params.material) && shellHit.distance < closestT) {
+                    if (traceMesh(ray, outerShell, &shellHit, true, params.material) && shellHit.t < closestT) {
                         closestHit = shellHit;
-                        closestT = shellHit.distance;
+                        closestT = shellHit.t;
+                        hitMesh = outerShell;
                     }
                     // Only check additional if it could be closer
                     if (tNearAdditional < closestT) {
                         HitInfo addHit;
-                        if (traceMesh(ray, additionalMesh, &addHit, true, params.material) && addHit.distance < closestT) {
+                        if (traceMesh(ray, additionalMesh, &addHit, true, params.material) && addHit.t < closestT) {
                             closestHit = addHit;
+                            hitMesh = additionalMesh;
                         }
                     }
                 } else {
                     // Check additional first, then shells
                     HitInfo addHit;
-                    if (traceMesh(ray, additionalMesh, &addHit, true, params.material) && addHit.distance < closestT) {
+                    if (traceMesh(ray, additionalMesh, &addHit, true, params.material) && addHit.t < closestT) {
                         closestHit = addHit;
-                        closestT = addHit.distance;
+                        closestT = addHit.t;
+                        hitMesh = additionalMesh;
                     }
                     if (tNearShells < closestT) {
                         HitInfo shellHit;
-                        if (traceMesh(ray, outerShell, &shellHit, true, params.material) && shellHit.distance < closestT) {
+                        if (traceMesh(ray, outerShell, &shellHit, true, params.material) && shellHit.t < closestT) {
                             closestHit = shellHit;
+                            hitMesh = outerShell;
                         }
                     }
                 }
             } else if (hitShellsBox) {
                 traceMesh(ray, outerShell, &closestHit, true, params.material);
             } else if (hitAdditionalBox) {
-                traceMesh(ray, additionalMesh, &closestHit, true, params.material);
+                if (traceMesh(ray, additionalMesh, &closestHit, true, params.material)) {
+                    hitMesh = additionalMesh;
+                }
             }
         }
 
         // Populate output
-        if (closestHit.hit) {
-            Vec3 hitPos = ray.at(closestHit.distance);
-            bouncePositions[base+0] = hitPos.x;
-            bouncePositions[base+1] = hitPos.y;
-            bouncePositions[base+2] = hitPos.z;
-            bounceNormals[base+0] = closestHit.normal.x;
-            bounceNormals[base+1] = closestHit.normal.y;
-            bounceNormals[base+2] = closestHit.normal.z;
-            bounceColors[base+0] = closestHit.color.x;
-            bounceColors[base+1] = closestHit.color.y;
-            bounceColors[base+2] = closestHit.color.z;
+        if (closestHit.valid()) {
+            bouncePositions[base+0] = closestHit.position.x;
+            bouncePositions[base+1] = closestHit.position.y;
+            bouncePositions[base+2] = closestHit.position.z;
+            bounceNormals[base+0] = closestHit.shadingNormal.x;
+            bounceNormals[base+1] = closestHit.shadingNormal.y;
+            bounceNormals[base+2] = closestHit.shadingNormal.z;
+
+            // Resolve material
+            const Material* mat = &params.material;
+            if (closestHit.materialId >= 0 && closestHit.materialId < hitMesh.numMaterials && hitMesh.materials) {
+                mat = &hitMesh.materials[closestHit.materialId];
+            }
+            ResolvedMaterial resolved = resolveMaterial(*mat, closestHit.uv, hitMesh);
+            bounceColors[base+0] = resolved.base_color.x;
+            bounceColors[base+1] = resolved.base_color.y;
+            bounceColors[base+2] = resolved.base_color.z;
             bounceHitFlags[sampleIdx] = 1;
         } else {
             bounceHitFlags[sampleIdx] = 0;
@@ -1164,17 +1066,17 @@ __global__ void traceOuterShellEntryKernel(
         rayDirections[base + 2] = ray.direction.z;
 
         // Trace outer shell entry (FORWARD_ONLY: allow_backward=false, allow_forward=true)
-        HitInfo outerHit{false, 0.0f, Vec3(), Vec3(), Vec3(), Vec2(), -1, -1, -1};
+        HitInfo outerHit;
         bool hitOuter = traceMeshWithMode(ray, outerShell, &outerHit, TraceMode::FORWARD_ONLY, false, params.material);
 
         if (hitOuter) {
-            Vec3 entryPos = ray.at(outerHit.distance);
+            Vec3 entryPos = ray.at(outerHit.t);
             entryPositions[base + 0] = entryPos.x;
             entryPositions[base + 1] = entryPos.y;
             entryPositions[base + 2] = entryPos.z;
-            entryT[sampleIdx] = outerHit.distance;
+            entryT[sampleIdx] = outerHit.t;
             activeFlags[sampleIdx] = 1;
-            accumT[sampleIdx] = outerHit.distance;
+            accumT[sampleIdx] = outerHit.t;
         } else {
             entryPositions[base + 0] = 0.0f;
             entryPositions[base + 1] = 0.0f;
@@ -1235,16 +1137,16 @@ __global__ void traceOuterShellEntryFromRaysKernel(
         Vec3 dir(rayDirections[base + 0], rayDirections[base + 1], rayDirections[base + 2]);
         Ray ray(origin, dir);
 
-        HitInfo outerHit{false, 0.0f, Vec3(), Vec3(), Vec3(), Vec2(), -1, -1, -1};
+        HitInfo outerHit;
         bool hitOuter = traceMeshWithMode(ray, outerShell, &outerHit, TraceMode::FORWARD_ONLY, false, params.material);
 
         float baseOffset = 0.0f;
         Vec3 entryOrigin = origin;
         if (!hitOuter) {
-            HitInfo exitHit{false, 0.0f, Vec3(), Vec3(), Vec3(), Vec2(), -1, -1, -1};
+            HitInfo exitHit;
             bool hitExit = traceMeshWithMode(ray, outerShell, &exitHit, TraceMode::BACKWARD_ONLY, false, params.material);
             if (hitExit) {
-                baseOffset = exitHit.distance + kSegmentEpsilon;
+                baseOffset = exitHit.t + kSegmentEpsilon;
                 entryOrigin = origin + dir * baseOffset;
                 Ray shiftedRay(entryOrigin, dir);
                 hitOuter = traceMeshWithMode(shiftedRay, outerShell, &outerHit, TraceMode::FORWARD_ONLY, false, params.material);
@@ -1252,8 +1154,8 @@ __global__ void traceOuterShellEntryFromRaysKernel(
         }
 
         if (hitOuter) {
-            Vec3 entryPos = entryOrigin + dir * outerHit.distance;
-            float totalEntryT = baseOffset + outerHit.distance;
+            Vec3 entryPos = entryOrigin + dir * outerHit.t;
+            float totalEntryT = baseOffset + outerHit.t;
             entryPositions[base + 0] = entryPos.x;
             entryPositions[base + 1] = entryPos.y;
             entryPositions[base + 2] = entryPos.z;
@@ -1307,12 +1209,12 @@ __global__ void traceSegmentExitsKernel(
     Ray ray(shiftedEntry, dir);
 
     // Trace outer shell EXIT (BACKWARD_ONLY: allow_backward=true, allow_forward=false)
-    HitInfo outerExit{false, 0.0f, Vec3(), Vec3(), Vec3(), Vec2(), -1, -1, -1};
+    HitInfo outerExit;
     bool hitOuterExit = traceMeshWithMode(ray, outerShell, &outerExit, TraceMode::BACKWARD_ONLY, false, material);
 
     float exitT;
     if (hitOuterExit) {
-        exitT = outerExit.distance;
+        exitT = outerExit.t;
     } else {
         // Fallback: minimal segment (matching Python: x_outer_exit_t[~mask] = 1e-8)
         exitT = kSegmentEpsilon;
@@ -1320,12 +1222,12 @@ __global__ void traceSegmentExitsKernel(
     outerExitT[sampleIdx] = exitT;
 
     // Trace inner shell (ANY mode, allow_negative=True as in Python)
-    HitInfo innerHit{false, 0.0f, Vec3(), Vec3(), Vec3(), Vec2(), -1, -1, -1};
+    HitInfo innerHit;
     bool hitInner = traceMeshWithMode(ray, innerShell, &innerHit, TraceMode::ANY, true, material);
 
     float innerT;
     if (hitInner) {
-        innerT = innerHit.distance;
+        innerT = innerHit.t;
         innerHitFlags[sampleIdx] = 1;
     } else {
         innerT = 1e30f;  // No inner hit
@@ -1488,9 +1390,9 @@ __global__ void applySegmentNeuralOutputKernel(
         // Use material base color which has been set from config/mesh
         // Since mesh vertex colors are overridden in main.cu to match material.base_color,
         // using it directly ensures consistency between GT and neural paths
-        hitColors[base + 0] = material.base_color.x;
-        hitColors[base + 1] = material.base_color.y;
-        hitColors[base + 2] = material.base_color.z;
+        hitColors[base + 0] = material.base_color.value.x;
+        hitColors[base + 1] = material.base_color.value.y;
+        hitColors[base + 2] = material.base_color.value.z;
 
         hitFlags[sampleIdx] = 1;
         activeFlags[sampleIdx] = 0;  // Ray done
@@ -1515,7 +1417,7 @@ __global__ void traceAdditionalMeshPrimaryRaysKernel(
     int pixelIdx = y * params.width + x;
     for (int s = 0; s < params.samplesPerPixel; ++s) {
         int sampleIdx = pixelIdx + s * params.pixelCount;
-        if (additionalMesh.triangleCount == 0) {
+        if (additionalMesh.numTriangles == 0) {
             hitFlags[sampleIdx] = 0;
             continue;
         }
@@ -1528,16 +1430,22 @@ __global__ void traceAdditionalMeshPrimaryRaysKernel(
         HitInfo hit;
         if (traceMesh(ray, additionalMesh, &hit, true, params.material)) {
             int base = sampleIdx * 3;
-            Vec3 hitPos = ray.at(hit.distance);
-            hitPositions[base+0] = hitPos.x;
-            hitPositions[base+1] = hitPos.y;
-            hitPositions[base+2] = hitPos.z;
-            hitNormals[base+0] = hit.normal.x;
-            hitNormals[base+1] = hit.normal.y;
-            hitNormals[base+2] = hit.normal.z;
-            hitColors[base+0] = hit.color.x;
-            hitColors[base+1] = hit.color.y;
-            hitColors[base+2] = hit.color.z;
+            hitPositions[base+0] = hit.position.x;
+            hitPositions[base+1] = hit.position.y;
+            hitPositions[base+2] = hit.position.z;
+            hitNormals[base+0] = hit.shadingNormal.x;
+            hitNormals[base+1] = hit.shadingNormal.y;
+            hitNormals[base+2] = hit.shadingNormal.z;
+
+            // Resolve material
+            const Material* mat = &params.material;
+            if (hit.materialId >= 0 && hit.materialId < additionalMesh.numMaterials && additionalMesh.materials) {
+                mat = &additionalMesh.materials[hit.materialId];
+            }
+            ResolvedMaterial resolved = resolveMaterial(*mat, hit.uv, additionalMesh);
+            hitColors[base+0] = resolved.base_color.x;
+            hitColors[base+1] = resolved.base_color.y;
+            hitColors[base+2] = resolved.base_color.z;
             hitFlags[sampleIdx] = 1;
         } else {
             hitFlags[sampleIdx] = 0;
@@ -1567,7 +1475,7 @@ __global__ void traceAdditionalMeshRaysKernel(
         int sampleIdx = pixelIdx + s * params.pixelCount;
         int base = sampleIdx * 3;
 
-        if (additionalMesh.triangleCount == 0) {
+        if (additionalMesh.numTriangles == 0) {
             hitFlags[sampleIdx] = 0;
             continue;
         }
@@ -1583,16 +1491,22 @@ __global__ void traceAdditionalMeshRaysKernel(
 
         HitInfo hit;
         if (traceMesh(ray, additionalMesh, &hit, true, params.material)) {
-            Vec3 hitPos = ray.at(hit.distance);
-            hitPositions[base + 0] = hitPos.x;
-            hitPositions[base + 1] = hitPos.y;
-            hitPositions[base + 2] = hitPos.z;
-            hitNormals[base + 0] = hit.normal.x;
-            hitNormals[base + 1] = hit.normal.y;
-            hitNormals[base + 2] = hit.normal.z;
-            hitColors[base + 0] = hit.color.x;
-            hitColors[base + 1] = hit.color.y;
-            hitColors[base + 2] = hit.color.z;
+            hitPositions[base + 0] = hit.position.x;
+            hitPositions[base + 1] = hit.position.y;
+            hitPositions[base + 2] = hit.position.z;
+            hitNormals[base + 0] = hit.shadingNormal.x;
+            hitNormals[base + 1] = hit.shadingNormal.y;
+            hitNormals[base + 2] = hit.shadingNormal.z;
+
+            // Resolve material
+            const Material* mat = &params.material;
+            if (hit.materialId >= 0 && hit.materialId < additionalMesh.numMaterials && additionalMesh.materials) {
+                mat = &additionalMesh.materials[hit.materialId];
+            }
+            ResolvedMaterial resolved = resolveMaterial(*mat, hit.uv, additionalMesh);
+            hitColors[base + 0] = resolved.base_color.x;
+            hitColors[base + 1] = resolved.base_color.y;
+            hitColors[base + 2] = resolved.base_color.z;
             hitFlags[sampleIdx] = 1;
         } else {
             hitFlags[sampleIdx] = 0;
@@ -1766,7 +1680,7 @@ __global__ void prepareNextIterationKernel(
     Ray ray(shiftedExit, dir);
 
     // Trace outer shell for re-entry (FORWARD_ONLY)
-    HitInfo reentry{false, 0.0f, Vec3(), Vec3(), Vec3(), Vec2(), -1, -1, -1};
+    HitInfo reentry;
     bool hitReentry = traceMeshWithMode(ray, outerShell, &reentry, TraceMode::FORWARD_ONLY, false, material);
 
     // Remaining rays condition (matching Python):
@@ -1778,7 +1692,7 @@ __global__ void prepareNextIterationKernel(
     if (canContinue) {
         // Get re-entry distance (0 if no re-entry found, matching Python behavior
         // where x_outer_enter_t_new may be 0 or invalid for non-hits)
-        float reentryDist = hitReentry ? reentry.distance : 0.0f;
+        float reentryDist = hitReentry ? reentry.t : 0.0f;
 
         // Update entry position for next iteration
         // (matching Python: x_outer_enter_new = x_outer_exit + ds_left * x_outer_enter_t_new)
@@ -2005,7 +1919,7 @@ RendererNeural::RendererNeural(Scene& scene, const NeuralNetworkConfig* nnConfig
             {"n_levels", 8},
             {"n_features_per_level", 4},
             {"log2_hashmap_size", log2HashmapSize},
-            {"base_resolution", 64},
+            {"base_resolution", 16},
             {"per_level_scale", 2},
             {"fixed_point_pos", false},
     };
@@ -2411,9 +2325,9 @@ void RendererNeural::render(const Vec3& camPos, std::vector<uchar4>& hostPixels)
 
     // Select mesh for non-neural rendering (0=original, 1=inner, 2=outer).
     Mesh* classicMesh = &originalMesh;
-    if (classicMeshIndex_ == 1 && innerShell.triangleCount() > 0) {
+    if (classicMeshIndex_ == 1 && innerShell.numTriangles() > 0) {
         classicMesh = &innerShell;
-    } else if (classicMeshIndex_ == 2 && outerShell.triangleCount() > 0) {
+    } else if (classicMeshIndex_ == 2 && outerShell.numTriangles() > 0) {
         classicMesh = &outerShell;
     }
 
@@ -2507,7 +2421,7 @@ void RendererNeural::render(const Vec3& camPos, std::vector<uchar4>& hostPixels)
     lastFovY_ = basis_.fovY;
     hasLastCamera_ = true;
 
-    const Material& material = scene_->material();
+    const Material& material = scene_->globalMaterial();
 
     RenderParams params;
     params.camPos = camPos;
@@ -2532,7 +2446,7 @@ void RendererNeural::render(const Vec3& camPos, std::vector<uchar4>& hostPixels)
     dim3 grid((width_ + block.x - 1) / block.x, (height_ + block.y - 1) / block.y);
 
     bool neuralReady = useNeuralQuery_ && pointEncoding_ && mlpNetwork_ &&
-                       outerShell.triangleCount() > 0;
+                       outerShell.numTriangles() > 0;
     if (neuralReady) {
         traceNeuralSegmentsForRays(
                 true,

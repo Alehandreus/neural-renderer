@@ -93,10 +93,10 @@ __device__ inline Vec3 disney_diffuse(const Material& mat,
     float n_dot_o = fabsf(dot(wo, n));
     float n_dot_i = fabsf(dot(wi, n));
     float i_dot_h = dot(wi, w_h);
-    float fd90 = 0.5f + 2.0f * mat.roughness * i_dot_h * i_dot_h;
+    float fd90 = 0.5f + 2.0f * mat.roughness.value * i_dot_h * i_dot_h;
     float fi = schlick_weight(n_dot_i);
     float fo = schlick_weight(n_dot_o);
-    return mat.base_color * INV_PI * lerpf(1.0f, fd90, fi) * lerpf(1.0f, fd90, fo);
+    return mat.base_color.value * INV_PI * lerpf(1.0f, fd90, fi) * lerpf(1.0f, fd90, fo);
 }
 
 __device__ inline Vec3 disney_sheen(const Material& mat,
@@ -104,11 +104,11 @@ __device__ inline Vec3 disney_sheen(const Material& mat,
                                     Vec3 wo,
                                     Vec3 wi) {
     Vec3 w_h = normalize(wi + wo);
-    float lum = luminance(mat.base_color);
-    Vec3 tint = lum > 0.0f ? mat.base_color / lum : Vec3(1.0f, 1.0f, 1.0f);
-    Vec3 sheen_color = lerp(Vec3(1.0f, 1.0f, 1.0f), tint, mat.sheen_tint);
+    float lum = luminance(mat.base_color.value);
+    Vec3 tint = lum > 0.0f ? mat.base_color.value / lum : Vec3(1.0f, 1.0f, 1.0f);
+    Vec3 sheen_color = lerp(Vec3(1.0f, 1.0f, 1.0f), tint, mat.sheen_tint.value);
     float f = schlick_weight(dot(wi, w_h));
-    return sheen_color * (f * mat.sheen);
+    return sheen_color * (f * mat.sheen.value);
 }
 
 __device__ inline float disney_clear_coat(const Material& mat,
@@ -116,11 +116,11 @@ __device__ inline float disney_clear_coat(const Material& mat,
                                           Vec3 wo,
                                           Vec3 wi) {
     Vec3 w_h = normalize(wi + wo);
-    float alpha = lerpf(0.1f, 0.001f, mat.clearcoat_gloss);
+    float alpha = lerpf(0.1f, 0.001f, mat.clearcoat_gloss.value);
     float d = gtr_1(dot(n, w_h), alpha);
     float f = lerpf(0.04f, 1.0f, schlick_weight(dot(wi, n)));
     float g = smith_shadowing_ggx(dot(n, wi), 0.25f) * smith_shadowing_ggx(dot(n, wo), 0.25f);
-    return 0.25f * mat.clearcoat * d * f * g;
+    return 0.25f * mat.clearcoat.value * d * f * g;
 }
 
 __device__ inline Vec3 disney_microfacet_isotropic(const Material& mat,
@@ -128,11 +128,11 @@ __device__ inline Vec3 disney_microfacet_isotropic(const Material& mat,
                                                    Vec3 wo,
                                                    Vec3 wi) {
     Vec3 w_h = normalize(wi + wo);
-    float lum = luminance(mat.base_color);
-    Vec3 tint = lum > 0.0f ? mat.base_color / lum : Vec3(1.0f, 1.0f, 1.0f);
-    Vec3 spec = lerp(mat.specular * 0.08f * lerp(Vec3(1.0f, 1.0f, 1.0f), tint, mat.specular_tint), mat.base_color, mat.metallic);
+    float lum = luminance(mat.base_color.value);
+    Vec3 tint = lum > 0.0f ? mat.base_color.value / lum : Vec3(1.0f, 1.0f, 1.0f);
+    Vec3 spec = lerp(mat.specular.value * 0.08f * lerp(Vec3(1.0f, 1.0f, 1.0f), tint, mat.specular_tint.value), mat.base_color.value, mat.metallic.value);
 
-    float alpha = fmaxf(0.001f, mat.roughness * mat.roughness);
+    float alpha = fmaxf(0.001f, mat.roughness.value * mat.roughness.value);
     float d = gtr_2(dot(n, w_h), alpha);
     Vec3 f = lerp(spec, Vec3(1.0f, 1.0f, 1.0f), schlick_weight(dot(wi, w_h)));
     float g = smith_shadowing_ggx(dot(n, wi), alpha) * smith_shadowing_ggx(dot(n, wo), alpha);
@@ -146,12 +146,12 @@ __device__ inline Vec3 disney_microfacet_anisotropic(const Material& mat,
                                                      Vec3 tangent,
                                                      Vec3 bitangent) {
     Vec3 w_h = normalize(wi + wo);
-    float lum = luminance(mat.base_color);
-    Vec3 tint = lum > 0.0f ? mat.base_color / lum : Vec3(1.0f, 1.0f, 1.0f);
-    Vec3 spec = lerp(mat.specular * 0.08f * lerp(Vec3(1.0f, 1.0f, 1.0f), tint, mat.specular_tint), mat.base_color, mat.metallic);
+    float lum = luminance(mat.base_color.value);
+    Vec3 tint = lum > 0.0f ? mat.base_color.value / lum : Vec3(1.0f, 1.0f, 1.0f);
+    Vec3 spec = lerp(mat.specular.value * 0.08f * lerp(Vec3(1.0f, 1.0f, 1.0f), tint, mat.specular_tint.value), mat.base_color.value, mat.metallic.value);
 
-    float aspect = sqrtf(1.0f - mat.anisotropy * 0.9f);
-    float a = mat.roughness * mat.roughness;
+    float aspect = sqrtf(1.0f - mat.anisotropy.value * 0.9f);
+    float a = mat.roughness.value * mat.roughness.value;
     Vec2 alpha = Vec2(fmaxf(0.001f, a / aspect), fmaxf(0.001f, a * aspect));
     float d = gtr_2_aniso(dot(n, w_h), fabsf(dot(w_h, tangent)), fabsf(dot(w_h, bitangent)), alpha);
     Vec3 f = lerp(spec, Vec3(1.0f, 1.0f, 1.0f), schlick_weight(dot(wi, w_h)));
@@ -174,7 +174,7 @@ __device__ inline Vec3 disney_microfacet_transmission_isotropic(const Material& 
     float eta_i = entering ? mat.ior : 1.0f;
     Vec3 w_h = normalize(wo + wi * eta_i / eta_o);
 
-    float alpha = fmaxf(0.001f, mat.roughness * mat.roughness);
+    float alpha = fmaxf(0.001f, mat.roughness.value * mat.roughness.value);
     float d = gtr_2(fabsf(dot(n, w_h)), alpha);
 
     float f = fresnel_dielectric(fabsf(dot(wi, n)), eta_o, eta_i);
@@ -186,7 +186,7 @@ __device__ inline Vec3 disney_microfacet_transmission_isotropic(const Material& 
     float c = fabsf(o_dot_h) / fabsf(dot(wo, n)) * fabsf(i_dot_h) / fabsf(dot(wi, n)) * sqr(eta_o) /
               sqr(eta_o * o_dot_h + eta_i * i_dot_h);
 
-    return mat.base_color * (c * (1.0f - f) * g * d);
+    return mat.base_color.value * (c * (1.0f - f) * g * d);
 }
 
 // Main Disney BRDF evaluation
@@ -199,7 +199,7 @@ __device__ inline Vec3 disney_eval(const Material& mat,
     if (!same_hemisphere(wo, wi, n)) {
         if (mat.specular_transmission > 0.0f) {
             Vec3 spec_trans = disney_microfacet_transmission_isotropic(mat, n, wo, wi);
-            return spec_trans * ((1.0f - mat.metallic) * mat.specular_transmission);
+            return spec_trans * ((1.0f - mat.metallic.value) * mat.specular_transmission);
         }
         return Vec3(0.0f, 0.0f, 0.0f);
     }
@@ -208,12 +208,12 @@ __device__ inline Vec3 disney_eval(const Material& mat,
     Vec3 sheen = disney_sheen(mat, n, wo, wi);
     Vec3 diffuse = disney_diffuse(mat, n, wo, wi);
     Vec3 gloss;
-    if (mat.anisotropy == 0.0f) {
+    if (mat.anisotropy.value == 0.0f) {
         gloss = disney_microfacet_isotropic(mat, n, wo, wi);
     } else {
         gloss = disney_microfacet_anisotropic(mat, n, wo, wi, tangent, bitangent);
     }
-    return (diffuse + sheen) * ((1.0f - mat.metallic) * (1.0f - mat.specular_transmission)) + gloss + Vec3(coat, coat, coat);
+    return (diffuse + sheen) * ((1.0f - mat.metallic.value) * (1.0f - mat.specular_transmission)) + gloss + Vec3(coat, coat, coat);
 }
 
 // ---------------------------------------------------------------------------
@@ -265,11 +265,11 @@ __device__ inline Vec3 disney_sample(const Material& mat,
                                      float u3,
                                      float* pdf_out) {
     // Simple lobe selection based on material properties
-    float diffuse_weight = (1.0f - mat.metallic) * (1.0f - mat.specular_transmission);
+    float diffuse_weight = (1.0f - mat.metallic.value) * (1.0f - mat.specular_transmission);
 
     // float specular_weight = 1.0f;
-    float F0 = 0.08f * mat.specular;
-    float specular_weight = F0 + (1.0f - F0) * mat.metallic;
+    float F0 = 0.08f * mat.specular.value;
+    float specular_weight = F0 + (1.0f - F0) * mat.metallic.value;
 
     float total_weight = diffuse_weight + specular_weight;
 
@@ -285,7 +285,7 @@ __device__ inline Vec3 disney_sample(const Material& mat,
         pdf_diffuse = n_dot_i * INV_PI;
 
         // Compute specular PDF for the same direction (needed for mixture PDF)
-        float alpha = fmaxf(0.001f, mat.roughness * mat.roughness);
+        float alpha = fmaxf(0.001f, mat.roughness.value * mat.roughness.value);
         Vec3 h = normalize(wi + wo);
         float n_dot_h = fmaxf(0.0f, dot(n, h));
         float h_dot_o = fmaxf(0.0001f, dot(h, wo));
@@ -293,7 +293,7 @@ __device__ inline Vec3 disney_sample(const Material& mat,
         pdf_specular = D * n_dot_h / (4.0f * h_dot_o);
     } else {
         // Sample specular lobe (GGX)
-        float alpha = fmaxf(0.001f, mat.roughness * mat.roughness);
+        float alpha = fmaxf(0.001f, mat.roughness.value * mat.roughness.value);
         Vec3 h = sample_ggx(n, alpha, u1, u2);
         wi = normalize(wo * -1.0f + h * (2.0f * dot(wo, h)));
 
@@ -331,9 +331,9 @@ __device__ inline float disney_pdf(const Material& mat,
         return 0.0f;
     }
 
-    float diffuse_weight = (1.0f - mat.metallic) * (1.0f - mat.specular_transmission);
-    float F0 = 0.08f * mat.specular;
-    float specular_weight = F0 + (1.0f - F0) * mat.metallic;
+    float diffuse_weight = (1.0f - mat.metallic.value) * (1.0f - mat.specular_transmission);
+    float F0 = 0.08f * mat.specular.value;
+    float specular_weight = F0 + (1.0f - F0) * mat.metallic.value;
     float total_weight = diffuse_weight + specular_weight;
 
     float diffuse_prob = diffuse_weight / total_weight;
@@ -347,7 +347,7 @@ __device__ inline float disney_pdf(const Material& mat,
     Vec3 h = normalize(wi + wo);
     float n_dot_h = fmaxf(0.0f, dot(n, h));
     float h_dot_o = fmaxf(0.0001f, dot(h, wo));  // Avoid division by zero
-    float alpha = fmaxf(0.001f, mat.roughness * mat.roughness);
+    float alpha = fmaxf(0.001f, mat.roughness.value * mat.roughness.value);
     float D = gtr_2(n_dot_h, alpha);
     float pdf_specular = D * n_dot_h / (4.0f * h_dot_o);
 

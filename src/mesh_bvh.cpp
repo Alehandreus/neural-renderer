@@ -29,8 +29,8 @@ void Mesh::buildBvh() {
         return;
     }
 
-    nodes_.clear();
-    if (triangles_.empty()) {
+    bvhNodes_.clear();
+    if (indices_.empty() || vertices_.empty()) {
         bvhDirty_ = false;
         boundsDirty_ = false;
         boundsMin_ = Vec3(0.0f, 0.0f, 0.0f);
@@ -38,13 +38,14 @@ void Mesh::buildBvh() {
         return;
     }
 
-    std::vector<BBox> bboxes(triangles_.size());
-    std::vector<Vec3f> centers(triangles_.size());
-    for (size_t i = 0; i < triangles_.size(); ++i) {
-        const Triangle& tri = triangles_[i];
-        Vec3f v0 = toBvhVec(tri.v0);
-        Vec3f v1 = toBvhVec(tri.v1);
-        Vec3f v2 = toBvhVec(tri.v2);
+    // Build bounding boxes and centers for each triangle
+    std::vector<BBox> bboxes(indices_.size());
+    std::vector<Vec3f> centers(indices_.size());
+    for (size_t i = 0; i < indices_.size(); ++i) {
+        const uint3& idx = indices_[i];
+        Vec3f v0 = toBvhVec(vertices_[idx.x]);
+        Vec3f v1 = toBvhVec(vertices_[idx.y]);
+        Vec3f v2 = toBvhVec(vertices_[idx.z]);
         BBox bbox(v0, v0);
         bbox.extend(v1);
         bbox.extend(v2);
@@ -57,14 +58,65 @@ void Mesh::buildBvh() {
     config.quality = bvh::v2::DefaultBuilder<Node>::Quality::High;
     Bvh bvh = bvh::v2::DefaultBuilder<Node>::build(threadPool, bboxes, centers, config);
 
-    std::vector<Triangle> reordered(triangles_.size());
-    for (size_t i = 0; i < triangles_.size(); ++i) {
+    // Reorder triangle indices according to BVH ordering
+    std::vector<uint3> reorderedIndices(indices_.size());
+    for (size_t i = 0; i < indices_.size(); ++i) {
         size_t src = bvh.prim_ids[i];
-        reordered[i] = triangles_[src];
+        reorderedIndices[i] = indices_[src];
     }
-    triangles_ = std::move(reordered);
+    indices_ = std::move(reorderedIndices);
 
-    nodes_.resize(bvh.nodes.size());
+    // Also need to remap materialMap to account for reordering
+    // Build a mapping from old triangle index to new triangle index
+    if (!materialMap_.empty() && !materialIds_.empty()) {
+        // Create inverse mapping: newIdx -> oldIdx is bvh.prim_ids[newIdx]
+        // We need oldIdx -> newIdx
+        std::vector<size_t> oldToNew(indices_.size());
+        for (size_t newIdx = 0; newIdx < bvh.prim_ids.size(); ++newIdx) {
+            oldToNew[bvh.prim_ids[newIdx]] = newIdx;
+        }
+
+        // Rebuild materialMap with new triangle indices
+        std::vector<uint32_t> newMaterialMap;
+        std::vector<int> newMaterialIds;
+        newMaterialMap.reserve(materialMap_.size());
+        newMaterialIds.reserve(materialIds_.size());
+
+        // For each original primitive, find where its triangles now start
+        // This is complex because triangles from different primitives can be interleaved after BVH reorder
+        // Instead, we assign material per-triangle and rebuild per-primitive grouping
+
+        // Simpler approach: store material ID per triangle, then rebuild primitives
+        std::vector<int> perTriMaterial(indices_.size(), -1);
+        for (size_t prim = 0; prim < materialMap_.size(); ++prim) {
+            uint32_t start = materialMap_[prim];
+            uint32_t end = (prim + 1 < materialMap_.size()) ? materialMap_[prim + 1] : static_cast<uint32_t>(bvh.prim_ids.size());
+            int matId = materialIds_[prim];
+            for (uint32_t oldTri = start; oldTri < end; ++oldTri) {
+                size_t newTri = oldToNew[oldTri];
+                perTriMaterial[newTri] = matId;
+            }
+        }
+
+        // Rebuild primitives: group consecutive triangles with same material
+        int currentMat = perTriMaterial.empty() ? -1 : perTriMaterial[0];
+        newMaterialMap.push_back(0);
+        newMaterialIds.push_back(currentMat);
+
+        for (size_t i = 1; i < perTriMaterial.size(); ++i) {
+            if (perTriMaterial[i] != currentMat) {
+                currentMat = perTriMaterial[i];
+                newMaterialMap.push_back(static_cast<uint32_t>(i));
+                newMaterialIds.push_back(currentMat);
+            }
+        }
+
+        materialMap_ = std::move(newMaterialMap);
+        materialIds_ = std::move(newMaterialIds);
+    }
+
+    // Convert BVH nodes to our format
+    bvhNodes_.resize(bvh.nodes.size());
     for (size_t i = 0; i < bvh.nodes.size(); ++i) {
         const Node& node = bvh.nodes[i];
         BvhNode out{};
@@ -83,26 +135,28 @@ void Mesh::buildBvh() {
             out.first = 0;
             out.count = 0;
         }
-        nodes_[i] = out;
+        bvhNodes_[i] = out;
     }
 
     bvhDirty_ = false;
-    deviceDirty_ = true;
-    deviceNodesDirty_ = true;
+    geometryDirty_ = true;
+    bvhNodesDirty_ = true;
+    materialsDirty_ = true;  // Material map changed
 
+    // Compute bounds
     if (boundsDirty_) {
-        Vec3 min(FLT_MAX, FLT_MAX, FLT_MAX);
-        Vec3 max(-FLT_MAX, -FLT_MAX, -FLT_MAX);
-        for (const Triangle& tri : triangles_) {
-            min.x = fminf(min.x, fminf(tri.v0.x, fminf(tri.v1.x, tri.v2.x)));
-            min.y = fminf(min.y, fminf(tri.v0.y, fminf(tri.v1.y, tri.v2.y)));
-            min.z = fminf(min.z, fminf(tri.v0.z, fminf(tri.v1.z, tri.v2.z)));
-            max.x = fmaxf(max.x, fmaxf(tri.v0.x, fmaxf(tri.v1.x, tri.v2.x)));
-            max.y = fmaxf(max.y, fmaxf(tri.v0.y, fmaxf(tri.v1.y, tri.v2.y)));
-            max.z = fmaxf(max.z, fmaxf(tri.v0.z, fmaxf(tri.v1.z, tri.v2.z)));
+        Vec3 minV(FLT_MAX, FLT_MAX, FLT_MAX);
+        Vec3 maxV(-FLT_MAX, -FLT_MAX, -FLT_MAX);
+        for (const Vec3& v : vertices_) {
+            minV.x = fminf(minV.x, v.x);
+            minV.y = fminf(minV.y, v.y);
+            minV.z = fminf(minV.z, v.z);
+            maxV.x = fmaxf(maxV.x, v.x);
+            maxV.y = fmaxf(maxV.y, v.y);
+            maxV.z = fmaxf(maxV.z, v.z);
         }
-        boundsMin_ = min;
-        boundsMax_ = max;
+        boundsMin_ = minV;
+        boundsMax_ = maxV;
         boundsDirty_ = false;
     }
 }
