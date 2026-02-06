@@ -114,6 +114,47 @@ bool loadImageFromFile(const std::string& path, ImageData* out) {
     return true;
 }
 
+bool loadImageFromBytes(const unsigned char* data, int dataSize, ImageData* out) {
+    return loadImageFromMemory(data, dataSize, out);
+}
+
+bool gltfImageLoader(tinygltf::Image* image,
+                     const int image_idx,
+                     std::string* err,
+                     std::string* warn,
+                     int req_width,
+                     int req_height,
+                     const unsigned char* bytes,
+                     int size,
+                     void*) {
+    (void)warn;
+    (void)req_width;
+    (void)req_height;
+
+    if (!bytes || size <= 0) {
+        if (err) {
+            (*err) += "GLTF image " + std::to_string(image_idx) + " has no data.\n";
+        }
+        return false;
+    }
+
+    ImageData decoded;
+    if (!loadImageFromBytes(bytes, size, &decoded)) {
+        if (err) {
+            (*err) += "Failed to decode GLTF image " + std::to_string(image_idx) + "\n";
+        }
+        return false;
+    }
+
+    image->width = decoded.width;
+    image->height = decoded.height;
+    image->component = decoded.channels;
+    image->bits = 8;
+    image->pixel_type = TINYGLTF_COMPONENT_TYPE_UNSIGNED_BYTE;
+    image->image = std::move(decoded.pixels);
+    return true;
+}
+
 }  // namespace
 
 // =============================================================================
@@ -134,6 +175,7 @@ bool LoadGltfWithMaterials(const std::string& path,
 
     tinygltf::Model model;
     tinygltf::TinyGLTF loader;
+    loader.SetImageLoader(gltfImageLoader, nullptr);
     std::string err, warn;
 
     std::filesystem::path filePath(path);
