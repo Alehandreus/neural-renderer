@@ -69,6 +69,7 @@ class RendererNeural final {
                                     float* outHitPositions,
                                     float* outHitNormals,
                                     float* outHitColors,
+                                    float* outHitMaterialParams,
                                     int* outHitFlags);
 
     Scene* scene_ = nullptr;
@@ -120,6 +121,7 @@ class RendererNeural final {
     float* additionalHitPositions_ = nullptr;
     float* additionalHitNormals_ = nullptr;
     float* additionalHitColors_ = nullptr;
+    float* additionalHitMaterialParams_ = nullptr;
     int* additionalHitFlags_ = nullptr;
 
     // Bounce buffers (ping-pong).

@@ -1325,6 +1325,7 @@ __global__ void applySegmentNeuralOutputKernel(
         float* hitPositions,
         float* hitNormals,
         float* hitColors,
+        float* hitMaterialParams,
         int* hitFlags,
         int* activeFlags,
         Material material) {
@@ -1392,6 +1393,11 @@ __global__ void applySegmentNeuralOutputKernel(
         hitColors[base + 0] = material.base_color.value.x;
         hitColors[base + 1] = material.base_color.value.y;
         hitColors[base + 2] = material.base_color.value.z;
+        if (hitMaterialParams) {
+            hitMaterialParams[base + 0] = material.metallic.value;
+            hitMaterialParams[base + 1] = material.roughness.value;
+            hitMaterialParams[base + 2] = material.specular.value;
+        }
 
         hitFlags[sampleIdx] = 1;
         activeFlags[sampleIdx] = 0;  // Ray done
@@ -1406,6 +1412,7 @@ __global__ void traceAdditionalMeshPrimaryRaysKernel(
         float* hitPositions,
         float* hitNormals,
         float* hitColors,
+        float* hitMaterialParams,
         int* hitFlags,
         RenderParams params,
         MeshDeviceView additionalMesh) {
@@ -1416,6 +1423,7 @@ __global__ void traceAdditionalMeshPrimaryRaysKernel(
     int pixelIdx = y * params.width + x;
     for (int s = 0; s < params.samplesPerPixel; ++s) {
         int sampleIdx = pixelIdx + s * params.pixelCount;
+        int base = sampleIdx * 3;
         if (additionalMesh.numTriangles == 0) {
             hitFlags[sampleIdx] = 0;
             continue;
@@ -1446,8 +1454,18 @@ __global__ void traceAdditionalMeshPrimaryRaysKernel(
             hitColors[base+1] = resolved.base_color.y;
             hitColors[base+2] = resolved.base_color.z;
             hitFlags[sampleIdx] = 1;
+            if (hitMaterialParams) {
+                hitMaterialParams[base+0] = resolved.metallic;
+                hitMaterialParams[base+1] = resolved.roughness;
+                hitMaterialParams[base+2] = resolved.specular;
+            }
         } else {
             hitFlags[sampleIdx] = 0;
+            if (hitMaterialParams) {
+                hitMaterialParams[base+0] = params.material.metallic.value;
+                hitMaterialParams[base+1] = params.material.roughness.value;
+                hitMaterialParams[base+2] = params.material.specular.value;
+            }
         }
     }
 }
@@ -1462,6 +1480,7 @@ __global__ void traceAdditionalMeshRaysKernel(
         float* hitPositions,
         float* hitNormals,
         float* hitColors,
+        float* hitMaterialParams,
         int* hitFlags,
         RenderParams params,
         MeshDeviceView additionalMesh) {
@@ -1507,8 +1526,18 @@ __global__ void traceAdditionalMeshRaysKernel(
             hitColors[base + 1] = resolved.base_color.y;
             hitColors[base + 2] = resolved.base_color.z;
             hitFlags[sampleIdx] = 1;
+            if (hitMaterialParams) {
+                hitMaterialParams[base + 0] = resolved.metallic;
+                hitMaterialParams[base + 1] = resolved.roughness;
+                hitMaterialParams[base + 2] = resolved.specular;
+            }
         } else {
             hitFlags[sampleIdx] = 0;
+            if (hitMaterialParams) {
+                hitMaterialParams[base + 0] = params.material.metallic.value;
+                hitMaterialParams[base + 1] = params.material.roughness.value;
+                hitMaterialParams[base + 2] = params.material.specular.value;
+            }
         }
     }
 }
@@ -1520,10 +1549,12 @@ __global__ void selectClosestPrimaryHitKernel(
         float* shellHitPositions,
         float* shellHitNormals,
         float* shellHitColors,
+        float* shellHitMaterialParams,
         int* shellHitFlags,
         const float* additionalHitPositions,
         const float* additionalHitNormals,
         const float* additionalHitColors,
+        const float* additionalHitMaterialParams,
         const int* additionalHitFlags,
         RenderParams params) {
     int x = blockIdx.x * blockDim.x + threadIdx.x;
@@ -1558,6 +1589,11 @@ __global__ void selectClosestPrimaryHitKernel(
                 shellHitColors[base+0] = additionalHitColors[base+0];
                 shellHitColors[base+1] = additionalHitColors[base+1];
                 shellHitColors[base+2] = additionalHitColors[base+2];
+                if (shellHitMaterialParams && additionalHitMaterialParams) {
+                    shellHitMaterialParams[base+0] = additionalHitMaterialParams[base+0];
+                    shellHitMaterialParams[base+1] = additionalHitMaterialParams[base+1];
+                    shellHitMaterialParams[base+2] = additionalHitMaterialParams[base+2];
+                }
             }
             // Else keep shell hit
         } else if (additionalHit) {
@@ -1571,6 +1607,11 @@ __global__ void selectClosestPrimaryHitKernel(
             shellHitColors[base+0] = additionalHitColors[base+0];
             shellHitColors[base+1] = additionalHitColors[base+1];
             shellHitColors[base+2] = additionalHitColors[base+2];
+            if (shellHitMaterialParams && additionalHitMaterialParams) {
+                shellHitMaterialParams[base+0] = additionalHitMaterialParams[base+0];
+                shellHitMaterialParams[base+1] = additionalHitMaterialParams[base+1];
+                shellHitMaterialParams[base+2] = additionalHitMaterialParams[base+2];
+            }
             shellHitFlags[sampleIdx] = 1;
         }
         // Else keep shell hit or miss
@@ -1584,10 +1625,12 @@ __global__ void selectClosestHitKernel(
         float* shellHitPositions,
         float* shellHitNormals,
         float* shellHitColors,
+        float* shellHitMaterialParams,
         int* shellHitFlags,
         const float* additionalHitPositions,
         const float* additionalHitNormals,
         const float* additionalHitColors,
+        const float* additionalHitMaterialParams,
         const int* additionalHitFlags,
         const float* rayOrigins,
         RenderParams params) {
@@ -1621,6 +1664,11 @@ __global__ void selectClosestHitKernel(
                 shellHitColors[base + 0] = additionalHitColors[base + 0];
                 shellHitColors[base + 1] = additionalHitColors[base + 1];
                 shellHitColors[base + 2] = additionalHitColors[base + 2];
+                if (shellHitMaterialParams && additionalHitMaterialParams) {
+                    shellHitMaterialParams[base + 0] = additionalHitMaterialParams[base + 0];
+                    shellHitMaterialParams[base + 1] = additionalHitMaterialParams[base + 1];
+                    shellHitMaterialParams[base + 2] = additionalHitMaterialParams[base + 2];
+                }
             }
         } else if (additionalHit) {
             shellHitPositions[base + 0] = additionalHitPositions[base + 0];
@@ -1632,6 +1680,11 @@ __global__ void selectClosestHitKernel(
             shellHitColors[base + 0] = additionalHitColors[base + 0];
             shellHitColors[base + 1] = additionalHitColors[base + 1];
             shellHitColors[base + 2] = additionalHitColors[base + 2];
+            if (shellHitMaterialParams && additionalHitMaterialParams) {
+                shellHitMaterialParams[base + 0] = additionalHitMaterialParams[base + 0];
+                shellHitMaterialParams[base + 1] = additionalHitMaterialParams[base + 1];
+                shellHitMaterialParams[base + 2] = additionalHitMaterialParams[base + 2];
+            }
             shellHitFlags[sampleIdx] = 1;
         }
     }
@@ -2083,6 +2136,7 @@ void RendererNeural::traceNeuralSegmentsForRays(bool useCameraRays,
                                                 float* outHitPositions,
                                                 float* outHitNormals,
                                                 float* outHitColors,
+                                                float* outHitMaterialParams,
                                                 int* outHitFlags) {
     if (elementCount == 0) {
         return;
@@ -2099,6 +2153,9 @@ void RendererNeural::traceNeuralSegmentsForRays(bool useCameraRays,
     checkCuda(cudaMemset(outHitPositions, 0, elementCount * 3 * sizeof(float)), "cudaMemset hitPositions");
     checkCuda(cudaMemset(outHitNormals, 0, elementCount * 3 * sizeof(float)), "cudaMemset hitNormals");
     checkCuda(cudaMemset(outHitColors, 0, elementCount * 3 * sizeof(float)), "cudaMemset hitColors");
+    if (outHitMaterialParams) {
+        checkCuda(cudaMemset(outHitMaterialParams, 0, elementCount * 3 * sizeof(float)), "cudaMemset hitMaterialParams");
+    }
 
     const float* segmentRayDirections = nullptr;
     if (useCameraRays) {
@@ -2263,6 +2320,7 @@ void RendererNeural::traceNeuralSegmentsForRays(bool useCameraRays,
                 outHitPositions,
                 outHitNormals,
                 outHitColors,
+                outHitMaterialParams,
                 outHitFlags,
                 rayActiveFlags_,
                 params.material);
@@ -2462,6 +2520,7 @@ void RendererNeural::render(const Vec3& camPos, std::vector<uchar4>& hostPixels)
                 hitPositions_,
                 hitNormals_,
                 hitColors_,
+                hitMaterialParams_,
                 hitFlags_);
 
         // Always trace additional mesh (empty mesh results in all misses)
@@ -2471,6 +2530,7 @@ void RendererNeural::render(const Vec3& camPos, std::vector<uchar4>& hostPixels)
                 additionalHitPositions_,
                 additionalHitNormals_,
                 additionalHitColors_,
+                additionalHitMaterialParams_,
                 additionalHitFlags_,
                 params,
                 additionalView);
@@ -2482,10 +2542,12 @@ void RendererNeural::render(const Vec3& camPos, std::vector<uchar4>& hostPixels)
                 hitPositions_,
                 hitNormals_,
                 hitColors_,
+                hitMaterialParams_,
                 hitFlags_,
                 additionalHitPositions_,
                 additionalHitNormals_,
                 additionalHitColors_,
+                additionalHitMaterialParams_,
                 additionalHitFlags_,
                 params);
         checkCuda(cudaGetLastError(), "selectClosestPrimaryHitKernel launch");
@@ -2544,6 +2606,7 @@ void RendererNeural::render(const Vec3& camPos, std::vector<uchar4>& hostPixels)
                         bouncePositions_,
                         bounceNormals_,
                         bounceColors_,
+                        bounceMaterialParams_,
                         bounceHitFlags_);
 
                 traceAdditionalMeshRaysKernel<<<grid, block>>>(
@@ -2553,6 +2616,7 @@ void RendererNeural::render(const Vec3& camPos, std::vector<uchar4>& hostPixels)
                         additionalHitPositions_,
                         additionalHitNormals_,
                         additionalHitColors_,
+                        additionalHitMaterialParams_,
                         additionalHitFlags_,
                         params,
                         additionalView);
@@ -2562,10 +2626,12 @@ void RendererNeural::render(const Vec3& camPos, std::vector<uchar4>& hostPixels)
                         bouncePositions_,
                         bounceNormals_,
                         bounceColors_,
+                        bounceMaterialParams_,
                         bounceHitFlags_,
                         additionalHitPositions_,
                         additionalHitNormals_,
                         additionalHitColors_,
+                        additionalHitMaterialParams_,
                         additionalHitFlags_,
                         bounceOrigins_,
                         params);
@@ -2759,6 +2825,7 @@ void RendererNeural::release() {
     freePtr(additionalHitPositions_);
     freePtr(additionalHitNormals_);
     freePtr(additionalHitColors_);
+    freePtr(additionalHitMaterialParams_);
     freePtr(additionalHitFlags_);
     freePtr(outputs_);
     freePtr(bouncePositions_);
@@ -2824,6 +2891,7 @@ bool RendererNeural::ensureNetworkBuffers(size_t elementCount) {
     }
     if (elementCount <= bufferElements_ &&
             hitPositions_ && hitNormals_ && hitColors_ && hitMaterialParams_ && hitFlags_ &&
+            additionalHitPositions_ && additionalHitNormals_ && additionalHitColors_ && additionalHitMaterialParams_ && additionalHitFlags_ &&
             outerHitPositions_ && innerHitPositions_ && rayDirections_ && outerHitFlags_ &&
             compactedOuterPos_ && compactedInnerPos_ && compactedDirs_ &&
             hitIndices_ && hitCount_ &&
@@ -2863,6 +2931,7 @@ bool RendererNeural::ensureNetworkBuffers(size_t elementCount) {
     freePtr(additionalHitPositions_);
     freePtr(additionalHitNormals_);
     freePtr(additionalHitColors_);
+    freePtr(additionalHitMaterialParams_);
     freePtr(additionalHitFlags_);
     freePtr(outputs_);
     freePtr(bouncePositions_);
@@ -2943,6 +3012,7 @@ bool RendererNeural::ensureNetworkBuffers(size_t elementCount) {
     checkCuda(cudaMalloc(&additionalHitPositions_, vec3Bytes), "cudaMalloc additionalHitPositions");
     checkCuda(cudaMalloc(&additionalHitNormals_, vec3Bytes), "cudaMalloc additionalHitNormals");
     checkCuda(cudaMalloc(&additionalHitColors_, vec3Bytes), "cudaMalloc additionalHitColors");
+    checkCuda(cudaMalloc(&additionalHitMaterialParams_, vec3Bytes), "cudaMalloc additionalHitMaterialParams");
     checkCuda(cudaMalloc(&additionalHitFlags_, intBytes), "cudaMalloc additionalHitFlags");
 
     // Bounce buffers.
@@ -3026,5 +3096,6 @@ void RendererNeural::resetAccum() {
         zeroBuffer(additionalHitPositions_, bufferElements_ * 3 * sizeof(float), "cudaMemset additionalHitPositions");
         zeroBuffer(additionalHitNormals_, bufferElements_ * 3 * sizeof(float), "cudaMemset additionalHitNormals");
         zeroBuffer(additionalHitColors_, bufferElements_ * 3 * sizeof(float), "cudaMemset additionalHitColors");
+        zeroBuffer(additionalHitMaterialParams_, bufferElements_ * 3 * sizeof(float), "cudaMemset additionalHitMaterialParams");
     }
 }
