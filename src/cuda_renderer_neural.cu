@@ -524,7 +524,7 @@ __global__ void initializePathStateKernel(Vec3* throughput,
                 active[sampleIdx] = 0;
                 continue;
             }
-            // sampleThroughput = Vec3(hitColors[base + 0], hitColors[base + 1], hitColors[base + 2]);
+            sampleThroughput = Vec3(hitColors[base + 0], hitColors[base + 1], hitColors[base + 2]);
             isActive = 1;
         } else {
             Vec3 envLight = sampleEnvironmentWithClamp(env, primaryRay.direction, params.maxRadiance);
@@ -1233,6 +1233,9 @@ __global__ void applySegmentNeuralOutputKernel(
     float nx = __half2float(outputs[outBase + 2]);
     float ny = __half2float(outputs[outBase + 3]);
     float nz = __half2float(outputs[outBase + 4]);
+    float cr = __half2float(outputs[outBase + 5]);
+    float cg = __half2float(outputs[outBase + 6]);
+    float cb = __half2float(outputs[outBase + 7]);
 
     Vec3 entryPos(entryPositions[base + 0],
                   entryPositions[base + 1],
@@ -1277,12 +1280,18 @@ __global__ void applySegmentNeuralOutputKernel(
         hitNormals[base + 1] = normal.y;
         hitNormals[base + 2] = normal.z;
 
-        // Use material base color which has been set from config/mesh
-        // Since mesh vertex colors are overridden in main.cu to match material.base_color,
-        // using it directly ensures consistency between GT and neural paths
-        hitColors[base + 0] = material.base_color.value.x;
-        hitColors[base + 1] = material.base_color.value.y;
-        hitColors[base + 2] = material.base_color.value.z;
+        Vec3 fallbackColor(material.base_color.value.x,
+                           material.base_color.value.y,
+                           material.base_color.value.z);
+        Vec3 neuralColor = fallbackColor;
+        if (outputStride >= 8) {
+            neuralColor.x = saturate(cr);
+            neuralColor.y = saturate(cg);
+            neuralColor.z = saturate(cb);
+        }
+        hitColors[base + 0] = neuralColor.x;
+        hitColors[base + 1] = neuralColor.y;
+        hitColors[base + 2] = neuralColor.z;
         if (hitMaterialParams) {
             hitMaterialParams[base + 0] = material.metallic.value;
             hitMaterialParams[base + 1] = material.roughness.value;

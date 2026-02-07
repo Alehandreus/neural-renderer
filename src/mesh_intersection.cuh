@@ -318,7 +318,7 @@ __device__ inline ResolvedMaterial resolveMaterial(
     const MeshDeviceView& mesh)
 {
     ResolvedMaterial r;
-    r.base_color = sampleMaterialParamVec3(mat.base_color, uv, mesh, true);
+    r.base_color = sampleMaterialParamVec3(mat.base_color, uv, mesh, false);
     r.metallic = sampleMaterialParam(mat.metallic, uv, mesh);
     r.roughness = sampleMaterialParam(mat.roughness, uv, mesh);
     r.specular = sampleMaterialParam(mat.specular, uv, mesh);
@@ -328,7 +328,7 @@ __device__ inline ResolvedMaterial resolveMaterial(
     r.sheen_tint = sampleMaterialParam(mat.sheen_tint, uv, mesh);
     r.clearcoat = sampleMaterialParam(mat.clearcoat, uv, mesh);
     r.clearcoat_gloss = sampleMaterialParam(mat.clearcoat_gloss, uv, mesh);
-    r.emission = sampleMaterialParamVec3(mat.base_emission, uv, mesh, true);
+    r.emission = sampleMaterialParamVec3(mat.base_emission, uv, mesh, false);
     r.emission_scale = mat.emission_scale;
     r.ior = mat.ior;
     r.specular_transmission = mat.specular_transmission;
