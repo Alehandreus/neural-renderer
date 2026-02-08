@@ -295,6 +295,15 @@ bool LoadGltfWithMaterials(const std::string& path,
                     mat.specular.value);
         }
 
+        mat.metallic.textured = false;
+        mat.metallic.value = 0.0f;
+
+        mat.roughness.textured = false;
+        mat.roughness.value = 0.0f;
+
+        mat.specular.textured = false;
+        mat.specular.value = 0.0f;
+
         // Normal map
         if (gltfMat.normalTexture.index >= 0) {
             int texIdx = model.textures[gltfMat.normalTexture.index].source;

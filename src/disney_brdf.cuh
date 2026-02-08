@@ -492,8 +492,8 @@ __device__ inline float disney_pdf_3component(const Material& mat,
     float pdf_specular = 0.0f;
     if (mat.anisotropy.value == 0.0f) {
         Vec3 h = normalize(wi + wo);
-        float n_dot_h = fmaxf(0.0f, dot(n, h));
-        float h_dot_o = fmaxf(0.0001f, dot(h, wo));
+        float n_dot_h = dot(n, h);  // Don't clamp - NBVH uses raw value
+        float h_dot_o = dot(h, wo);
         float D = gtr_2(n_dot_h, alpha);
         pdf_specular = D * n_dot_h / (4.0f * h_dot_o);
     } else {

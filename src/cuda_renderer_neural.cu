@@ -171,9 +171,21 @@ __device__ inline float rand01(uint32_t& state) {
 }
 
 __device__ inline void buildTangentSpace(Vec3 normal, Vec3* tangent, Vec3* bitangent) {
-    Vec3 up = fabsf(normal.z) < 0.999f ? Vec3(0.0f, 0.0f, 1.0f) : Vec3(1.0f, 0.0f, 0.0f);
-    *tangent = normalize(cross(up, normal));
-    *bitangent = cross(normal, *tangent);
+    // Match NBVH's ortho_basis: pick most perpendicular cardinal axis
+    Vec3 bitangent_init = Vec3(0.0f, 0.0f, 0.0f);
+
+    if (normal.x < 0.6f && normal.x > -0.6f) {
+        bitangent_init.x = 1.0f;
+    } else if (normal.y < 0.6f && normal.y > -0.6f) {
+        bitangent_init.y = 1.0f;
+    } else if (normal.z < 0.6f && normal.z > -0.6f) {
+        bitangent_init.z = 1.0f;
+    } else {
+        bitangent_init.x = 1.0f;
+    }
+
+    *tangent = normalize(cross(bitangent_init, normal));
+    *bitangent = normalize(cross(normal, *tangent));
 }
 
 // Helper function: Sample environment map with radiance clamping
@@ -412,10 +424,10 @@ __forceinline__ __device__ HitData traceRayGT(const Ray& ray,
         }
         ResolvedMaterial resolved = resolveMaterial(*mat, hitInfo.uv, mesh);
 
-        // result.albedo = resolved.base_color;
-        result.albedo = Vec3(1.0f, 1.0f, 1.0f);  // Use white albedo to isolate material param effects
-        // result.materialParams = Vec3(resolved.metallic, resolved.roughness, resolved.specular);
-        result.materialParams = Vec3(0.0, 0.0, 0.0);
+        result.albedo = resolved.base_color;
+        // result.albedo = Vec3(1.0f, 1.0f, 1.0f);  // Use white albedo to isolate material param effects
+        result.materialParams = Vec3(resolved.metallic, resolved.roughness, resolved.specular);
+        // result.materialParams = Vec3(0.0, 0.0, 0.0);
         result.distance = hitInfo.t;
     } else {
         result.position = Vec3(0.0f, 0.0f, 0.0f);
@@ -530,7 +542,8 @@ __global__ void initializePathStateKernel(Vec3* throughput,
                 active[sampleIdx] = 0;
                 continue;
             }
-            sampleThroughput = Vec3(hitColors[base + 0], hitColors[base + 1], hitColors[base + 2]);
+            // Initialize throughput to 1.0 (albedo is in BRDF)
+            sampleThroughput = Vec3(1.0f, 1.0f, 1.0f);
             isActive = 1;
         } else {
             Vec3 envLight = sampleEnvironmentWithClamp(env, primaryRay.direction, params.maxRadiance);
@@ -602,6 +615,9 @@ __global__ void sampleBounceDirectionsKernel(const float* hitPositions,
             continue;
         }
 
+        // Sample Disney BRDF for bounce direction
+        Vec3 wo = primaryRay.direction * -1.0f;
+
         // Build tangent space
         Vec3 tangent, bitangent;
         buildTangentSpace(normal, &tangent, &bitangent);
@@ -620,8 +636,7 @@ __global__ void sampleBounceDirectionsKernel(const float* hitPositions,
         surfaceMat.roughness = MaterialParam::constant(materialParams.y);
         surfaceMat.specular = MaterialParam::constant(materialParams.z);
 
-        // Sample Disney BRDF for bounce direction
-        Vec3 wo = primaryRay.direction * -1.0f;
+        // Generate random numbers for BRDF sampling
         float u1 = rand01(rng);
         float u2 = rand01(rng);
         float u3 = rand01(rng);
@@ -640,8 +655,17 @@ __global__ void sampleBounceDirectionsKernel(const float* hitPositions,
         Vec3 f = disney_eval(surfaceMat, normal, wo, wi, tangent, bitangent);
 
         // Compute BRDF weight (f * cos / pdf)
-        float cos_theta = fmaxf(0.0f, dot(normal, wi));
+        // Use fabs to match NBVH - handles numerical errors at grazing angles
+        float cos_theta = fabsf(dot(normal, wi));
         Vec3 brdfWeight = f * (cos_theta / pdf);
+
+        // Safety check for numerical issues
+        if (isnan(brdfWeight.x) || isnan(brdfWeight.y) || isnan(brdfWeight.z) ||
+            isinf(brdfWeight.x) || isinf(brdfWeight.y) || isinf(brdfWeight.z)) {
+            if (pathActive) pathActive[sampleIdx] = 0;
+            bouncePdfs[sampleIdx] = 0.0f;
+            continue;
+        }
 
         // Output bounce ray
         float rayOffset = params.sceneScale * 1e-6f;
