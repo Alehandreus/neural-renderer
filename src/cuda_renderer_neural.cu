@@ -181,7 +181,11 @@ __forceinline__ __device__ Vec3 sampleEnvironmentWithClamp(EnvironmentDeviceView
                                                             Vec3 direction,
                                                             float maxRadiance) {
     Vec3 envLight = sampleEnvironment(env, direction);
-    return clampRadiance(envLight, maxRadiance);
+    return Vec3(
+        fminf(envLight.x, maxRadiance),
+        fminf(envLight.y, maxRadiance),
+        fminf(envLight.z, maxRadiance)
+    );
 }
 
 __device__ inline Ray generatePrimaryRay(int x, int y, const RenderParams& params, uint32_t& rng) {
@@ -408,8 +412,10 @@ __forceinline__ __device__ HitData traceRayGT(const Ray& ray,
         }
         ResolvedMaterial resolved = resolveMaterial(*mat, hitInfo.uv, mesh);
 
-        result.albedo = resolved.base_color;
-        result.materialParams = Vec3(resolved.metallic, resolved.roughness, resolved.specular);
+        // result.albedo = resolved.base_color;
+        result.albedo = Vec3(1.0f, 1.0f, 1.0f);  // Use white albedo to isolate material param effects
+        // result.materialParams = Vec3(resolved.metallic, resolved.roughness, resolved.specular);
+        result.materialParams = Vec3(0.0, 0.0, 0.0);
         result.distance = hitInfo.t;
     } else {
         result.position = Vec3(0.0f, 0.0f, 0.0f);
@@ -620,7 +626,9 @@ __global__ void sampleBounceDirectionsKernel(const float* hitPositions,
         float u2 = rand01(rng);
         float u3 = rand01(rng);
         float pdf;
-        Vec3 wi = disney_sample(surfaceMat, normal, wo, u1, u2, u3, &pdf);
+        // Use new 3-component sampler (diffuse, specular, clearcoat)
+        Vec3 wi = disney_sample_3component(surfaceMat, normal, wo, tangent, bitangent,
+                                           u1, u2, u3, &pdf);
 
         if (pdf <= 0.0f) {
             if (pathActive) pathActive[sampleIdx] = 0;
@@ -2389,7 +2397,7 @@ void RendererNeural::render(const Vec3& camPos, std::vector<uchar4>& hostPixels)
     params.outerShellInvExtent = outerInvExtent;
     params.material = material;
     params.fovY = basis_.fovY;
-    params.maxRadiance = 20.0f;
+    params.maxRadiance = 100.0f;
     params.sceneScale = sceneScale_;
     params.maxBounces = maxBounces;
     params.width = width_;

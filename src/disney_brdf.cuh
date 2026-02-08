@@ -256,6 +256,66 @@ __device__ inline Vec3 sample_cosine_hemisphere(Vec3 n, float u1, float u2) {
     return normalize(tangent * h.x + bitangent * h.y + n * h.z);
 }
 
+// Sample GTR1 distribution for clearcoat (ported from NBVH)
+__device__ inline Vec3 sample_gtr_1_h(Vec3 n, Vec3 tangent, Vec3 bitangent,
+                                      float alpha, float u1, float u2) {
+    float phi_h = 2.0f * 3.14159265358979323846f * u1;
+    float alpha_sqr = alpha * alpha;
+    float cos_theta_h_sqr = (1.0f - powf(alpha_sqr, 1.0f - u2)) / (1.0f - alpha_sqr);
+    float cos_theta_h = sqrtf(cos_theta_h_sqr);
+    float sin_theta_h = sqrtf(1.0f - cos_theta_h_sqr);
+
+    Vec3 h;
+    h.x = sin_theta_h * cosf(phi_h);
+    h.y = sin_theta_h * sinf(phi_h);
+    h.z = cos_theta_h;
+
+    return normalize(tangent * h.x + bitangent * h.y + n * h.z);
+}
+
+// Sample anisotropic GTR2 distribution (ported from NBVH)
+__device__ inline Vec3 sample_gtr_2_aniso_h(Vec3 n, Vec3 tangent, Vec3 bitangent,
+                                            Vec2 alpha, float u1, float u2) {
+    float x = 2.0f * 3.14159265358979323846f * u1;
+    Vec3 w_h = normalize(
+        tangent * (alpha.x * cosf(x) * sqrtf(u2 / (1.0f - u2))) +
+        bitangent * (alpha.y * sinf(x) * sqrtf(u2 / (1.0f - u2))) +
+        n
+    );
+    return w_h;
+}
+
+// Reflect vector around normal
+__device__ inline Vec3 reflect(Vec3 wi, Vec3 n) {
+    return wi - n * (2.0f * dot(wi, n));
+}
+
+// GTR1 PDF for clearcoat
+__device__ inline float gtr_1_pdf(Vec3 wo, Vec3 wi, Vec3 n, float alpha) {
+    if (!same_hemisphere(wo, wi, n)) {
+        return 0.0f;
+    }
+    Vec3 w_h = normalize(wi + wo);
+    float cos_theta_h = dot(n, w_h);
+    float d = gtr_1(cos_theta_h, alpha);
+    return d * cos_theta_h / (4.0f * dot(wo, w_h));
+}
+
+// GTR2 anisotropic PDF
+__device__ inline float gtr_2_aniso_pdf(Vec3 wo, Vec3 wi, Vec3 n,
+                                       Vec3 tangent, Vec3 bitangent, Vec2 alpha) {
+    if (!same_hemisphere(wo, wi, n)) {
+        return 0.0f;
+    }
+    Vec3 w_h = normalize(wi + wo);
+    float cos_theta_h = fabsf(dot(n, w_h));
+    float d = gtr_2_aniso(cos_theta_h,
+                          fabsf(dot(w_h, tangent)),
+                          fabsf(dot(w_h, bitangent)),
+                          alpha);
+    return d * cos_theta_h / (4.0f * fabsf(dot(wo, w_h)));
+}
+
 // Disney BRDF importance sampling
 __device__ inline Vec3 disney_sample(const Material& mat,
                                      Vec3 n,
@@ -320,6 +380,131 @@ __device__ inline Vec3 disney_sample(const Material& mat,
     }
 
     return wi;
+}
+
+// Forward declaration for 3-component PDF
+__device__ inline float disney_pdf_3component(const Material& mat,
+                                              Vec3 n,
+                                              Vec3 wo,
+                                              Vec3 wi,
+                                              Vec3 tangent,
+                                              Vec3 bitangent);
+
+// Disney BRDF 3-component importance sampling (diffuse, specular, clearcoat)
+// Ported from NBVH with uniform component selection
+__device__ inline Vec3 disney_sample_3component(const Material& mat,
+                                                Vec3 n,
+                                                Vec3 wo,
+                                                Vec3 tangent,
+                                                Vec3 bitangent,
+                                                float u1,
+                                                float u2,
+                                                float u3,
+                                                float* pdf_out) {
+    Vec3 wi;
+    int component = 0;
+
+    // Check for full transmission case
+    if (mat.specular_transmission >= 1.0f) {
+        // Handle pure transmission (could be added later if needed)
+        if (pdf_out) *pdf_out = 0.0f;
+        return Vec3(0.0f, 0.0f, 0.0f);
+    }
+
+    // Select component uniformly (3-way choice)
+    component = (int)(u3 * 3.0f);
+    component = component > 2 ? 2 : component; // Clamp to [0, 2]
+
+    if (component == 0) {
+        // Sample diffuse lobe (cosine-weighted hemisphere)
+        wi = sample_cosine_hemisphere(n, u1, u2);
+
+    } else if (component == 1) {
+        // Sample specular lobe (GGX/GTR2)
+        float alpha = fmaxf(0.001f, mat.roughness.value * mat.roughness.value);
+        Vec3 w_h;
+
+        if (mat.anisotropy.value == 0.0f) {
+            w_h = sample_ggx(n, alpha, u1, u2);
+        } else {
+            float aspect = sqrtf(1.0f - mat.anisotropy.value * 0.9f);
+            Vec2 alpha_aniso = Vec2(
+                fmaxf(0.001f, alpha / aspect),
+                fmaxf(0.001f, alpha * aspect)
+            );
+            w_h = sample_gtr_2_aniso_h(n, tangent, bitangent, alpha_aniso, u1, u2);
+        }
+
+        wi = reflect(-wo, w_h);
+
+        // Validate hemisphere - specular reflection should be above surface
+        if (!same_hemisphere(wo, wi, n)) {
+            if (pdf_out) *pdf_out = 0.0f;
+            return wi;
+        }
+
+    } else if (component == 2) {
+        // Sample clearcoat lobe (GTR1)
+        float alpha = lerpf(0.1f, 0.001f, mat.clearcoat_gloss.value);
+        Vec3 w_h = sample_gtr_1_h(n, tangent, bitangent, alpha, u1, u2);
+        wi = reflect(-wo, w_h);
+
+        // Validate hemisphere
+        if (!same_hemisphere(wo, wi, n)) {
+            if (pdf_out) *pdf_out = 0.0f;
+            return wi;
+        }
+    }
+
+    // Compute uniform average PDF across all components
+    if (pdf_out) {
+        *pdf_out = disney_pdf_3component(mat, n, wo, wi, tangent, bitangent);
+    }
+
+    return wi;
+}
+
+// PDF for 3-component Disney BRDF sampling (uniform average)
+__device__ inline float disney_pdf_3component(const Material& mat,
+                                              Vec3 n,
+                                              Vec3 wo,
+                                              Vec3 wi,
+                                              Vec3 tangent,
+                                              Vec3 bitangent) {
+    if (!same_hemisphere(wo, wi, n)) {
+        return 0.0f;
+    }
+
+    // Compute alpha values
+    float alpha = fmaxf(0.001f, mat.roughness.value * mat.roughness.value);
+    float aspect = sqrtf(1.0f - mat.anisotropy.value * 0.9f);
+    Vec2 alpha_aniso = Vec2(
+        fmaxf(0.001f, alpha / aspect),
+        fmaxf(0.001f, alpha * aspect)
+    );
+    float clearcoat_alpha = lerpf(0.1f, 0.001f, mat.clearcoat_gloss.value);
+
+    // Diffuse PDF (Lambertian)
+    float n_dot_i = fmaxf(0.0f, dot(n, wi));
+    float pdf_diffuse = n_dot_i * INV_PI;
+
+    // Specular PDF (GTR2)
+    float pdf_specular = 0.0f;
+    if (mat.anisotropy.value == 0.0f) {
+        Vec3 h = normalize(wi + wo);
+        float n_dot_h = fmaxf(0.0f, dot(n, h));
+        float h_dot_o = fmaxf(0.0001f, dot(h, wo));
+        float D = gtr_2(n_dot_h, alpha);
+        pdf_specular = D * n_dot_h / (4.0f * h_dot_o);
+    } else {
+        pdf_specular = gtr_2_aniso_pdf(wo, wi, n, tangent, bitangent, alpha_aniso);
+    }
+
+    // Clearcoat PDF (GTR1)
+    float pdf_clearcoat = gtr_1_pdf(wo, wi, n, clearcoat_alpha);
+
+    // Uniform average across all 3 components
+    return (pdf_diffuse + pdf_specular + pdf_clearcoat) / 3.0f;
 }
 
 // PDF for Disney BRDF sampling
