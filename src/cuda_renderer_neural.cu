@@ -1183,10 +1183,9 @@ __global__ void buildSegmentNeuralInputsKernel(
         int hitCount,
         Vec3 outerMin,
         Vec3 outerInvExtent,
-        float* compactedEntryPos,
-        float* compactedExitPos,
+        float* compactedPointInputs,
         float* compactedDirs,
-        float* compactedMidPos) {
+        int pointCount) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= hitCount) {
         return;
@@ -1194,7 +1193,7 @@ __global__ void buildSegmentNeuralInputsKernel(
 
     int sampleIdx = hitIndices[idx];
     int srcBase = sampleIdx * 3;
-    int dstBase = idx * 3;
+    int dstBase = idx * pointCount * 3;
 
     // Shift entry by epsilon before normalization (matching Python)
     Vec3 entryPos(entryPositions[srcBase + 0],
@@ -1217,21 +1216,21 @@ __global__ void buildSegmentNeuralInputsKernel(
                   (exitPos.y - outerMin.y) * outerInvExtent.y,
                   (exitPos.z - outerMin.z) * outerInvExtent.z);
 
-    compactedEntryPos[dstBase + 0] = normEntry.x;
-    compactedEntryPos[dstBase + 1] = normEntry.y;
-    compactedEntryPos[dstBase + 2] = normEntry.z;
-    compactedExitPos[dstBase + 0] = normExit.x;
-    compactedExitPos[dstBase + 1] = normExit.y;
-    compactedExitPos[dstBase + 2] = normExit.z;
-
-    if (compactedMidPos) {
+    int offset = 0;
+    compactedPointInputs[dstBase + offset++] = normEntry.x;
+    compactedPointInputs[dstBase + offset++] = normEntry.y;
+    compactedPointInputs[dstBase + offset++] = normEntry.z;
+    compactedPointInputs[dstBase + offset++] = normExit.x;
+    compactedPointInputs[dstBase + offset++] = normExit.y;
+    compactedPointInputs[dstBase + offset++] = normExit.z;
+    if (pointCount == 3) {
         Vec3 midPos = (shiftedEntry + exitPos) * 0.5f;
         Vec3 normMid((midPos.x - outerMin.x) * outerInvExtent.x,
                      (midPos.y - outerMin.y) * outerInvExtent.y,
                      (midPos.z - outerMin.z) * outerInvExtent.z);
-        compactedMidPos[dstBase + 0] = normMid.x;
-        compactedMidPos[dstBase + 1] = normMid.y;
-        compactedMidPos[dstBase + 2] = normMid.z;
+        compactedPointInputs[dstBase + offset++] = normMid.x;
+        compactedPointInputs[dstBase + offset++] = normMid.y;
+        compactedPointInputs[dstBase + offset++] = normMid.z;
     }
 
     // Directions: map from [-1,1] to [0,1] (matching Python: (directions + 1) / 2)
@@ -1724,52 +1723,50 @@ __global__ void compactInputsKernel(const int* flags,
 }
 
 // ---------------------------------------------------------------------------
-// Concatenate multiple FP16 encoding outputs into a single FP32 MLP input buffer.
-// tcnn C++ API forward() takes float* and handles precision internally.
-// Layout per element: [encA(dimA), encB(dimB), encC(dimC), encD(dimD)]
+// Scatter point encoding outputs directly into the MLP input buffer.
 // ---------------------------------------------------------------------------
-__global__ void concatenateEncodingsKernel(const __half* encA,
-                                           uint32_t dimA,
-                                           const __half* encB,
-                                           uint32_t dimB,
-                                           const __half* encC,
-                                           uint32_t dimC,
-                                           const __half* encD,
-                                           uint32_t dimD,
-                                           float* output,
-                                           uint32_t totalDim,
-                                           int count) {
+__global__ void scatterPointEncodingsKernel(const __half* encOutput,
+                                            uint32_t pointEncOutDims,
+                                            uint32_t pointCount,
+                                            float* mlpInput,
+                                            uint32_t pointFeatureDims,
+                                            uint32_t mlpInputDims,
+                                            int count) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= count) {
         return;
     }
 
-    int outBase = idx * totalDim;
-    int aBase = idx * dimA;
-    int bBase = idx * dimB;
+    int mlpBase = idx * mlpInputDims;
+    int encBase = idx * pointCount * pointEncOutDims;
+    uint32_t offset = 0;
+    for (uint32_t p = 0; p < pointCount; ++p) {
+        int pointBase = encBase + p * pointEncOutDims;
+        for (uint32_t d = 0; d < pointEncOutDims; ++d) {
+            mlpInput[mlpBase + offset] = __half2float(encOutput[pointBase + d]);
+            ++offset;
+        }
+    }
+}
 
-    int offset = 0;
-    for (uint32_t i = 0; i < dimA; ++i) {
-        output[outBase + offset] = __half2float(encA[aBase + i]);
-        ++offset;
+// ---------------------------------------------------------------------------
+// Append direction encoding outputs after the point features in the MLP buffer.
+// ---------------------------------------------------------------------------
+__global__ void appendDirectionEncodingsKernel(const __half* dirEncOutput,
+                                               uint32_t dirEncOutDims,
+                                               float* mlpInput,
+                                               uint32_t pointFeatureDims,
+                                               uint32_t mlpInputDims,
+                                               int count) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= count) {
+        return;
     }
-    for (uint32_t i = 0; i < dimB; ++i) {
-        output[outBase + offset] = __half2float(encB[bBase + i]);
-        ++offset;
-    }
-    if (encC && dimC > 0) {
-        int cBase = idx * dimC;
-        for (uint32_t i = 0; i < dimC; ++i) {
-            output[outBase + offset] = __half2float(encC[cBase + i]);
-            ++offset;
-        }
-    }
-    if (encD && dimD > 0) {
-        int dBase = idx * dimD;
-        for (uint32_t i = 0; i < dimD; ++i) {
-            output[outBase + offset] = __half2float(encD[dBase + i]);
-            ++offset;
-        }
+
+    int mlpBase = idx * mlpInputDims + pointFeatureDims;
+    int dirBase = idx * dirEncOutDims;
+    for (uint32_t d = 0; d < dirEncOutDims; ++d) {
+        mlpInput[mlpBase + d] = __half2float(dirEncOutput[dirBase + d]);
     }
 }
 
@@ -2176,6 +2173,7 @@ void RendererNeural::traceNeuralSegmentsForRays(bool useCameraRays,
                 innerHitFlags_);
         checkCuda(cudaGetLastError(), "traceSegmentExitsKernel launch");
 
+        int pointCount = useMidpointEncoding_ ? 3 : 2;
         buildSegmentNeuralInputsKernel<<<buildGrid, buildBlock>>>(
                 currentEntryPos_,
                 segmentExitPos_,
@@ -2184,57 +2182,48 @@ void RendererNeural::traceNeuralSegmentsForRays(bool useCameraRays,
                 activeCount,
                 outerMin,
                 outerInvExtent,
-                compactedOuterPos_,
-                compactedInnerPos_,
+                compactedPointInputs_,
                 compactedDirs_,
-                compactedMidPos_);
+                pointCount);
         checkCuda(cudaGetLastError(), "buildSegmentNeuralInputsKernel launch");
 
         if (paddedActiveCount > activeCountSize) {
             size_t tail = paddedActiveCount - activeCountSize;
-            checkCuda(cudaMemset(compactedOuterPos_ + activeCountSize * 3, 0, tail * 3 * sizeof(float)),
-                      "cudaMemset entry pos tail");
-            checkCuda(cudaMemset(compactedInnerPos_ + activeCountSize * 3, 0, tail * 3 * sizeof(float)),
-                      "cudaMemset exit pos tail");
+            size_t pointInputStride = pointCount * 3;
+            checkCuda(cudaMemset(compactedPointInputs_ + activeCountSize * pointInputStride, 0,
+                                 tail * pointInputStride * sizeof(float)),
+                      "cudaMemset point inputs tail");
             checkCuda(cudaMemset(compactedDirs_ + activeCountSize * 3, 0, tail * 3 * sizeof(float)),
                       "cudaMemset dirs tail");
         }
 
-        uint32_t batchSize = static_cast<uint32_t>(paddedActiveCount);
+        uint32_t pointBatchSize = static_cast<uint32_t>(paddedActiveCount * pointCount);
+        uint32_t rayBatchSize = static_cast<uint32_t>(paddedActiveCount);
 
         {
             tcnn::cpp::Context ctx = pointEncoding_->forward(
-                0, batchSize,
-                compactedOuterPos_,
-                pointEncOutput1_,
+                0, pointBatchSize,
+                compactedPointInputs_,
+                pointEncOutput_,
                 pointEncParams_,
                 false);
             (void)ctx;
         }
 
-        {
-            tcnn::cpp::Context ctx = pointEncoding_->forward(
-                0, batchSize,
-                compactedInnerPos_,
-                pointEncOutput2_,
-                pointEncParams_,
-                false);
-            (void)ctx;
-        }
-
-        if (useMidpointEncoding_) {
-            tcnn::cpp::Context ctx = pointEncoding_->forward(
-                0, batchSize,
-                compactedMidPos_,
-                pointEncOutput3_,
-                pointEncParams_,
-                false);
-            (void)ctx;
-        }
+        uint32_t pointFeatureDims = pointEncOutDims_ * pointCount;
+        scatterPointEncodingsKernel<<<buildGrid, buildBlock>>>(
+                static_cast<const __half*>(pointEncOutput_),
+                pointEncOutDims_,
+                static_cast<uint32_t>(pointCount),
+                mlpInput_,
+                pointFeatureDims,
+                mlpInputDims_,
+                activeCount);
+        checkCuda(cudaGetLastError(), "scatterPointEncodingsKernel launch");
 
         {
             tcnn::cpp::Context ctx = dirEncoding_->forward(
-                0, batchSize,
+                0, rayBatchSize,
                 compactedDirs_,
                 dirEncOutput_,
                 dirEncParams_,
@@ -2242,24 +2231,14 @@ void RendererNeural::traceNeuralSegmentsForRays(bool useCameraRays,
             (void)ctx;
         }
 
-        const __half* midEnc = useMidpointEncoding_
-                ? static_cast<const __half*>(pointEncOutput3_)
-                : nullptr;
-        uint32_t midDim = useMidpointEncoding_ ? pointEncOutDims_ : 0;
-
-        concatenateEncodingsKernel<<<buildGrid, buildBlock>>>(
-                static_cast<const __half*>(pointEncOutput1_),
-                pointEncOutDims_,
-                static_cast<const __half*>(pointEncOutput2_),
-                pointEncOutDims_,
-                midEnc,
-                midDim,
+        appendDirectionEncodingsKernel<<<buildGrid, buildBlock>>>(
                 static_cast<const __half*>(dirEncOutput_),
                 dirEncOutDims_,
                 mlpInput_,
+                pointFeatureDims,
                 mlpInputDims_,
                 activeCount);
-        checkCuda(cudaGetLastError(), "concatenateEncodingsKernel launch");
+        checkCuda(cudaGetLastError(), "appendDirectionEncodingsKernel launch");
 
         if (paddedActiveCount > activeCountSize) {
             size_t tail = paddedActiveCount - activeCountSize;
@@ -2270,7 +2249,7 @@ void RendererNeural::traceNeuralSegmentsForRays(bool useCameraRays,
 
         {
             tcnn::cpp::Context ctx = mlpNetwork_->forward(
-                0, batchSize,
+                0, rayBatchSize,
                 mlpInput_,
                 outputs_,
                 mlpParams_,
@@ -2776,13 +2755,9 @@ void RendererNeural::release() {
     };
     freePtr(devicePixels_);
     freePtr(accum_);
-    freePtr(compactedOuterPos_);
-    freePtr(compactedInnerPos_);
-    freePtr(compactedMidPos_);
+    freePtr(compactedPointInputs_);
     freePtr(compactedDirs_);
-    freePtr(pointEncOutput1_);
-    freePtr(pointEncOutput2_);
-    freePtr(pointEncOutput3_);
+    freePtr(pointEncOutput_);
     freePtr(dirEncOutput_);
     freePtr(mlpInput_);
     freePtr(hitIndices_);
@@ -2831,6 +2806,7 @@ void RendererNeural::release() {
     accumPixels_ = 0;
     accumSampleCount_ = 0;
     hasLastCamera_ = false;
+    pointEncPointCount_ = 0;
 }
 
 void RendererNeural::releaseNetwork() {
@@ -2857,18 +2833,20 @@ void RendererNeural::releaseNetwork() {
     mlpInputDims_ = 0;
     mlpOutputDims_ = 0;
     mlpOutputElemSize_ = 0;
+    pointEncPointCount_ = 0;
 }
 
 bool RendererNeural::ensureNetworkBuffers(size_t elementCount) {
     if (elementCount == 0) {
         return false;
     }
+    uint32_t pointCount = useMidpointEncoding_ ? 3u : 2u;
     if (elementCount <= bufferElements_ &&
             hitPositions_ && hitNormals_ && hitColors_ && hitMaterialParams_ && hitFlags_ &&
             additionalHitPositions_ && additionalHitNormals_ && additionalHitColors_ && additionalHitMaterialParams_ && additionalHitFlags_ &&
             outerHitPositions_ && innerHitPositions_ && rayDirections_ && outerHitFlags_ &&
-            compactedOuterPos_ && compactedInnerPos_ && compactedDirs_ &&
-            (!useMidpointEncoding_ || compactedMidPos_) &&
+            compactedPointInputs_ && compactedDirs_ &&
+            pointEncPointCount_ == pointCount &&
             hitIndices_ && hitCount_ &&
             bouncePositions_ && bounceNormals_ && bounceDirs_ && bounceColors_ && bounceMaterialParams_ && bounceHitFlags_ &&
             bounce2Positions_ && bounce2Normals_ && bounce2Dirs_ && bounce2Colors_ && bounce2HitFlags_ &&
@@ -2885,11 +2863,9 @@ bool RendererNeural::ensureNetworkBuffers(size_t elementCount) {
             ptr = nullptr;
         }
     };
-    freePtr(compactedOuterPos_);
-    freePtr(compactedInnerPos_);
+    freePtr(compactedPointInputs_);
     freePtr(compactedDirs_);
-    freePtr(pointEncOutput1_);
-    freePtr(pointEncOutput2_);
+    freePtr(pointEncOutput_);
     freePtr(dirEncOutput_);
     freePtr(mlpInput_);
     freePtr(hitIndices_);
@@ -2935,6 +2911,8 @@ bool RendererNeural::ensureNetworkBuffers(size_t elementCount) {
     freePtr(innerHitFlags_);
     freePtr(segmentExitPos_);
 
+    pointEncPointCount_ = 0;
+
     size_t vec3Bytes = elementCount * 3 * sizeof(float);
     size_t intBytes = elementCount * sizeof(int);
 
@@ -2944,22 +2922,16 @@ bool RendererNeural::ensureNetworkBuffers(size_t elementCount) {
     checkCuda(cudaMalloc(&rayDirections_, vec3Bytes), "cudaMalloc rayDirections");
     checkCuda(cudaMalloc(&outerHitFlags_, intBytes), "cudaMalloc outerHitFlags");
 
-    // Encoding input buffers (3 floats each per element).
-    checkCuda(cudaMalloc(&compactedOuterPos_, vec3Bytes), "cudaMalloc compactedOuterPos");
-    checkCuda(cudaMalloc(&compactedInnerPos_, vec3Bytes), "cudaMalloc compactedInnerPos");
-    if (useMidpointEncoding_) {
-        checkCuda(cudaMalloc(&compactedMidPos_, vec3Bytes), "cudaMalloc compactedMidPos");
-    }
+    // Encoding input buffers (entry/exit/midpoint per element).
+    size_t pointInputStride = pointCount * 3;
+    size_t pointInputBytes = elementCount * pointInputStride * sizeof(float);
+    checkCuda(cudaMalloc(&compactedPointInputs_, pointInputBytes), "cudaMalloc compactedPointInputs");
     checkCuda(cudaMalloc(&compactedDirs_, vec3Bytes), "cudaMalloc compactedDirs");
 
-    // Encoding output buffers (FP16).
+    // Encoding output buffers (FP16) for all concatenated points.
     if (pointEncOutDims_ > 0) {
-        size_t encOutBytes = elementCount * pointEncOutDims_ * sizeof(__half);
-        checkCuda(cudaMalloc(&pointEncOutput1_, encOutBytes), "cudaMalloc pointEncOutput1");
-        checkCuda(cudaMalloc(&pointEncOutput2_, encOutBytes), "cudaMalloc pointEncOutput2");
-        if (useMidpointEncoding_) {
-            checkCuda(cudaMalloc(&pointEncOutput3_, encOutBytes), "cudaMalloc pointEncOutput3");
-        }
+        size_t encOutBytes = elementCount * pointCount * pointEncOutDims_ * sizeof(__half);
+        checkCuda(cudaMalloc(&pointEncOutput_, encOutBytes), "cudaMalloc pointEncOutput");
     }
     if (dirEncOutDims_ > 0) {
         size_t dirEncOutBytes = elementCount * dirEncOutDims_ * sizeof(__half);
@@ -3029,6 +3001,8 @@ bool RendererNeural::ensureNetworkBuffers(size_t elementCount) {
     checkCuda(cudaMalloc(&innerEnterT_, elementCount * sizeof(float)), "cudaMalloc innerEnterT");
     checkCuda(cudaMalloc(&innerHitFlags_, intBytes), "cudaMalloc innerHitFlags");
     checkCuda(cudaMalloc(&segmentExitPos_, vec3Bytes), "cudaMalloc segmentExitPos");
+
+    pointEncPointCount_ = pointCount;
 
     bufferElements_ = elementCount;
     return true;

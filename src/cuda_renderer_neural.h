@@ -85,15 +85,11 @@ class RendererNeural final {
     void* mlpParams_ = nullptr;
 
     // Compacted encoding inputs (3 floats each, per compacted hit).
-    float* compactedOuterPos_ = nullptr;
-    float* compactedInnerPos_ = nullptr;
-    float* compactedMidPos_ = nullptr;
+    float* compactedPointInputs_ = nullptr;
     float* compactedDirs_ = nullptr;
 
     // Encoding outputs (FP16, per compacted hit).
-    void* pointEncOutput1_ = nullptr;
-    void* pointEncOutput2_ = nullptr;
-    void* pointEncOutput3_ = nullptr;
+    void* pointEncOutput_ = nullptr;
     void* dirEncOutput_ = nullptr;
 
     // Concatenated MLP input (FP32).
@@ -174,6 +170,7 @@ class RendererNeural final {
     uint32_t mlpInputDims_ = 0;
     uint32_t mlpOutputDims_ = 0;
     size_t mlpOutputElemSize_ = 0;
+    uint32_t pointEncPointCount_ = 0;
 
     RenderBasis basis_{};
     Vec3 lightDir_{};
