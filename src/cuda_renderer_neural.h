@@ -87,11 +87,13 @@ class RendererNeural final {
     // Compacted encoding inputs (3 floats each, per compacted hit).
     float* compactedOuterPos_ = nullptr;
     float* compactedInnerPos_ = nullptr;
+    float* compactedMidPos_ = nullptr;
     float* compactedDirs_ = nullptr;
 
     // Encoding outputs (FP16, per compacted hit).
     void* pointEncOutput1_ = nullptr;
     void* pointEncOutput2_ = nullptr;
+    void* pointEncOutput3_ = nullptr;
     void* dirEncOutput_ = nullptr;
 
     // Concatenated MLP input (FP32).
@@ -182,6 +184,7 @@ class RendererNeural final {
 
     bool lambertView_ = false;
     bool useNeuralQuery_ = false;
+    bool useMidpointEncoding_ = false;
     int samplesPerPixel_ = 1;
     int bounceCount_ = 0;
     int classicMeshIndex_ = 0;

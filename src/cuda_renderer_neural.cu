@@ -1185,7 +1185,8 @@ __global__ void buildSegmentNeuralInputsKernel(
         Vec3 outerInvExtent,
         float* compactedEntryPos,
         float* compactedExitPos,
-        float* compactedDirs) {
+        float* compactedDirs,
+        float* compactedMidPos) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= hitCount) {
         return;
@@ -1222,6 +1223,16 @@ __global__ void buildSegmentNeuralInputsKernel(
     compactedExitPos[dstBase + 0] = normExit.x;
     compactedExitPos[dstBase + 1] = normExit.y;
     compactedExitPos[dstBase + 2] = normExit.z;
+
+    if (compactedMidPos) {
+        Vec3 midPos = (shiftedEntry + exitPos) * 0.5f;
+        Vec3 normMid((midPos.x - outerMin.x) * outerInvExtent.x,
+                     (midPos.y - outerMin.y) * outerInvExtent.y,
+                     (midPos.z - outerMin.z) * outerInvExtent.z);
+        compactedMidPos[dstBase + 0] = normMid.x;
+        compactedMidPos[dstBase + 1] = normMid.y;
+        compactedMidPos[dstBase + 2] = normMid.z;
+    }
 
     // Directions: map from [-1,1] to [0,1] (matching Python: (directions + 1) / 2)
     compactedDirs[dstBase + 0] = (dir.x + 1.0f) * 0.5f;
@@ -1713,9 +1724,9 @@ __global__ void compactInputsKernel(const int* flags,
 }
 
 // ---------------------------------------------------------------------------
-// Concatenate three FP16 encoding outputs into a single FP32 MLP input buffer.
+// Concatenate multiple FP16 encoding outputs into a single FP32 MLP input buffer.
 // tcnn C++ API forward() takes float* and handles precision internally.
-// Layout per element: [encA(dimA), encB(dimB), encC(dimC)]
+// Layout per element: [encA(dimA), encB(dimB), encC(dimC), encD(dimD)]
 // ---------------------------------------------------------------------------
 __global__ void concatenateEncodingsKernel(const __half* encA,
                                            uint32_t dimA,
@@ -1723,6 +1734,8 @@ __global__ void concatenateEncodingsKernel(const __half* encA,
                                            uint32_t dimB,
                                            const __half* encC,
                                            uint32_t dimC,
+                                           const __half* encD,
+                                           uint32_t dimD,
                                            float* output,
                                            uint32_t totalDim,
                                            int count) {
@@ -1734,7 +1747,6 @@ __global__ void concatenateEncodingsKernel(const __half* encA,
     int outBase = idx * totalDim;
     int aBase = idx * dimA;
     int bBase = idx * dimB;
-    int cBase = idx * dimC;
 
     int offset = 0;
     for (uint32_t i = 0; i < dimA; ++i) {
@@ -1745,9 +1757,19 @@ __global__ void concatenateEncodingsKernel(const __half* encA,
         output[outBase + offset] = __half2float(encB[bBase + i]);
         ++offset;
     }
-    for (uint32_t i = 0; i < dimC; ++i) {
-        output[outBase + offset] = __half2float(encC[cBase + i]);
-        ++offset;
+    if (encC && dimC > 0) {
+        int cBase = idx * dimC;
+        for (uint32_t i = 0; i < dimC; ++i) {
+            output[outBase + offset] = __half2float(encC[cBase + i]);
+            ++offset;
+        }
+    }
+    if (encD && dimD > 0) {
+        int dBase = idx * dimD;
+        for (uint32_t i = 0; i < dimD; ++i) {
+            output[outBase + offset] = __half2float(encD[dBase + i]);
+            ++offset;
+        }
     }
 }
 
@@ -1885,7 +1907,8 @@ void* allocAndInitParams(tcnn::cpp::Module* module, size_t* outBytes) {
 
 RendererNeural::RendererNeural(Scene& scene, const NeuralNetworkConfig* nnConfig)
         : scene_(&scene),
-          lightDir_(normalize(Vec3(1.0f, 1.5f, -1.0f))) {
+          lightDir_(normalize(Vec3(1.0f, 1.5f, -1.0f))),
+          useMidpointEncoding_(nnConfig ? nnConfig->use_midpoint_encoding : false) {
     if (!tcnn::cpp::has_networks()) {
         std::fprintf(stderr, "tiny-cuda-nn was built without network support.\n");
         return;
@@ -1940,8 +1963,8 @@ RendererNeural::RendererNeural(Scene& scene, const NeuralNetworkConfig* nnConfig
     }
     dirEncOutDims_ = dirEncoding_->n_output_dims();
 
-    // MLP input = point_enc * 2 (outer + inner) + dir_enc.
-    mlpInputDims_ = pointEncOutDims_ * 2 + dirEncOutDims_;
+    uint32_t pointEncCount = useMidpointEncoding_ ? 3u : 2u;
+    mlpInputDims_ = pointEncOutDims_ * pointEncCount + dirEncOutDims_;
     mlpOutputDims_ = 5;
 
     // Create MLP network.
@@ -2163,7 +2186,8 @@ void RendererNeural::traceNeuralSegmentsForRays(bool useCameraRays,
                 outerInvExtent,
                 compactedOuterPos_,
                 compactedInnerPos_,
-                compactedDirs_);
+                compactedDirs_,
+                compactedMidPos_);
         checkCuda(cudaGetLastError(), "buildSegmentNeuralInputsKernel launch");
 
         if (paddedActiveCount > activeCountSize) {
@@ -2198,6 +2222,16 @@ void RendererNeural::traceNeuralSegmentsForRays(bool useCameraRays,
             (void)ctx;
         }
 
+        if (useMidpointEncoding_) {
+            tcnn::cpp::Context ctx = pointEncoding_->forward(
+                0, batchSize,
+                compactedMidPos_,
+                pointEncOutput3_,
+                pointEncParams_,
+                false);
+            (void)ctx;
+        }
+
         {
             tcnn::cpp::Context ctx = dirEncoding_->forward(
                 0, batchSize,
@@ -2208,11 +2242,18 @@ void RendererNeural::traceNeuralSegmentsForRays(bool useCameraRays,
             (void)ctx;
         }
 
+        const __half* midEnc = useMidpointEncoding_
+                ? static_cast<const __half*>(pointEncOutput3_)
+                : nullptr;
+        uint32_t midDim = useMidpointEncoding_ ? pointEncOutDims_ : 0;
+
         concatenateEncodingsKernel<<<buildGrid, buildBlock>>>(
                 static_cast<const __half*>(pointEncOutput1_),
                 pointEncOutDims_,
                 static_cast<const __half*>(pointEncOutput2_),
                 pointEncOutDims_,
+                midEnc,
+                midDim,
                 static_cast<const __half*>(dirEncOutput_),
                 dirEncOutDims_,
                 mlpInput_,
@@ -2737,9 +2778,11 @@ void RendererNeural::release() {
     freePtr(accum_);
     freePtr(compactedOuterPos_);
     freePtr(compactedInnerPos_);
+    freePtr(compactedMidPos_);
     freePtr(compactedDirs_);
     freePtr(pointEncOutput1_);
     freePtr(pointEncOutput2_);
+    freePtr(pointEncOutput3_);
     freePtr(dirEncOutput_);
     freePtr(mlpInput_);
     freePtr(hitIndices_);
@@ -2825,6 +2868,7 @@ bool RendererNeural::ensureNetworkBuffers(size_t elementCount) {
             additionalHitPositions_ && additionalHitNormals_ && additionalHitColors_ && additionalHitMaterialParams_ && additionalHitFlags_ &&
             outerHitPositions_ && innerHitPositions_ && rayDirections_ && outerHitFlags_ &&
             compactedOuterPos_ && compactedInnerPos_ && compactedDirs_ &&
+            (!useMidpointEncoding_ || compactedMidPos_) &&
             hitIndices_ && hitCount_ &&
             bouncePositions_ && bounceNormals_ && bounceDirs_ && bounceColors_ && bounceMaterialParams_ && bounceHitFlags_ &&
             bounce2Positions_ && bounce2Normals_ && bounce2Dirs_ && bounce2Colors_ && bounce2HitFlags_ &&
@@ -2903,6 +2947,9 @@ bool RendererNeural::ensureNetworkBuffers(size_t elementCount) {
     // Encoding input buffers (3 floats each per element).
     checkCuda(cudaMalloc(&compactedOuterPos_, vec3Bytes), "cudaMalloc compactedOuterPos");
     checkCuda(cudaMalloc(&compactedInnerPos_, vec3Bytes), "cudaMalloc compactedInnerPos");
+    if (useMidpointEncoding_) {
+        checkCuda(cudaMalloc(&compactedMidPos_, vec3Bytes), "cudaMalloc compactedMidPos");
+    }
     checkCuda(cudaMalloc(&compactedDirs_, vec3Bytes), "cudaMalloc compactedDirs");
 
     // Encoding output buffers (FP16).
@@ -2910,6 +2957,9 @@ bool RendererNeural::ensureNetworkBuffers(size_t elementCount) {
         size_t encOutBytes = elementCount * pointEncOutDims_ * sizeof(__half);
         checkCuda(cudaMalloc(&pointEncOutput1_, encOutBytes), "cudaMalloc pointEncOutput1");
         checkCuda(cudaMalloc(&pointEncOutput2_, encOutBytes), "cudaMalloc pointEncOutput2");
+        if (useMidpointEncoding_) {
+            checkCuda(cudaMalloc(&pointEncOutput3_, encOutBytes), "cudaMalloc pointEncOutput3");
+        }
     }
     if (dirEncOutDims_ > 0) {
         size_t dirEncOutBytes = elementCount * dirEncOutDims_ * sizeof(__half);

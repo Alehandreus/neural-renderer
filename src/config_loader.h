@@ -42,6 +42,7 @@ struct MaterialConfig {
 struct NeuralNetworkConfig {
     int log2_hashmap_size = 14;
     bool use_neural_query = false;
+    bool use_midpoint_encoding = false;
 };
 
 struct RendererConfig {
