@@ -175,6 +175,7 @@ int main(int argc, char** argv) {
     float configCamYaw, configCamPitch;
     {
         MatrixToCameraState(config.camera.matrix, &configCamPos, &configCamYaw, &configCamPitch);
+        configCamPos = configCamPos * config.original_mesh.scale;
         input.camera().position = configCamPos;
         input.camera().yaw = configCamYaw;
         input.camera().pitch = configCamPitch;
@@ -182,7 +183,7 @@ int main(int argc, char** argv) {
 
         // Set camera movement speed
         if (config.camera.move_speed > 0.0f) {
-            input.setMoveSpeed(config.camera.move_speed);
+            input.setMoveSpeed(config.camera.move_speed * config.original_mesh.scale);
         } else {
             // Auto-calculate based on mesh bounds if move_speed not specified
             Vec3 bmin = originalMesh.boundsMin();

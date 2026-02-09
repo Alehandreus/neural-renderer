@@ -955,7 +955,7 @@ __global__ void finalizePathTracingKernel(uchar4* output,
 // Multi-segment constants.
 // ---------------------------------------------------------------------------
 constexpr int kMaxSegmentIterations = 10;
-constexpr float kSegmentEpsilon = 1e-10f;
+constexpr float kSegmentEpsilon = 1e-8f;
 
 // ---------------------------------------------------------------------------
 // Initial outer shell entry tracing for multi-segment method.
@@ -1304,7 +1304,7 @@ __global__ void applySegmentNeuralOutputKernel(
         // (matching Python: pred_t_global = pred_t + accum_t)
         // But note: the neural network predicts distance from shifted entry point
         Vec3 shiftedEntry = entryPos + dir * kSegmentEpsilon;
-        Vec3 hitPos = shiftedEntry + dir * distance * 0;
+        Vec3 hitPos = shiftedEntry + dir * distance * 100;
 
         hitPositions[base + 0] = hitPos.x;
         hitPositions[base + 1] = hitPos.y;
@@ -1449,7 +1449,7 @@ __global__ void traceAdditionalMeshRaysKernel(
         Ray ray(origin, dir);
 
         HitInfo hit;
-        if (traceMesh(ray, additionalMesh, &hit, true, params.material)) {
+        if (traceMesh(ray, additionalMesh, &hit, false, params.material)) {
             hitPositions[base + 0] = hit.position.x;
             hitPositions[base + 1] = hit.position.y;
             hitPositions[base + 2] = hit.position.z;

@@ -229,6 +229,7 @@ int main(int argc, char** argv) {
     // Extract camera from config.
     CameraState camera{};
     MatrixToCameraState(config.camera.matrix, &camera.position, &camera.yaw, &camera.pitch);
+    camera.position = camera.position * config.original_mesh.scale;
     camera.fovY = config.camera.yfov;
     std::printf("Loaded camera: pos=(%.2f, %.2f, %.2f), yaw=%.2f, pitch=%.2f, fovY=%.2f\n",
                 camera.position.x, camera.position.y, camera.position.z,
