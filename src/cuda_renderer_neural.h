@@ -70,7 +70,8 @@ class RendererNeural final {
                                     float* outHitNormals,
                                     float* outHitColors,
                                     float* outHitMaterialParams,
-                                    int* outHitFlags);
+                                    int* outHitFlags,
+                                    float* outHitDistances);
 
     Scene* scene_ = nullptr;
 
@@ -114,6 +115,7 @@ class RendererNeural final {
     float* hitColors_ = nullptr;
     float* hitMaterialParams_ = nullptr;
     int* hitFlags_ = nullptr;
+    float* hitDistances_ = nullptr;  // Neural predicted distances
 
     // Additional mesh hit buffers (for hybrid rendering).
     float* additionalHitPositions_ = nullptr;
@@ -146,6 +148,7 @@ class RendererNeural final {
     float* bounceDirections_ = nullptr;   // 3 floats per sample (ray directions)
     float* bouncePdfs_ = nullptr;         // 1 float per sample (BRDF PDF)
     float* bounceBRDFs_ = nullptr;        // 3 floats per sample (BRDF weight: f*cos/pdf)
+    float* bounceDistances_ = nullptr;    // 1 float per sample (neural predicted distance from previous hit)
 
     // Multi-segment iteration state buffers.
     int* rayActiveFlags_ = nullptr;      // 1 if ray still needs processing

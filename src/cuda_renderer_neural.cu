@@ -562,12 +562,14 @@ __global__ void sampleBounceDirectionsKernel(const float* hitPositions,
                                              const float* hitColors,
                                              const float* hitMaterialParams,
                                              const int* hitFlags,
+                                             const float* hitDistances,  // Input: neural distances from previous hit
                                              int* pathActive,
                                              RenderParams params,
                                              float* bounceOrigins,      // Output
                                              float* bounceDirections,   // Output
                                              float* bouncePdfs,         // Output
-                                             float* bounceBRDFs) {      // Output (f * cos / pdf)
+                                             float* bounceBRDFs,        // Output (f * cos / pdf)
+                                             float* bounceDistances) {  // Output: pass through neural distances
     int x = blockIdx.x * blockDim.x + threadIdx.x;
     int y = blockIdx.y * blockDim.y + threadIdx.y;
     if (x >= params.width || y >= params.height) {
@@ -590,6 +592,9 @@ __global__ void sampleBounceDirectionsKernel(const float* hitPositions,
             bounceBRDFs[base + 0] = 0.0f;
             bounceBRDFs[base + 1] = 0.0f;
             bounceBRDFs[base + 2] = 0.0f;
+            if (bounceDistances) {
+                bounceDistances[sampleIdx] = 0.0f;
+            }
             continue;
         }
 
@@ -681,6 +686,83 @@ __global__ void sampleBounceDirectionsKernel(const float* hitPositions,
         bounceBRDFs[base + 0] = brdfWeight.x;
         bounceBRDFs[base + 1] = brdfWeight.y;
         bounceBRDFs[base + 2] = brdfWeight.z;
+
+        // Pass through neural distance from the hit that created this bounce
+        if (bounceDistances && hitDistances) {
+            bounceDistances[sampleIdx] = hitDistances[sampleIdx];
+        }
+    }
+}
+
+// Check if bounce rays should terminate early based on neural distance
+// This runs BEFORE tracing to avoid unnecessary work
+__global__ void checkBounceEarlyTerminationKernel(
+        const float* bounceOrigins,
+        const float* bounceDirections,
+        const float* bouncePdfs,
+        const float* bounceDistances,
+        int* pathActive,
+        RenderParams params,
+        MeshDeviceView outerShell,
+        MeshDeviceView innerShell) {
+    int x = blockIdx.x * blockDim.x + threadIdx.x;
+    int y = blockIdx.y * blockDim.y + threadIdx.y;
+    if (x >= params.width || y >= params.height) {
+        return;
+    }
+
+    int pixelIdx = y * params.width + x;
+    for (int s = 0; s < params.samplesPerPixel; ++s) {
+        int sampleIdx = pixelIdx + s * params.pixelCount;
+        int base = sampleIdx * 3;
+
+        // Skip if ray already inactive or has invalid PDF
+        if (pathActive && !pathActive[sampleIdx]) {
+            continue;
+        }
+        if (bouncePdfs && bouncePdfs[sampleIdx] <= 0.0f) {
+            continue;
+        }
+
+        // Skip if no neural distance available
+        if (!bounceDistances || bounceDistances[sampleIdx] <= 0.0f) {
+            continue;
+        }
+
+        Vec3 origin(bounceOrigins[base + 0], bounceOrigins[base + 1], bounceOrigins[base + 2]);
+        Vec3 dir(bounceDirections[base + 0], bounceDirections[base + 1], bounceDirections[base + 2]);
+        Ray ray(origin, dir);
+
+        HitInfo outerHit;
+        bool hitOuter = traceMeshWithMode(ray, outerShell, &outerHit, TraceMode::ANY, false, params.material);
+
+        HitInfo innerHit;
+        bool hitInner = traceMeshWithMode(ray, innerShell, &innerHit, TraceMode::ANY, false, params.material);
+
+        // if (hitInner && hitOuter && (innerHit.t < outerHit.t) && (outerHit.t > 0.01)) {
+        //     if (pathActive) {
+        //         pathActive[sampleIdx] = 0;
+        //     }
+        // }
+
+        // If no forward hit, ray is inside the outer shell
+        // if (!hitOuter) {
+        //     // Find the exit point
+        //     HitInfo exitHit;
+        //     bool hitExit = traceMeshWithMode(ray, outerShell, &exitHit, TraceMode::BACKWARD_ONLY, false, params.material);
+
+        //     if (hitExit) {
+        //         float neuralDist = bounceDistances[sampleIdx];
+
+        //         // If neural distance is less than exit distance, surface exists before exit
+        //         // Terminate the ray - it already hit the neural surface
+        //         if (exitHit.t > neuralDist * 100) {
+        //             if (pathActive) {
+        //                 pathActive[sampleIdx] = 0;
+        //             }
+        //         }
+        //     }
+        // }
     }
 }
 
@@ -1260,6 +1342,7 @@ __global__ void applySegmentNeuralOutputKernel(
         float* hitMaterialParams,
         int* hitFlags,
         int* activeFlags,
+        float* hitDistances,
         Material material) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= hitCount) {
@@ -1304,7 +1387,7 @@ __global__ void applySegmentNeuralOutputKernel(
         // (matching Python: pred_t_global = pred_t + accum_t)
         // But note: the neural network predicts distance from shifted entry point
         Vec3 shiftedEntry = entryPos + dir * kSegmentEpsilon;
-        Vec3 hitPos = shiftedEntry + dir * distance * 100;
+        Vec3 hitPos = shiftedEntry + dir * distance * 0;
 
         hitPositions[base + 0] = hitPos.x;
         hitPositions[base + 1] = hitPos.y;
@@ -1342,6 +1425,11 @@ __global__ void applySegmentNeuralOutputKernel(
 
         hitFlags[sampleIdx] = 1;
         activeFlags[sampleIdx] = 0;  // Ray done
+
+        // Store neural predicted distance for potential use in bounce rays
+        if (hitDistances) {
+            hitDistances[sampleIdx] = distance;
+        }
     }
     // If no intersection found, activeFlags remains 1 (will be updated by prepareNextIterationKernel)
 }
@@ -2088,7 +2176,8 @@ void RendererNeural::traceNeuralSegmentsForRays(bool useCameraRays,
                                                 float* outHitNormals,
                                                 float* outHitColors,
                                                 float* outHitMaterialParams,
-                                                int* outHitFlags) {
+                                                int* outHitFlags,
+                                                float* outHitDistances) {
     if (elementCount == 0) {
         return;
     }
@@ -2106,6 +2195,9 @@ void RendererNeural::traceNeuralSegmentsForRays(bool useCameraRays,
     checkCuda(cudaMemset(outHitColors, 0, elementCount * 3 * sizeof(float)), "cudaMemset hitColors");
     if (outHitMaterialParams) {
         checkCuda(cudaMemset(outHitMaterialParams, 0, elementCount * 3 * sizeof(float)), "cudaMemset hitMaterialParams");
+    }
+    if (outHitDistances) {
+        checkCuda(cudaMemset(outHitDistances, 0, elementCount * sizeof(float)), "cudaMemset hitDistances");
     }
 
     const float* segmentRayDirections = nullptr;
@@ -2274,6 +2366,7 @@ void RendererNeural::traceNeuralSegmentsForRays(bool useCameraRays,
                 outHitMaterialParams,
                 outHitFlags,
                 rayActiveFlags_,
+                outHitDistances,
                 params.material);
         checkCuda(cudaGetLastError(), "applySegmentNeuralOutputKernel launch");
 
@@ -2472,7 +2565,8 @@ void RendererNeural::render(const Vec3& camPos, std::vector<uchar4>& hostPixels)
                 hitNormals_,
                 hitColors_,
                 hitMaterialParams_,
-                hitFlags_);
+                hitFlags_,
+                hitDistances_);
 
         // Always trace additional mesh (empty mesh results in all misses)
         MeshDeviceView additionalView = scene_->additionalMesh().deviceView();
@@ -2525,6 +2619,7 @@ void RendererNeural::render(const Vec3& camPos, std::vector<uchar4>& hostPixels)
             float* currentHitColors = hitColors_;
             float* currentHitMaterialParams = hitMaterialParams_;
             int* currentHitFlags = hitFlags_;
+            float* currentHitDistances = hitDistances_;
 
             for (int bounce = 1; bounce <= maxBounces; ++bounce) {
                 // Sample bounce directions (Disney BRDF - shared with GT)
@@ -2534,13 +2629,28 @@ void RendererNeural::render(const Vec3& camPos, std::vector<uchar4>& hostPixels)
                         currentHitColors,
                         currentHitMaterialParams,
                         currentHitFlags,
+                        currentHitDistances,
                         pathActive_,
                         params,
                         bounceOrigins_,
                         bounceDirections_,
                         bouncePdfs_,
-                        bounceBRDFs_);
+                        bounceBRDFs_,
+                        bounceDistances_);
                 checkCuda(cudaGetLastError(), "sampleBounceDirectionsKernel launch");
+
+                // Check for early termination before tracing
+                // If neural distance predicts hit before exiting outer shell, terminate the ray
+                checkBounceEarlyTerminationKernel<<<grid, block>>>(
+                        bounceOrigins_,
+                        bounceDirections_,
+                        bouncePdfs_,
+                        bounceDistances_,
+                        pathActive_,
+                        params,
+                        outerView,
+                        innerView);
+                checkCuda(cudaGetLastError(), "checkBounceEarlyTerminationKernel launch");
 
                 traceNeuralSegmentsForRays(
                         false,
@@ -2558,7 +2668,8 @@ void RendererNeural::render(const Vec3& camPos, std::vector<uchar4>& hostPixels)
                         bounceNormals_,
                         bounceColors_,
                         bounceMaterialParams_,
-                        bounceHitFlags_);
+                        bounceHitFlags_,
+                        bounceDistances_);
 
                 traceAdditionalMeshRaysKernel<<<grid, block>>>(
                         bounceOrigins_,
@@ -2607,6 +2718,7 @@ void RendererNeural::render(const Vec3& camPos, std::vector<uchar4>& hostPixels)
                 currentHitColors = bounceColors_;
                 currentHitFlags = bounceHitFlags_;
                 currentHitMaterialParams = bounceMaterialParams_;
+                currentHitDistances = bounceDistances_;
             }
 
             // Finalize and output
@@ -2680,12 +2792,14 @@ void RendererNeural::render(const Vec3& camPos, std::vector<uchar4>& hostPixels)
                         currentHitColors,
                         currentHitMaterialParams,
                         currentHitFlags,
+                        nullptr,  // No neural distances in GT mode
                         pathActive_,
                         params,
                         bounceOrigins_,
                         bounceDirections_,
                         bouncePdfs_,
-                        bounceBRDFs_);
+                        bounceBRDFs_,
+                        nullptr);
                 checkCuda(cudaGetLastError(), "sampleBounceDirectionsKernel launch");
 
                 // Trace bounce rays against GT mesh
@@ -2771,6 +2885,7 @@ void RendererNeural::release() {
     freePtr(hitColors_);
     freePtr(hitMaterialParams_);
     freePtr(hitFlags_);
+    freePtr(hitDistances_);
     freePtr(additionalHitPositions_);
     freePtr(additionalHitNormals_);
     freePtr(additionalHitColors_);
@@ -2795,6 +2910,7 @@ void RendererNeural::release() {
     freePtr(bounceDirections_);
     freePtr(bouncePdfs_);
     freePtr(bounceBRDFs_);
+    freePtr(bounceDistances_);
     freePtr(rayActiveFlags_);
     freePtr(accumT_);
     freePtr(currentEntryPos_);
@@ -2842,7 +2958,7 @@ bool RendererNeural::ensureNetworkBuffers(size_t elementCount) {
     }
     uint32_t pointCount = useMidpointEncoding_ ? 3u : 2u;
     if (elementCount <= bufferElements_ &&
-            hitPositions_ && hitNormals_ && hitColors_ && hitMaterialParams_ && hitFlags_ &&
+            hitPositions_ && hitNormals_ && hitColors_ && hitMaterialParams_ && hitFlags_ && hitDistances_ &&
             additionalHitPositions_ && additionalHitNormals_ && additionalHitColors_ && additionalHitMaterialParams_ && additionalHitFlags_ &&
             outerHitPositions_ && innerHitPositions_ && rayDirections_ && outerHitFlags_ &&
             compactedPointInputs_ && compactedDirs_ &&
@@ -2851,6 +2967,7 @@ bool RendererNeural::ensureNetworkBuffers(size_t elementCount) {
             bouncePositions_ && bounceNormals_ && bounceDirs_ && bounceColors_ && bounceMaterialParams_ && bounceHitFlags_ &&
             bounce2Positions_ && bounce2Normals_ && bounce2Dirs_ && bounce2Colors_ && bounce2HitFlags_ &&
             pathThroughput_ && pathRadiance_ && pathActive_ &&
+            bounceOrigins_ && bounceDirections_ && bouncePdfs_ && bounceBRDFs_ && bounceDistances_ &&
             rayActiveFlags_ && accumT_ && currentEntryPos_ &&
             outerExitT_ && innerEnterT_ && innerHitFlags_ && segmentExitPos_) {
         return true;
@@ -2879,6 +2996,7 @@ bool RendererNeural::ensureNetworkBuffers(size_t elementCount) {
     freePtr(hitColors_);
     freePtr(hitMaterialParams_);
     freePtr(hitFlags_);
+    freePtr(hitDistances_);
     freePtr(additionalHitPositions_);
     freePtr(additionalHitNormals_);
     freePtr(additionalHitColors_);
@@ -2903,6 +3021,7 @@ bool RendererNeural::ensureNetworkBuffers(size_t elementCount) {
     freePtr(bounceDirections_);
     freePtr(bouncePdfs_);
     freePtr(bounceBRDFs_);
+    freePtr(bounceDistances_);
     freePtr(rayActiveFlags_);
     freePtr(accumT_);
     freePtr(currentEntryPos_);
@@ -2960,6 +3079,7 @@ bool RendererNeural::ensureNetworkBuffers(size_t elementCount) {
     checkCuda(cudaMalloc(&hitColors_, vec3Bytes), "cudaMalloc hitColors");
     checkCuda(cudaMalloc(&hitMaterialParams_, vec3Bytes), "cudaMalloc hitMaterialParams");
     checkCuda(cudaMalloc(&hitFlags_, intBytes), "cudaMalloc hitFlags");
+    checkCuda(cudaMalloc(&hitDistances_, elementCount * sizeof(float)), "cudaMalloc hitDistances");
 
     // Additional mesh hit buffers (for hybrid rendering).
     checkCuda(cudaMalloc(&additionalHitPositions_, vec3Bytes), "cudaMalloc additionalHitPositions");
@@ -2992,6 +3112,7 @@ bool RendererNeural::ensureNetworkBuffers(size_t elementCount) {
     checkCuda(cudaMalloc(&bounceDirections_, vec3Bytes), "cudaMalloc bounceDirections");
     checkCuda(cudaMalloc(&bouncePdfs_, elementCount * sizeof(float)), "cudaMalloc bouncePdfs");
     checkCuda(cudaMalloc(&bounceBRDFs_, vec3Bytes), "cudaMalloc bounceBRDFs");
+    checkCuda(cudaMalloc(&bounceDistances_, elementCount * sizeof(float)), "cudaMalloc bounceDistances");
 
     // Multi-segment iteration state buffers.
     checkCuda(cudaMalloc(&rayActiveFlags_, intBytes), "cudaMalloc rayActiveFlags");

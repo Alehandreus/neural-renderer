@@ -24,7 +24,7 @@ namespace {
 const int kWidth = 1920;
 const int kHeight = 1080;
 const int kTotalSamples = 2048;
-const int kBatchSize = 8;  // Render in batches to avoid timeout.
+const int kBatchSize = 4;  // Render in batches to avoid timeout.
 const int kBounceCount = 3;
 
 const char* kOutputFolder = "comparison_output";
