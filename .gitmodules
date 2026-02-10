@@ -1,0 +1,6 @@
+[submodule "ext/flip-cuda"]
+	path = ext/flip-cuda
+	url = https://github.com/WeiPhil/flip_cuda.git
+[submodule "ext/tinygltf"]
+	path = ext/tinygltf
+	url = https://github.com/syoyo/tinygltf.git
