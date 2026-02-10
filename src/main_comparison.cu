@@ -15,7 +15,6 @@
 #include "scene.h"
 #include "vec3.h"
 
-#define STB_IMAGE_WRITE_IMPLEMENTATION
 #include "stb_image_write.h"
 
 // Configuration.

@@ -323,7 +323,7 @@ int main(int argc, char** argv) {
         ImGui::SetNextWindowSize(io.DisplaySize);
         ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.0f, 0.0f));
         ImGui::Begin("Viewport", nullptr, viewportFlags);
-        ImGui::Image(reinterpret_cast<ImTextureID>(static_cast<intptr_t>(texture)), io.DisplaySize);
+        ImGui::Image(ImTextureID(texture), io.DisplaySize);
         ImGui::End();
         ImGui::PopStyleVar();
 

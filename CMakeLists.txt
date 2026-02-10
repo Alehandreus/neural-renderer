@@ -7,46 +7,25 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CUDA_STANDARD_REQUIRED ON)
 set(CMAKE_CUDA_ARCHITECTURES 120 CACHE STRING "" FORCE)
 
-include(FetchContent)
-
+# GLFW
 set(GLFW_BUILD_DOCS OFF CACHE BOOL "" FORCE)
 set(GLFW_BUILD_TESTS OFF CACHE BOOL "" FORCE)
 set(GLFW_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
-FetchContent_Declare(
-    glfw
-    GIT_REPOSITORY https://github.com/glfw/glfw.git
-    GIT_TAG 3.3.9
-)
-FetchContent_MakeAvailable(glfw)
+add_subdirectory(ext/glfw)
 
-FetchContent_Declare(
-    imgui
-    GIT_REPOSITORY https://github.com/ocornut/imgui.git
-    GIT_TAG v1.90.4
-)
-FetchContent_GetProperties(imgui)
-if (NOT imgui_POPULATED)
-    FetchContent_Populate(imgui)
-endif()
+# ImGui (header-only, manually integrated below)
+set(imgui_SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/ext/imgui)
 
+# BVH
 set(BVH_BUILD_C_API OFF CACHE BOOL "" FORCE)
-FetchContent_Declare(
-    bvh
-    GIT_REPOSITORY https://github.com/madmann91/bvh.git
-    GIT_TAG master
-)
-FetchContent_MakeAvailable(bvh)
+add_subdirectory(ext/bvh)
 
+# Tiny-CUDA-NN
 set(TCNN_BUILD_BENCHMARK OFF CACHE BOOL "" FORCE)
 set(TCNN_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
 set(TCNN_BUILD_TESTS OFF CACHE BOOL "" FORCE)
 set(TCNN_BUILD_WITH_RTC ON CACHE BOOL "" FORCE)
-FetchContent_Declare(
-    tiny-cuda-nn
-    GIT_REPOSITORY https://github.com/julcst/tiny-cuda-nn.git
-    GIT_TAG fix-cutlass
-)
-FetchContent_MakeAvailable(tiny-cuda-nn)
+add_subdirectory(ext/tiny-cuda-nn)
 if (TARGET tiny-cuda-nn)
     set_target_properties(tiny-cuda-nn PROPERTIES
         CXX_STANDARD 17
@@ -56,47 +35,28 @@ if (TARGET tiny-cuda-nn)
     )
 endif()
 
+# Assimp
 set(ASSIMP_BUILD_TESTS OFF CACHE BOOL "" FORCE)
 set(ASSIMP_BUILD_ASSIMP_TOOLS OFF CACHE BOOL "" FORCE)
 set(ASSIMP_INSTALL OFF CACHE BOOL "" FORCE)
 set(ASSIMP_WARNINGS_AS_ERRORS OFF CACHE BOOL "" FORCE)
-FetchContent_Declare(
-    assimp
-    GIT_REPOSITORY https://github.com/assimp/assimp.git
-    GIT_TAG v5.3.1
-)
-FetchContent_MakeAvailable(assimp)
+add_subdirectory(ext/assimp)
 
-FetchContent_Declare(
-    tinyexr
-    GIT_REPOSITORY https://github.com/syoyo/tinyexr.git
-    GIT_TAG v1.0.7
-)
-FetchContent_GetProperties(tinyexr)
-if (NOT tinyexr_POPULATED)
-    FetchContent_Populate(tinyexr)
-endif()
+# TinyEXR (header-only)
+set(tinyexr_SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/ext/tinyexr)
 
-FetchContent_Declare(
-    stb
-    GIT_REPOSITORY https://github.com/nothings/stb.git
-    GIT_TAG master
-)
-FetchContent_GetProperties(stb)
-if (NOT stb_POPULATED)
-    FetchContent_Populate(stb)
-endif()
+# STB (header-only)
+set(stb_SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/ext/stb)
 
-FetchContent_Declare(
-    nfd
-    GIT_REPOSITORY https://github.com/btzy/nativefiledialog-extended.git
-    GIT_TAG v1.1.1
-)
-FetchContent_MakeAvailable(nfd)
+# NFD
+add_subdirectory(ext/nfd)
 
 # FLIP library
 set(FLIP_LIBRARY ON CACHE BOOL "" FORCE)
 add_subdirectory(ext/flip-cuda)
+
+set(TINYGLTF_HEADER_ONLY OFF CACHE BOOL "" FORCE)
+set(TINYGLTF_BUILD_LOADER_EXAMPLE OFF CACHE BOOL "" FORCE)
 add_subdirectory(ext/tinygltf)
 
 add_library(imgui STATIC
@@ -174,7 +134,7 @@ add_executable(evaluate
     src/renderer.h
     src/scene.cu
     src/scene.h
-    src/stb_image.cpp
+    # src/stb_image.cpp
     src/triangle.h
     src/vec3.h
 )
