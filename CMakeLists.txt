@@ -55,9 +55,8 @@ add_subdirectory(ext/nfd)
 set(FLIP_LIBRARY ON CACHE BOOL "" FORCE)
 add_subdirectory(ext/flip-cuda)
 
-set(TINYGLTF_HEADER_ONLY OFF CACHE BOOL "" FORCE)
-set(TINYGLTF_BUILD_LOADER_EXAMPLE OFF CACHE BOOL "" FORCE)
-add_subdirectory(ext/tinygltf)
+# TinyGLTF (header-only)
+include_directories(ext/tinygltf)
 
 add_library(imgui STATIC
     ${imgui_SOURCE_DIR}/imgui.cpp
@@ -98,6 +97,7 @@ add_executable(imgui_renderer
     src/stb_image.cpp
     src/stb_image_write.cpp
     src/tinyexr.cpp
+    src/tinygltf.cpp
     src/triangle.h
     src/vec3.h
 )
@@ -107,9 +107,6 @@ target_include_directories(imgui_renderer PRIVATE
     ${stb_SOURCE_DIR}
 )
 target_link_libraries(imgui_renderer PRIVATE imgui glfw OpenGL::GL bvh tiny-cuda-nn nfd)
-if (TARGET tinygltf)
-    target_link_libraries(imgui_renderer PRIVATE tinygltf)
-endif()
 if (TARGET assimp::assimp)
     target_link_libraries(imgui_renderer PRIVATE assimp::assimp)
 else()
@@ -134,7 +131,7 @@ add_executable(evaluate
     src/renderer.h
     src/scene.cu
     src/scene.h
-    # src/stb_image.cpp
+    src/tinygltf.cpp
     src/triangle.h
     src/vec3.h
 )
@@ -146,9 +143,6 @@ target_include_directories(evaluate PRIVATE
     ext/flip-cuda/common
 )
 target_link_libraries(evaluate PRIVATE bvh tiny-cuda-nn flip-cuda)
-if (TARGET tinygltf)
-    target_link_libraries(evaluate PRIVATE tinygltf)
-endif()
 if (TARGET assimp::assimp)
     target_link_libraries(evaluate PRIVATE assimp::assimp)
 else()
