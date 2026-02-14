@@ -2298,7 +2298,8 @@ void RendererNeural::render(const Vec3& camPos) {
         MeshDeviceView additionalView = scene_->additionalMesh().deviceView();
 
 #ifdef USE_OPTIX
-        if (useHardwareRT_ && optixState_ && optixState_->gasAdditional.handle) {
+        // if (useHardwareRT_ && optixState_ && optixState_->gasAdditional.handle) {
+        if (false) {
             OptixLaunchParams lp = {};
             lp.gas               = optixState_->gasAdditional.handle;
             lp.renderParams      = params;
@@ -2422,7 +2423,8 @@ void RendererNeural::render(const Vec3& camPos) {
                         bounceDistances_);
 
 #ifdef USE_OPTIX
-                if (useHardwareRT_ && optixState_ && optixState_->gasAdditional.handle) {
+                // if (useHardwareRT_ && optixState_ && optixState_->gasAdditional.handle) {
+                if (false) {
                     OptixLaunchParams lp = {};
                     lp.gas               = optixState_->gasAdditional.handle;
                     lp.renderParams      = params;
@@ -2605,7 +2607,8 @@ void RendererNeural::render(const Vec3& camPos) {
 
                 // Trace bounce rays against GT mesh
 #ifdef USE_OPTIX
-                if (useHardwareRT_ && optixState_ && optixState_->gasClassic.handle) {
+                // if (useHardwareRT_ && optixState_ && optixState_->gasClassic.handle) {
+                if (false) {
                     OptixLaunchParams lp = {};
                     lp.gas         = optixState_->gasClassic.handle;
                     lp.renderParams = params;
