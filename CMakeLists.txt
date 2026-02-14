@@ -113,6 +113,111 @@ else()
     target_link_libraries(imgui_renderer PRIVATE assimp)
 endif()
 
+# ---------------------------------------------------------------------------
+# OptiX hardware ray tracing (optional — set OPTIX_ROOT_DIR to SDK root)
+# ---------------------------------------------------------------------------
+option(USE_OPTIX "Enable OptiX hardware ray tracing" OFF)
+
+if(USE_OPTIX)
+    find_package(CUDAToolkit REQUIRED)
+
+    # Locate OptiX headers
+    find_path(OPTIX_INCLUDE_DIR optix.h
+        PATHS
+            $ENV{OPTIX_ROOT_DIR}/include
+            /usr/local/optix/include
+            /opt/optix/include
+        DOC "OptiX SDK include directory"
+    )
+    if(NOT OPTIX_INCLUDE_DIR)
+        message(FATAL_ERROR
+            "OptiX headers not found. "
+            "Set OPTIX_ROOT_DIR to the OptiX SDK root (e.g. ~/NVIDIA-OptiX-SDK-8.1.0).")
+    endif()
+    message(STATUS "OptiX include dir: ${OPTIX_INCLUDE_DIR}")
+
+    # Virtual CUDA architecture for OptiX PTX compilation.
+    # We deliberately default to compute_89 (Ada Lovelace) rather than the
+    # real device arch (e.g. compute_120/Blackwell): CUDA 12.5+ runs ptxas as
+    # a validation step even for -ptx builds, and ptxas rejects OptiX intrinsics
+    # (_optix_trace_typed_32 etc.) that are only resolved by the OptiX driver at
+    # runtime.  PTX ISA 8.9 is fully supported by OptiX 9 and the OptiX JIT will
+    # compile it to the actual GPU's ISA, so no functionality is lost.
+    set(OPTIX_PTX_ARCH "compute_89"
+        CACHE STRING "Virtual CUDA arch for OptiX PTX compilation (e.g. compute_89)")
+    message(STATUS "OptiX PTX arch: ${OPTIX_PTX_ARCH}")
+
+    # -----------------------------------------------------------------------
+    # Step 1: compile optix_programs.cu → PTX
+    # Use CMake's CUDA_PTX_COMPILATION property so CMake skips ptxas assembly.
+    # A raw nvcc -ptx command would still invoke ptxas for validation, which
+    # fails for OptiX intrinsics (_optix_trace_typed_32 etc.) that are only
+    # resolved by the OptiX driver at runtime.
+    # -----------------------------------------------------------------------
+    set(_ptx_src ${CMAKE_CURRENT_SOURCE_DIR}/src/rt/optix_programs.cu)
+
+    add_library(optix_programs_ptx OBJECT ${_ptx_src})
+    set_property(TARGET optix_programs_ptx PROPERTY CUDA_PTX_COMPILATION ON)
+    set_property(TARGET optix_programs_ptx PROPERTY CUDA_STANDARD 17)
+    # Disable CMake's automatic -gencode flags (from CMAKE_CUDA_ARCHITECTURES):
+    # -ptx disallows multiple architectures.  We set a single virtual arch manually.
+    set_property(TARGET optix_programs_ptx PROPERTY CUDA_ARCHITECTURES OFF)
+    target_include_directories(optix_programs_ptx PRIVATE
+        ${OPTIX_INCLUDE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+    )
+    target_compile_options(optix_programs_ptx PRIVATE
+        $<$<COMPILE_LANGUAGE:CUDA>:-arch=${OPTIX_PTX_ARCH}>
+    )
+    # Must define USE_OPTIX so MeshDeviceView gets the OptixTraversableHandle gas
+    # field — otherwise sizeof(OptixLaunchParams) differs between host and device.
+    target_compile_definitions(optix_programs_ptx PRIVATE USE_OPTIX)
+
+    # -----------------------------------------------------------------------
+    # Step 2: embed PTX text as a C string header
+    # CMake places OBJECT-library PTX files at a predictable path inside the
+    # build tree.  We derive it explicitly so we can list it as a file DEPENDS
+    # (generator expressions in DEPENDS don't create build-system rules).
+    # -----------------------------------------------------------------------
+    set(_ptx_header ${CMAKE_CURRENT_BINARY_DIR}/optix_programs_ptx.h)
+    # CMake convention: <binary_dir>/CMakeFiles/<target>.dir/<src_rel>.ptx
+    set(_ptx_out
+        ${CMAKE_CURRENT_BINARY_DIR}/CMakeFiles/optix_programs_ptx.dir/src/rt/optix_programs.ptx)
+
+    add_custom_command(
+        OUTPUT  ${_ptx_header}
+        COMMAND ${CMAKE_COMMAND}
+                -DPTX_FILE=${_ptx_out}
+                -DOUTPUT_FILE=${_ptx_header}
+                -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/embed_ptx.cmake
+        DEPENDS ${_ptx_out}
+        COMMENT "Embedding OptiX PTX into C string header"
+        VERBATIM
+    )
+
+    add_custom_target(optix_ptx_header DEPENDS ${_ptx_header})
+    # Ensure the OBJECT library is built before the embed step runs
+    add_dependencies(optix_ptx_header optix_programs_ptx)
+
+    # -----------------------------------------------------------------------
+    # Wire into imgui_renderer
+    # -----------------------------------------------------------------------
+    target_sources(imgui_renderer PRIVATE
+        src/rt/optix_state.cu
+        src/rt/optix_state.h
+        src/rt/optix_launch_params.h
+    )
+
+    add_dependencies(imgui_renderer optix_ptx_header)
+
+    target_include_directories(imgui_renderer PRIVATE
+        ${OPTIX_INCLUDE_DIR}
+        ${CMAKE_CURRENT_BINARY_DIR}   # for optix_programs_ptx.h
+    )
+    target_compile_definitions(imgui_renderer PRIVATE USE_OPTIX)
+    target_link_libraries(imgui_renderer PRIVATE CUDA::cuda_driver)
+endif()
+
 # Evaluation tool (ground truth vs neural comparison with PSNR and FLIP)
 add_executable(evaluate
     src/bvh_data.h

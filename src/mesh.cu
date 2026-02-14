@@ -253,6 +253,10 @@ MeshDeviceView Mesh::deviceView() const {
     view.hasNormals = !normals_.empty() ? 1 : 0;
     view.hasTexcoords = !texcoords_.empty() ? 1 : 0;
 
+#ifdef USE_OPTIX
+    view.gas = gasHandle_;
+#endif
+
     return view;
 }
 
@@ -279,4 +283,82 @@ void Mesh::releaseDevice() {
     }
     deviceTexturePixels_.clear();
     deviceNumTextures_ = 0;
+
+#ifdef USE_OPTIX
+    releaseGAS();
+#endif
 }
+
+#ifdef USE_OPTIX
+#include <cuda.h>
+#include <optix.h>
+#include <optix_stubs.h>
+
+bool Mesh::buildGAS(OptixDeviceContext ctx) {
+    if (!ctx || !deviceVertices_ || !deviceIndices_ || deviceNumTriangles_ <= 0) return false;
+
+    releaseGAS();
+
+    CUdeviceptr dVerts   = reinterpret_cast<CUdeviceptr>(deviceVertices_);
+    CUdeviceptr dIndices = reinterpret_cast<CUdeviceptr>(deviceIndices_);
+
+    OptixBuildInput bi = {};
+    bi.type = OPTIX_BUILD_INPUT_TYPE_TRIANGLES;
+    bi.triangleArray.vertexFormat        = OPTIX_VERTEX_FORMAT_FLOAT3;
+    bi.triangleArray.vertexStrideInBytes = sizeof(float) * 3;
+    bi.triangleArray.numVertices         = static_cast<unsigned int>(deviceNumVertices_);
+    bi.triangleArray.vertexBuffers       = &dVerts;
+    bi.triangleArray.indexFormat         = OPTIX_INDICES_FORMAT_UNSIGNED_INT3;
+    bi.triangleArray.indexStrideInBytes  = sizeof(unsigned int) * 3;
+    bi.triangleArray.numIndexTriplets    = static_cast<unsigned int>(deviceNumTriangles_);
+    bi.triangleArray.indexBuffer         = dIndices;
+    unsigned int geomFlags = OPTIX_GEOMETRY_FLAG_NONE;
+    bi.triangleArray.flags         = &geomFlags;
+    bi.triangleArray.numSbtRecords = 1;
+
+    OptixAccelBuildOptions opts = {};
+    opts.buildFlags = OPTIX_BUILD_FLAG_ALLOW_COMPACTION;
+    opts.operation  = OPTIX_BUILD_OPERATION_BUILD;
+
+    OptixAccelBufferSizes sizes = {};
+    if (optixAccelComputeMemoryUsage(ctx, &opts, &bi, 1, &sizes) != OPTIX_SUCCESS) return false;
+
+    CUdeviceptr dTemp = 0, dOut = 0, dCompSize = 0;
+    if (cuMemAlloc(&dTemp, sizes.tempSizeInBytes) != CUDA_SUCCESS) return false;
+    if (cuMemAlloc(&dOut,  sizes.outputSizeInBytes) != CUDA_SUCCESS) { cuMemFree(dTemp); return false; }
+    if (cuMemAlloc(&dCompSize, sizeof(uint64_t)) != CUDA_SUCCESS) { cuMemFree(dTemp); cuMemFree(dOut); return false; }
+
+    OptixAccelEmitDesc emit = {};
+    emit.type   = OPTIX_PROPERTY_TYPE_COMPACTED_SIZE;
+    emit.result = dCompSize;
+
+    OptixTraversableHandle tempHandle = 0;
+    bool ok = (optixAccelBuild(ctx, nullptr, &opts, &bi, 1,
+                               dTemp, sizes.tempSizeInBytes,
+                               dOut, sizes.outputSizeInBytes,
+                               &tempHandle, &emit, 1) == OPTIX_SUCCESS);
+    if (ok) ok = (cudaDeviceSynchronize() == cudaSuccess);
+
+    if (ok) {
+        uint64_t compacted = 0;
+        cuMemcpyDtoH(&compacted, dCompSize, sizeof(uint64_t));
+        if (cuMemAlloc(&gasBuffer_, compacted) == CUDA_SUCCESS) {
+            gasBufferSize_ = compacted;
+            ok = (optixAccelCompact(ctx, nullptr, tempHandle, gasBuffer_, compacted, &gasHandle_)
+                  == OPTIX_SUCCESS);
+            if (ok) ok = (cudaDeviceSynchronize() == cudaSuccess);
+        }
+    }
+
+    cuMemFree(dTemp);
+    cuMemFree(dOut);
+    cuMemFree(dCompSize);
+    return ok;
+}
+
+void Mesh::releaseGAS() {
+    if (gasBuffer_) { cuMemFree(gasBuffer_); gasBuffer_ = 0; }
+    gasBufferSize_ = 0;
+    gasHandle_     = 0;
+}
+#endif

@@ -13,6 +13,11 @@
 struct MeshDeviceView;
 struct RenderParams;
 
+#ifdef USE_OPTIX
+struct OptixState;
+struct OptixLaunchParams;
+#endif
+
 namespace tcnn {
 template <typename T> class NetworkWithInputEncoding;
 }  // namespace tcnn
@@ -32,6 +37,9 @@ class RendererNeural final {
 
     void setUseNeuralQuery(bool enabled) { useNeuralQuery_ = enabled; }
     bool useNeuralQuery() const { return useNeuralQuery_; }
+
+    void setUseHardwareRT(bool v) { useHardwareRT_ = v; }
+    bool useHardwareRT() const { return useHardwareRT_; }
     bool loadWeightsFromFile(const std::string& path);
     // When true, the checkpoint has [hg_params | mlp_params] order instead of [mlp | hg].
     void setSwapParamOrder(bool v) { swapParamOrder_ = v; }
@@ -177,6 +185,12 @@ class RendererNeural final {
     int classicMeshIndex_ = 0;
     float envmapRotation_ = 0.0f;
     uint32_t accumSampleCount_ = 0;
+
+#ifdef USE_OPTIX
+    OptixState*         optixState_       = nullptr;
+    OptixLaunchParams*  dLaunchParams_    = nullptr;
+#endif
+    bool useHardwareRT_ = false;
 
     bool lastUseNeuralQuery_ = true;
     bool lastLambertView_ = false;

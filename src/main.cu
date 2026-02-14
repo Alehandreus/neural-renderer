@@ -233,6 +233,9 @@ int main(int argc, char** argv) {
     double lastTime = glfwGetTime();
     bool lambertView = false;
     bool useNeuralQuery = config.neural_network.use_neural_query;
+#ifdef USE_OPTIX
+    bool useHardwareRT = false;
+#endif
     int bounceCount = kBounceCount;
     int samplesPerPixel = kSamplesPerPixel;
     int classicMeshIndex = 0;
@@ -257,6 +260,9 @@ int main(int argc, char** argv) {
 
         renderer.setLambertView(lambertView);
         renderer.setUseNeuralQuery(useNeuralQuery);
+#ifdef USE_OPTIX
+        renderer.setUseHardwareRT(useHardwareRT);
+#endif
         renderer.setBounceCount(bounceCount);
         renderer.setSamplesPerPixel(samplesPerPixel);
         renderer.setClassicMeshIndex(classicMeshIndex);
@@ -328,6 +334,9 @@ int main(int argc, char** argv) {
         ImGui::Text("WASD move, Q/E up/down, mouse look.");
         ImGui::Text("ESC releases mouse, click to recapture.");
         ImGui::Checkbox("Neural query", &useNeuralQuery);
+#ifdef USE_OPTIX
+        ImGui::Checkbox("Hardware RT (OptiX)", &useHardwareRT);
+#endif
         ImGui::Checkbox("Lambert (no bounces)", &lambertView);
         ImGui::InputInt("Max bounces", &bounceCount);
         ImGui::InputInt("Samples per pixel", &samplesPerPixel);

@@ -37,6 +37,10 @@ struct TextureDeviceView {
     int srgb = 0;  // 1 if SRGB color space
 };
 
+#ifdef USE_OPTIX
+#include <optix.h>
+#endif
+
 // Device view for indexed mesh with materials
 struct MeshDeviceView {
     // Geometry (indexed)
@@ -67,6 +71,10 @@ struct MeshDeviceView {
     int hasMeshMaterials = 0;  // 1 = use mesh materials, 0 = use global
     int hasNormals = 0;
     int hasTexcoords = 0;
+
+#ifdef USE_OPTIX
+    OptixTraversableHandle gas = 0;
+#endif
 };
 
 class Mesh {
@@ -120,6 +128,14 @@ public:
     MeshDeviceView deviceView() const;
     void releaseDevice();
 
+#ifdef USE_OPTIX
+    // Build / release OptiX geometry acceleration structure for this mesh.
+    // ctx must be a valid OptixDeviceContext created by optixCreateState.
+    bool buildGAS(OptixDeviceContext ctx);
+    void releaseGAS();
+    OptixTraversableHandle gasHandle() const { return gasHandle_; }
+#endif
+
     // Clear all data
     void clear();
 
@@ -154,6 +170,12 @@ private:
     std::vector<unsigned char*> deviceTexturePixels_;
     TextureDeviceView* deviceTextures_ = nullptr;
     int deviceNumTextures_ = 0;
+
+#ifdef USE_OPTIX
+    OptixTraversableHandle gasHandle_     = 0;
+    CUdeviceptr            gasBuffer_     = 0;
+    size_t                 gasBufferSize_ = 0;
+#endif
 
     // Dirty flags
     bool geometryDirty_ = true;
