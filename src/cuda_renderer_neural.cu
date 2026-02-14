@@ -1193,10 +1193,16 @@ __global__ void applySegmentNeuralOutputKernel(
         hitColors[base + 0] = neuralColor.x;
         hitColors[base + 1] = neuralColor.y;
         hitColors[base + 2] = neuralColor.z;
+        // hitColors[base + 0] = 0.8;
+        // hitColors[base + 1] = 0.8;
+        // hitColors[base + 2] = 0.8;
         if (hitMaterialParams) {
-            hitMaterialParams[base + 0] = material.metallic.value;
-            hitMaterialParams[base + 1] = material.roughness.value;
-            hitMaterialParams[base + 2] = material.specular.value;
+            // hitMaterialParams[base + 0] = material.metallic.value;
+            // hitMaterialParams[base + 1] = material.roughness.value;
+            // hitMaterialParams[base + 2] = material.specular.value;
+            hitMaterialParams[base + 0] = 0.0;
+            hitMaterialParams[base + 1] = 0.0;
+            hitMaterialParams[base + 2] = 0.0;
         }
 
         hitFlags[sampleIdx] = 1;
@@ -2524,7 +2530,8 @@ void RendererNeural::render(const Vec3& camPos) {
         // --- Ground truth mesh path tracing (wavefront architecture) ---
         // 1. Trace primary rays
 #ifdef USE_OPTIX
-        if (useHardwareRT_ && optixState_ && optixState_->gasClassic.handle) {
+        // if (useHardwareRT_ && optixState_ && optixState_->gasClassic.handle) {
+        if (false) {
             OptixLaunchParams lp = {};
             lp.gas          = optixState_->gasClassic.handle;
             lp.renderParams = params;

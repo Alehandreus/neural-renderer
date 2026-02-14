@@ -234,7 +234,7 @@ int main(int argc, char** argv) {
     bool lambertView = false;
     bool useNeuralQuery = config.neural_network.use_neural_query;
 #ifdef USE_OPTIX
-    bool useHardwareRT = false;
+    bool useHardwareRT = true;
 #endif
     int bounceCount = kBounceCount;
     int samplesPerPixel = kSamplesPerPixel;

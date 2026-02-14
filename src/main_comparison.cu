@@ -287,7 +287,7 @@ int main(int argc, char** argv) {
     std::string envError;
     if (!scene.environment().loadFromFile(config.environment.hdri_path.c_str(), &envError)) {
         std::fprintf(stderr, "Failed to load HDRI '%s': %s\n", config.environment.hdri_path.c_str(), envError.c_str());
-        return 1;
+        // return 1;
     }
     scene.environment().setRotation(config.environment.rotation);
     scene.environment().setStrength(config.environment.strength);
