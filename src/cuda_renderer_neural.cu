@@ -2023,44 +2023,43 @@ bool RendererNeural::loadWeightsFromFile(const std::string& path) {
         return false;
     }
 
-    // Supported file formats (FP16):
-    //   New: [mlp_params | hg_params]              — single shared HashGrid, tiled to all slots.
-    //   Old: [mlp_params | hg0 | hg1 | ... | hgN]  — one block per point; hg0 used for all.
-    size_t encNParams  = network_->encoding()->n_params();  // pointCount_ HashGrids total
-    size_t mlpNParams  = network_->n_params() - encNParams;
-    size_t hgNParams   = encNParams / pointCount_;
-    size_t newFmtBytes = (mlpNParams + hgNParams) * sizeof(__half);
-    size_t oldFmtBytes = (mlpNParams + encNParams) * sizeof(__half);
+    // File format: [mlp_params | hg_params] (FP16), single shared HashGrid tiled to all slots.
+    // If swapParamOrder_ is set, the file has [hg_params | mlp_params] (encoding first).
+    size_t encNParams = network_->encoding()->n_params();  // pointCount_ HashGrids total
+    size_t mlpNParams = network_->n_params() - encNParams;
+    size_t hgNParams  = encNParams / pointCount_;
+    size_t fileBytes  = (mlpNParams + hgNParams) * sizeof(__half);
 
     std::streamsize size = file.tellg();
     if (size <= 0) {
         std::fprintf(stderr, "Weights file is empty: %s\n", path.c_str());
         return false;
     }
-    auto fileSize = static_cast<size_t>(size);
-    if (fileSize != newFmtBytes && fileSize != oldFmtBytes) {
+    if (static_cast<size_t>(size) != fileBytes) {
         std::fprintf(stderr,
-                     "Weights size mismatch (got %zu bytes, expected %zu (new) or %zu (old)).\n"
-                     "New format: [mlp | hg]  Old format: [mlp | hg0 | hg1 | ...]\n",
-                     fileSize, newFmtBytes, oldFmtBytes);
+                     "Weights size mismatch (got %lld bytes, expected %zu).\n"
+                     "Format: [mlp | hg] or (with swapParamOrder) [hg | mlp] (FP16).\n",
+                     static_cast<long long>(size), fileBytes);
         return false;
     }
 
-    std::vector<char> buffer(fileSize);
+    std::vector<char> buffer(fileBytes);
     file.seekg(0, std::ios::beg);
-    if (!file.read(buffer.data(), static_cast<std::streamsize>(fileSize))) {
+    if (!file.read(buffer.data(), static_cast<std::streamsize>(fileBytes))) {
         std::fprintf(stderr, "Failed to read weights file: %s\n", path.c_str());
         return false;
     }
 
-    // Copy MLP params, then tile the first (or only) HashGrid block to all pointCount_ slots.
-    auto* dst       = static_cast<__half*>(networkParams_);
-    const auto* src = reinterpret_cast<const __half*>(buffer.data());
-    checkCuda(cudaMemcpy(dst, src, mlpNParams * sizeof(__half), cudaMemcpyHostToDevice),
+    // Copy into networkParams_ as [mlp | hg0 | hg1 | ...], tiling the single HG block.
+    auto* dst        = static_cast<__half*>(networkParams_);
+    const auto* src  = reinterpret_cast<const __half*>(buffer.data());
+    const __half* srcMlp = swapParamOrder_ ? src + hgNParams : src;
+    const __half* srcHg  = swapParamOrder_ ? src             : src + mlpNParams;
+    checkCuda(cudaMemcpy(dst, srcMlp, mlpNParams * sizeof(__half), cudaMemcpyHostToDevice),
               "cudaMemcpy mlp params");
     for (uint32_t i = 0; i < pointCount_; ++i) {
         checkCuda(cudaMemcpy(dst + mlpNParams + i * hgNParams,
-                             src + mlpNParams,
+                             srcHg,
                              hgNParams * sizeof(__half),
                              cudaMemcpyHostToDevice),
                   "cudaMemcpy hg params tile");

@@ -33,6 +33,9 @@ class RendererNeural final {
     void setUseNeuralQuery(bool enabled) { useNeuralQuery_ = enabled; }
     bool useNeuralQuery() const { return useNeuralQuery_; }
     bool loadWeightsFromFile(const std::string& path);
+    // When true, the checkpoint has [hg_params | mlp_params] order instead of [mlp | hg].
+    void setSwapParamOrder(bool v) { swapParamOrder_ = v; }
+    bool swapParamOrder() const { return swapParamOrder_; }
 
     void setSamplesPerPixel(int samples) { samplesPerPixel_ = samples; }
     void setBounceCount(int count) { bounceCount_ = count; }
@@ -168,6 +171,7 @@ class RendererNeural final {
     bool lambertView_ = false;
     bool useNeuralQuery_ = false;
     bool useMidpointEncoding_ = false;
+    bool swapParamOrder_ = false;  // checkpoint has [hg | mlp] instead of [mlp | hg]
     int samplesPerPixel_ = 1;
     int bounceCount_ = 0;
     int classicMeshIndex_ = 0;
