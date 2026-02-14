@@ -10,6 +10,7 @@
 #include <vector>
 
 #include <GLFW/glfw3.h>
+#include <cuda_gl_interop.h>
 #include <nfd.h>
 
 #include "imgui.h"
@@ -213,7 +214,6 @@ int main(int argc, char** argv) {
     int fbHeight = 0;
     glfwGetFramebufferSize(window, &fbWidth, &fbHeight);
     renderer.resize(fbWidth, fbHeight);
-    std::vector<uchar4> hostPixels(static_cast<size_t>(fbWidth) * static_cast<size_t>(fbHeight));
 
     GLuint texture = 0;
     glGenTextures(1, &texture);
@@ -222,17 +222,13 @@ int main(int argc, char** argv) {
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
-    glTexImage2D(
-            GL_TEXTURE_2D,
-            0,
-            GL_RGBA,
-            fbWidth,
-            fbHeight,
-            0,
-            GL_RGBA,
-            GL_UNSIGNED_BYTE,
-            nullptr);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, fbWidth, fbHeight, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+
+    cudaGraphicsResource_t cudaTexResource = nullptr;
+    if (fbWidth > 0 && fbHeight > 0) {
+        cudaGraphicsGLRegisterImage(&cudaTexResource, texture, GL_TEXTURE_2D,
+                                    cudaGraphicsRegisterFlagsWriteDiscard);
+    }
 
     double lastTime = glfwGetTime();
     bool lambertView = false;
@@ -271,18 +267,14 @@ int main(int argc, char** argv) {
         if (fbWidth != renderer.width() || fbHeight != renderer.height()) {
             if (fbWidth > 0 && fbHeight > 0) {
                 renderer.resize(fbWidth, fbHeight);
-                hostPixels.resize(static_cast<size_t>(fbWidth) * static_cast<size_t>(fbHeight));
+                if (cudaTexResource) {
+                    cudaGraphicsUnregisterResource(cudaTexResource);
+                    cudaTexResource = nullptr;
+                }
                 glBindTexture(GL_TEXTURE_2D, texture);
-                glTexImage2D(
-                        GL_TEXTURE_2D,
-                        0,
-                        GL_RGBA,
-                        fbWidth,
-                        fbHeight,
-                        0,
-                        GL_RGBA,
-                        GL_UNSIGNED_BYTE,
-                        nullptr);
+                glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, fbWidth, fbHeight, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+                cudaGraphicsGLRegisterImage(&cudaTexResource, texture, GL_TEXTURE_2D,
+                                            cudaGraphicsRegisterFlagsWriteDiscard);
             }
         }
 
@@ -293,19 +285,18 @@ int main(int argc, char** argv) {
             renderBasis.up = basis.up;
             renderBasis.fovY = camera.fovY;
             renderer.setCameraBasis(renderBasis);
-            renderer.render(camera.position, hostPixels);
-            glBindTexture(GL_TEXTURE_2D, texture);
-            glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
-            glTexSubImage2D(
-                    GL_TEXTURE_2D,
-                    0,
-                    0,
-                    0,
-                    fbWidth,
-                    fbHeight,
-                    GL_RGBA,
-                    GL_UNSIGNED_BYTE,
-                    hostPixels.data());
+            renderer.render(camera.position);
+
+            cudaArray_t texArray;
+            cudaGraphicsMapResources(1, &cudaTexResource);
+            cudaGraphicsSubResourceGetMappedArray(&texArray, cudaTexResource, 0, 0);
+            cudaMemcpy2DToArray(texArray, 0, 0,
+                                renderer.devicePixels(),
+                                fbWidth * sizeof(uchar4),
+                                fbWidth * sizeof(uchar4),
+                                fbHeight,
+                                cudaMemcpyDeviceToDevice);
+            cudaGraphicsUnmapResources(1, &cudaTexResource);
         }
 
         ImGui_ImplOpenGL3_NewFrame();
@@ -445,7 +436,10 @@ int main(int argc, char** argv) {
             nfdresult_t result = NFD_SaveDialog(&outPath, filters, 1, nullptr, "render.png");
             if (result == NFD_OKAY) {
                 // Save the current rendering as PNG
-                int success = stbi_write_png(outPath, fbWidth, fbHeight, 4, hostPixels.data(), fbWidth * 4);
+                std::vector<uchar4> savePixels(static_cast<size_t>(fbWidth) * fbHeight);
+                cudaMemcpy(savePixels.data(), renderer.devicePixels(),
+                           savePixels.size() * sizeof(uchar4), cudaMemcpyDeviceToHost);
+                int success = stbi_write_png(outPath, fbWidth, fbHeight, 4, savePixels.data(), fbWidth * 4);
                 if (success) {
                     std::printf("Image saved to %s\n", outPath);
                 } else {
@@ -506,6 +500,9 @@ int main(int argc, char** argv) {
         glfwSwapBuffers(window);
     }
 
+    if (cudaTexResource) {
+        cudaGraphicsUnregisterResource(cudaTexResource);
+    }
     glDeleteTextures(1, &texture);
 
     NFD_Quit();

@@ -2249,15 +2249,12 @@ void RendererNeural::traceNeuralSegmentsForRays(bool useCameraRays,
     }
 }
 
-void RendererNeural::render(const Vec3& camPos, std::vector<uchar4>& hostPixels) {
+void RendererNeural::render(const Vec3& camPos) {
     if (width_ <= 0 || height_ <= 0) {
         return;
     }
     if (!scene_ || !devicePixels_) {
         return;
-    }
-    if (hostPixels.size() != static_cast<size_t>(width_ * height_)) {
-        hostPixels.resize(static_cast<size_t>(width_) * static_cast<size_t>(height_));
     }
 
     int maxBounces = bounceCount_;
@@ -2699,12 +2696,6 @@ void RendererNeural::render(const Vec3& camPos, std::vector<uchar4>& hostPixels)
         }
     }
 
-    checkCuda(cudaMemcpy(
-            hostPixels.data(),
-            devicePixels_,
-            hostPixels.size() * sizeof(uchar4),
-            cudaMemcpyDeviceToHost),
-            "cudaMemcpy");
 }
 
 // ===========================================================================

@@ -4,7 +4,6 @@
 #include <cstdint>
 #include <memory>
 #include <string>
-#include <vector>
 
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
@@ -28,7 +27,8 @@ class RendererNeural final {
 
     void resize(int width, int height);
     void setCameraBasis(const RenderBasis& basis);
-    void render(const Vec3& camPos, std::vector<uchar4>& hostPixels);
+    void render(const Vec3& camPos);
+    uchar4* devicePixels() const { return devicePixels_; }
 
     void setUseNeuralQuery(bool enabled) { useNeuralQuery_ = enabled; }
     bool useNeuralQuery() const { return useNeuralQuery_; }
@@ -171,7 +171,7 @@ class RendererNeural final {
     bool lambertView_ = false;
     bool useNeuralQuery_ = false;
     bool useMidpointEncoding_ = false;
-    bool swapParamOrder_ = false;  // checkpoint has [hg | mlp] instead of [mlp | hg]
+    bool swapParamOrder_ = true;  // checkpoint has [hg | mlp] instead of [mlp | hg]
     int samplesPerPixel_ = 1;
     int bounceCount_ = 0;
     int classicMeshIndex_ = 0;

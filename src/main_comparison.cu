@@ -330,14 +330,14 @@ int main(int argc, char** argv) {
             int batchSamples = std::min(remainingSamples, kBatchSizeGT);
             renderer.setSamplesPerPixel(batchSamples);
 
-            renderer.render(camera.position, groundTruthPixels);
+            renderer.render(camera.position);
 
             remainingSamples -= batchSamples;
             std::printf("  Progress: %d / %d samples\n", kTotalSamples - remainingSamples, kTotalSamples);
         }
 
-        // The renderer has accumulated all samples internally.
-        // groundTruthPixels now contains the final result.
+        cudaMemcpy(groundTruthPixels.data(), renderer.devicePixels(),
+                   groundTruthPixels.size() * sizeof(uchar4), cudaMemcpyDeviceToHost);
         std::string gtPath = std::string(kOutputFolder) + "/" + kGroundTruthOutput;
         savePng(gtPath.c_str(), groundTruthPixels, kWidth, kHeight);
     }
@@ -355,14 +355,14 @@ int main(int argc, char** argv) {
             int batchSamples = std::min(remainingSamples, kBatchSizeNeural);
             renderer.setSamplesPerPixel(batchSamples);
 
-            renderer.render(camera.position, neuralPixels);
+            renderer.render(camera.position);
 
             remainingSamples -= batchSamples;
             std::printf("  Progress: %d / %d samples\n", kTotalSamples - remainingSamples, kTotalSamples);
         }
 
-        // The renderer has accumulated all samples internally.
-        // neuralPixels now contains the final result.
+        cudaMemcpy(neuralPixels.data(), renderer.devicePixels(),
+                   neuralPixels.size() * sizeof(uchar4), cudaMemcpyDeviceToHost);
         std::string neuralPath = std::string(kOutputFolder) + "/" + kNeuralOutput;
         savePng(neuralPath.c_str(), neuralPixels, kWidth, kHeight);
     }
