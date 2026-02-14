@@ -2,9 +2,11 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <vector>
 
+#include <cuda_fp16.h>
 #include <cuda_runtime.h>
 
 #include "renderer.h"
@@ -13,9 +15,7 @@ struct MeshDeviceView;
 struct RenderParams;
 
 namespace tcnn {
-namespace cpp {
-class Module;
-}  // namespace cpp
+template <typename T> class NetworkWithInputEncoding;
 }  // namespace tcnn
 
 class Scene;
@@ -45,7 +45,7 @@ class RendererNeural final {
 
     int samplesPerPixel() const { return samplesPerPixel_; }
     int bounceCount() const { return bounceCount_; }
-    size_t paramsBytes() const { return pointEncParamsBytes_ + dirEncParamsBytes_ + mlpParamsBytes_; }
+    size_t paramsBytes() const { return networkParamsBytes_; }
     int width() const { return width_; }
     int height() const { return height_; }
 
@@ -75,26 +75,16 @@ class RendererNeural final {
 
     Scene* scene_ = nullptr;
 
-    // Three separate tcnn modules matching Python RayModel.
-    tcnn::cpp::Module* pointEncoding_ = nullptr;
-    tcnn::cpp::Module* dirEncoding_ = nullptr;
-    tcnn::cpp::Module* mlpNetwork_ = nullptr;
+    // Fused encoding + MLP (3 HashGrids + SH + FullyFusedMLP), all in FP16.
+    std::shared_ptr<tcnn::NetworkWithInputEncoding<__half>> network_;
 
-    // Per-module device parameters (FP16).
-    void* pointEncParams_ = nullptr;
-    void* dirEncParams_ = nullptr;
-    void* mlpParams_ = nullptr;
+    // Device parameters for network_ (FP16, single contiguous block).
+    // Layout as per NetworkWithInputEncoding::set_params_impl: [mlp | enc0 | enc1 | enc2].
+    void* networkParams_ = nullptr;
+    size_t networkParamsBytes_ = 0;
 
-    // Compacted encoding inputs (3 floats each, per compacted hit).
-    float* compactedPointInputs_ = nullptr;
-    float* compactedDirs_ = nullptr;
-
-    // Encoding outputs (FP16, per compacted hit).
-    void* pointEncOutput_ = nullptr;
-    void* dirEncOutput_ = nullptr;
-
-    // Concatenated MLP input (FP32).
-    float* mlpInput_ = nullptr;
+    // Flat raw-coordinate input buffer: [entry.xyz | exit.xyz | [mid.xyz] | dir.xyz] per element.
+    float* networkInputs_ = nullptr;
 
     // MLP output (FP16).
     void* outputs_ = nullptr;
@@ -162,18 +152,11 @@ class RendererNeural final {
     size_t bufferElements_ = 0;
     size_t accumPixels_ = 0;
 
-    // Per-module param sizes.
-    size_t pointEncParamsBytes_ = 0;
-    size_t dirEncParamsBytes_ = 0;
-    size_t mlpParamsBytes_ = 0;
-
-    // Module output dimensions.
-    uint32_t pointEncOutDims_ = 0;
-    uint32_t dirEncOutDims_ = 0;
-    uint32_t mlpInputDims_ = 0;
+    // Network dimensions.
+    uint32_t inputDims_ = 0;       // raw coord input dims: pointCount*3 + 3
+    uint32_t pointCount_ = 0;      // number of spatial points encoded (2 or 3)
     uint32_t mlpOutputDims_ = 0;
     size_t mlpOutputElemSize_ = 0;
-    uint32_t pointEncPointCount_ = 0;
 
     RenderBasis basis_{};
     Vec3 lightDir_{};

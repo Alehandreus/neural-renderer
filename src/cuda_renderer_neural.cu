@@ -11,8 +11,9 @@
 
 #include <cuda_fp16.h>
 
-#include <tiny-cuda-nn/cpp_api.h>
 #include <tiny-cuda-nn/common_device.h>
+#include <tiny-cuda-nn/gpu_matrix.h>
+#include <tiny-cuda-nn/network_with_input_encoding.h>
 
 #include "config_loader.h"
 #include "scene.h"
@@ -1257,6 +1258,8 @@ __global__ void traceSegmentExitsKernel(
 // ---------------------------------------------------------------------------
 // Build normalized neural network inputs for current segment.
 // ---------------------------------------------------------------------------
+// Writes flat input for NetworkWithInputEncoding:
+//   [entry.xyz | exit.xyz | [mid.xyz] | dir.xyz]  (inputDims floats per ray)
 __global__ void buildSegmentNeuralInputsKernel(
         const float* entryPositions,
         const float* exitPositions,
@@ -1265,9 +1268,9 @@ __global__ void buildSegmentNeuralInputsKernel(
         int hitCount,
         Vec3 outerMin,
         Vec3 outerInvExtent,
-        float* compactedPointInputs,
-        float* compactedDirs,
-        int pointCount) {
+        float* networkInputs,
+        int pointCount,
+        int inputDims) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= hitCount) {
         return;
@@ -1275,7 +1278,7 @@ __global__ void buildSegmentNeuralInputsKernel(
 
     int sampleIdx = hitIndices[idx];
     int srcBase = sampleIdx * 3;
-    int dstBase = idx * pointCount * 3;
+    int dstBase = idx * inputDims;
 
     // Shift entry by epsilon before normalization (matching Python)
     Vec3 entryPos(entryPositions[srcBase + 0],
@@ -1298,27 +1301,29 @@ __global__ void buildSegmentNeuralInputsKernel(
                   (exitPos.y - outerMin.y) * outerInvExtent.y,
                   (exitPos.z - outerMin.z) * outerInvExtent.z);
 
-    int offset = 0;
-    compactedPointInputs[dstBase + offset++] = normEntry.x;
-    compactedPointInputs[dstBase + offset++] = normEntry.y;
-    compactedPointInputs[dstBase + offset++] = normEntry.z;
-    compactedPointInputs[dstBase + offset++] = normExit.x;
-    compactedPointInputs[dstBase + offset++] = normExit.y;
-    compactedPointInputs[dstBase + offset++] = normExit.z;
+    // Entry (dims 0–2)
+    networkInputs[dstBase + 0] = normEntry.x;
+    networkInputs[dstBase + 1] = normEntry.y;
+    networkInputs[dstBase + 2] = normEntry.z;
+    // Exit (dims 3–5)
+    networkInputs[dstBase + 3] = normExit.x;
+    networkInputs[dstBase + 4] = normExit.y;
+    networkInputs[dstBase + 5] = normExit.z;
+    // Midpoint (dims 6–8, only when pointCount == 3)
     if (pointCount == 3) {
         Vec3 midPos = (shiftedEntry + exitPos) * 0.5f;
         Vec3 normMid((midPos.x - outerMin.x) * outerInvExtent.x,
                      (midPos.y - outerMin.y) * outerInvExtent.y,
                      (midPos.z - outerMin.z) * outerInvExtent.z);
-        compactedPointInputs[dstBase + offset++] = normMid.x;
-        compactedPointInputs[dstBase + offset++] = normMid.y;
-        compactedPointInputs[dstBase + offset++] = normMid.z;
+        networkInputs[dstBase + 6] = normMid.x;
+        networkInputs[dstBase + 7] = normMid.y;
+        networkInputs[dstBase + 8] = normMid.z;
     }
-
-    // Directions: map from [-1,1] to [0,1] (matching Python: (directions + 1) / 2)
-    compactedDirs[dstBase + 0] = (dir.x + 1.0f) * 0.5f;
-    compactedDirs[dstBase + 1] = (dir.y + 1.0f) * 0.5f;
-    compactedDirs[dstBase + 2] = (dir.z + 1.0f) * 0.5f;
+    // Direction (dims pointCount*3 to pointCount*3+2): map [-1,1] → [0,1]
+    int dirOffset = pointCount * 3;
+    networkInputs[dstBase + dirOffset + 0] = (dir.x + 1.0f) * 0.5f;
+    networkInputs[dstBase + dirOffset + 1] = (dir.y + 1.0f) * 0.5f;
+    networkInputs[dstBase + dirOffset + 2] = (dir.z + 1.0f) * 0.5f;
 }
 
 // ---------------------------------------------------------------------------
@@ -1810,54 +1815,6 @@ __global__ void compactInputsKernel(const int* flags,
     }
 }
 
-// ---------------------------------------------------------------------------
-// Scatter point encoding outputs directly into the MLP input buffer.
-// ---------------------------------------------------------------------------
-__global__ void scatterPointEncodingsKernel(const __half* encOutput,
-                                            uint32_t pointEncOutDims,
-                                            uint32_t pointCount,
-                                            float* mlpInput,
-                                            uint32_t pointFeatureDims,
-                                            uint32_t mlpInputDims,
-                                            int count) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx >= count) {
-        return;
-    }
-
-    int mlpBase = idx * mlpInputDims;
-    int encBase = idx * pointCount * pointEncOutDims;
-    uint32_t offset = 0;
-    for (uint32_t p = 0; p < pointCount; ++p) {
-        int pointBase = encBase + p * pointEncOutDims;
-        for (uint32_t d = 0; d < pointEncOutDims; ++d) {
-            mlpInput[mlpBase + offset] = __half2float(encOutput[pointBase + d]);
-            ++offset;
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Append direction encoding outputs after the point features in the MLP buffer.
-// ---------------------------------------------------------------------------
-__global__ void appendDirectionEncodingsKernel(const __half* dirEncOutput,
-                                               uint32_t dirEncOutDims,
-                                               float* mlpInput,
-                                               uint32_t pointFeatureDims,
-                                               uint32_t mlpInputDims,
-                                               int count) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx >= count) {
-        return;
-    }
-
-    int mlpBase = idx * mlpInputDims + pointFeatureDims;
-    int dirBase = idx * dirEncOutDims;
-    for (uint32_t d = 0; d < dirEncOutDims; ++d) {
-        mlpInput[mlpBase + d] = __half2float(dirEncOutput[dirBase + d]);
-    }
-}
-
 
 // ---------------------------------------------------------------------------
 // Lambert shading (no bounces).
@@ -1927,11 +1884,6 @@ __global__ void lambertKernel(uchar4* output,
 // ---------------------------------------------------------------------------
 // Utility functions.
 // ---------------------------------------------------------------------------
-size_t precisionBytes(tcnn::cpp::Precision precision) {
-    (void)precision;
-    return sizeof(uint16_t);
-}
-
 size_t roundUp(size_t value, size_t granularity) {
     if (granularity == 0) {
         return value;
@@ -1955,35 +1907,6 @@ size_t randomSeed() {
     return seed;
 }
 
-// Helper: allocate and initialize parameters for a module.
-void* allocAndInitParams(tcnn::cpp::Module* module, size_t* outBytes) {
-    size_t nParams = module->n_params();
-    size_t bytes = nParams * precisionBytes(module->param_precision());
-    *outBytes = bytes;
-    if (bytes == 0) {
-        return nullptr;
-    }
-
-    void* deviceParams = nullptr;
-    checkCuda(cudaMalloc(&deviceParams, bytes), "cudaMalloc module params");
-
-    float* paramsFull = nullptr;
-    size_t fullBytes = nParams * sizeof(float);
-    checkCuda(cudaMalloc(&paramsFull, fullBytes), "cudaMalloc module params full");
-
-    size_t seed = randomSeed();
-    module->initialize_params(seed, paramsFull, 1.0f);
-
-    const uint32_t count = static_cast<uint32_t>(nParams);
-    const int blockSize = 256;
-    int gridSize = static_cast<int>((count + blockSize - 1) / blockSize);
-    tcnn::cast<__half><<<gridSize, blockSize>>>(count, paramsFull, static_cast<__half*>(deviceParams));
-    checkCuda(cudaGetLastError(), "module params cast");
-    checkCuda(cudaFree(paramsFull), "cudaFree module params full");
-
-    return deviceParams;
-}
-
 }  // namespace
 
 // ===========================================================================
@@ -1994,91 +1917,77 @@ RendererNeural::RendererNeural(Scene& scene, const NeuralNetworkConfig* nnConfig
         : scene_(&scene),
           lightDir_(normalize(Vec3(1.0f, 1.5f, -1.0f))),
           useMidpointEncoding_(nnConfig ? nnConfig->use_midpoint_encoding : false) {
-    if (!tcnn::cpp::has_networks()) {
-        std::fprintf(stderr, "tiny-cuda-nn was built without network support.\n");
-        return;
-    }
-
     int log2HashmapSize = 14;
     if (nnConfig != nullptr) {
         log2HashmapSize = nnConfig->log2_hashmap_size;
     }
 
-    // Point encoding: HashGrid matching Python config.
-    tcnn::cpp::json pointEncConfig = {
-            {"otype", "HashGrid"},
-            {"n_levels", 8},
-            {"n_features_per_level", 4},
-            {"log2_hashmap_size", log2HashmapSize},
-            {"base_resolution", 16},
-            {"per_level_scale", 2},
-            {"fixed_point_pos", false},
+    pointCount_ = useMidpointEncoding_ ? 3u : 2u;
+    // Raw input: [entry.xyz | exit.xyz | [mid.xyz] | dir.xyz]
+    inputDims_ = pointCount_ * 3u + 3u;
+
+    // Each of the three spatial encoders handles one 3D point.
+    tcnn::json hashgridConfig = {
+        {"otype", "HashGrid"},
+        {"n_dims_to_encode", 3},
+        {"n_levels", 8},
+        {"n_features_per_level", 4},
+        {"log2_hashmap_size", log2HashmapSize},
+        {"base_resolution", 16},
+        {"per_level_scale", 2.0f},
+        {"fixed_point_pos", false},
     };
 
-    // Direction encoding: SphericalHarmonics matching Python config.
-    tcnn::cpp::json dirEncConfig = {
-            {"otype", "SphericalHarmonics"},
-            {"degree", 4},
+    // SphericalHarmonics has no learnable parameters.
+    tcnn::json dirEncConfig = {
+        {"otype", "SphericalHarmonics"},
+        {"n_dims_to_encode", 3},
+        {"degree", 4},
     };
 
-    // MLP network matching Python config.
-    tcnn::cpp::json mlpConfig = {
-            {"otype", "FullyFusedMLP"},
-            {"activation", "LeakyReLU"},
-            {"output_activation", "None"},
-            {"n_neurons", 128},
-            {"n_hidden_layers", 4},
+    // Composite: consume dims sequentially — entry | exit | [mid] | dir.
+    tcnn::json nestedEncodings = tcnn::json::array();
+    nestedEncodings.push_back(hashgridConfig);   // dims 0–2: entry
+    nestedEncodings.push_back(hashgridConfig);   // dims 3–5: exit
+    if (useMidpointEncoding_) {
+        nestedEncodings.push_back(hashgridConfig);  // dims 6–8: midpoint
+    }
+    nestedEncodings.push_back(dirEncConfig);     // dims (pointCount*3) – (pointCount*3+2): direction
+
+    tcnn::json encodingConfig = {
+        {"otype", "Composite"},
+        {"nested", nestedEncodings},
     };
 
-    // Create point encoding (3D input).
-    pointEncoding_ = tcnn::cpp::create_encoding(3, pointEncConfig, tcnn::cpp::Precision::Fp16);
-    if (!pointEncoding_) {
-        std::fprintf(stderr, "Failed to create point encoding.\n");
-        return;
-    }
-    pointEncOutDims_ = pointEncoding_->n_output_dims();
+    tcnn::json mlpConfig = {
+        {"otype", "FullyFusedMLP"},
+        {"activation", "LeakyReLU"},
+        {"output_activation", "None"},
+        {"n_neurons", 128},
+        {"n_hidden_layers", 4},
+    };
 
-    // Create direction encoding (3D input).
-    dirEncoding_ = tcnn::cpp::create_encoding(3, dirEncConfig, tcnn::cpp::Precision::Fp16);
-    if (!dirEncoding_) {
-        std::fprintf(stderr, "Failed to create direction encoding.\n");
-        delete pointEncoding_;
-        pointEncoding_ = nullptr;
-        return;
-    }
-    dirEncOutDims_ = dirEncoding_->n_output_dims();
+    network_ = std::make_shared<tcnn::NetworkWithInputEncoding<__half>>(
+        inputDims_, 5u, encodingConfig, mlpConfig);
 
-    uint32_t pointEncCount = useMidpointEncoding_ ? 3u : 2u;
-    mlpInputDims_ = pointEncOutDims_ * pointEncCount + dirEncOutDims_;
-    mlpOutputDims_ = 5;
+    mlpOutputDims_ = network_->padded_output_width();
+    mlpOutputElemSize_ = sizeof(__half);
 
-    // Create MLP network.
-    mlpNetwork_ = tcnn::cpp::create_network(mlpInputDims_, mlpOutputDims_, mlpConfig);
-    if (!mlpNetwork_) {
-        std::fprintf(stderr, "Failed to create MLP network.\n");
-        delete dirEncoding_;
-        dirEncoding_ = nullptr;
-        delete pointEncoding_;
-        pointEncoding_ = nullptr;
-        return;
-    }
+    // Allocate a single contiguous FP16 parameter block.
+    // NetworkWithInputEncoding::set_params_impl layout: [network (MLP) | encoding (composite)].
+    size_t nParams = network_->n_params();
+    networkParamsBytes_ = nParams * sizeof(__half);
+    checkCuda(cudaMalloc(&networkParams_, networkParamsBytes_), "cudaMalloc networkParams");
 
-    // n_output_dims() returns padded_output_width (e.g. 16 for 5 requested outputs).
-    // We must use this for buffer allocation and output stride.
-    mlpOutputDims_ = mlpNetwork_->n_output_dims();
-    mlpOutputElemSize_ = precisionBytes(mlpNetwork_->output_precision());
+    // Zero-initialise; weights are loaded from file before use.
+    checkCuda(cudaMemset(networkParams_, 0, networkParamsBytes_), "cudaMemset networkParams");
 
-    std::printf("Neural architecture: point_enc=%u, dir_enc=%u, mlp_input=%u, mlp_output=%u (requested 5)\n",
-                pointEncOutDims_, dirEncOutDims_, mlpInputDims_, mlpOutputDims_);
+    network_->set_params(static_cast<__half*>(networkParams_),
+                         static_cast<__half*>(networkParams_),
+                         nullptr);
 
-    // Allocate and initialize parameters for each module.
-    pointEncParams_ = allocAndInitParams(pointEncoding_, &pointEncParamsBytes_);
-    dirEncParams_ = allocAndInitParams(dirEncoding_, &dirEncParamsBytes_);
-    mlpParams_ = allocAndInitParams(mlpNetwork_, &mlpParamsBytes_);
-
-    std::printf("Params: point_enc=%zu bytes, dir_enc=%zu bytes, mlp=%zu bytes, total=%zu bytes\n",
-                pointEncParamsBytes_, dirEncParamsBytes_, mlpParamsBytes_,
-                pointEncParamsBytes_ + dirEncParamsBytes_ + mlpParamsBytes_);
+    std::printf("Neural architecture: input_dims=%u, mlp_output=%u (requested 5), params=%zu bytes\n",
+                inputDims_, mlpOutputDims_, networkParamsBytes_);
 }
 
 RendererNeural::~RendererNeural() {
@@ -2103,8 +2012,7 @@ void RendererNeural::setCameraBasis(const RenderBasis& basis) {
 }
 
 bool RendererNeural::loadWeightsFromFile(const std::string& path) {
-    size_t totalBytes = pointEncParamsBytes_ + dirEncParamsBytes_ + mlpParamsBytes_;
-    if (!pointEncoding_ || !mlpNetwork_ || totalBytes == 0) {
+    if (!network_ || networkParamsBytes_ == 0) {
         std::fprintf(stderr, "Neural network not initialized; cannot load weights.\n");
         return false;
     }
@@ -2115,49 +2023,50 @@ bool RendererNeural::loadWeightsFromFile(const std::string& path) {
         return false;
     }
 
+    // Supported file formats (FP16):
+    //   New: [mlp_params | hg_params]              — single shared HashGrid, tiled to all slots.
+    //   Old: [mlp_params | hg0 | hg1 | ... | hgN]  — one block per point; hg0 used for all.
+    size_t encNParams  = network_->encoding()->n_params();  // pointCount_ HashGrids total
+    size_t mlpNParams  = network_->n_params() - encNParams;
+    size_t hgNParams   = encNParams / pointCount_;
+    size_t newFmtBytes = (mlpNParams + hgNParams) * sizeof(__half);
+    size_t oldFmtBytes = (mlpNParams + encNParams) * sizeof(__half);
+
     std::streamsize size = file.tellg();
     if (size <= 0) {
         std::fprintf(stderr, "Weights file is empty: %s\n", path.c_str());
         return false;
     }
-    if (static_cast<size_t>(size) != totalBytes) {
+    auto fileSize = static_cast<size_t>(size);
+    if (fileSize != newFmtBytes && fileSize != oldFmtBytes) {
         std::fprintf(stderr,
-                     "Weights size mismatch (got %lld bytes, expected %zu = %zu + %zu + %zu).\n",
-                     static_cast<long long>(size),
-                     totalBytes,
-                     pointEncParamsBytes_,
-                     dirEncParamsBytes_,
-                     mlpParamsBytes_);
+                     "Weights size mismatch (got %zu bytes, expected %zu (new) or %zu (old)).\n"
+                     "New format: [mlp | hg]  Old format: [mlp | hg0 | hg1 | ...]\n",
+                     fileSize, newFmtBytes, oldFmtBytes);
         return false;
     }
 
-    std::vector<char> buffer(static_cast<size_t>(size));
+    std::vector<char> buffer(fileSize);
     file.seekg(0, std::ios::beg);
-    if (!file.read(buffer.data(), size)) {
+    if (!file.read(buffer.data(), static_cast<std::streamsize>(fileSize))) {
         std::fprintf(stderr, "Failed to read weights file: %s\n", path.c_str());
         return false;
     }
 
-    // Layout: [point_enc_params | dir_enc_params | mlp_params]
-    size_t offset = 0;
-    if (pointEncParamsBytes_ > 0 && pointEncParams_) {
-        checkCuda(cudaMemcpy(pointEncParams_, buffer.data() + offset,
-                             pointEncParamsBytes_, cudaMemcpyHostToDevice),
-                  "cudaMemcpy point enc params");
-        offset += pointEncParamsBytes_;
-    }
-    if (dirEncParamsBytes_ > 0 && dirEncParams_) {
-        checkCuda(cudaMemcpy(dirEncParams_, buffer.data() + offset,
-                             dirEncParamsBytes_, cudaMemcpyHostToDevice),
-                  "cudaMemcpy dir enc params");
-        offset += dirEncParamsBytes_;
-    }
-    if (mlpParamsBytes_ > 0 && mlpParams_) {
-        checkCuda(cudaMemcpy(mlpParams_, buffer.data() + offset,
-                             mlpParamsBytes_, cudaMemcpyHostToDevice),
-                  "cudaMemcpy mlp params");
+    // Copy MLP params, then tile the first (or only) HashGrid block to all pointCount_ slots.
+    auto* dst       = static_cast<__half*>(networkParams_);
+    const auto* src = reinterpret_cast<const __half*>(buffer.data());
+    checkCuda(cudaMemcpy(dst, src, mlpNParams * sizeof(__half), cudaMemcpyHostToDevice),
+              "cudaMemcpy mlp params");
+    for (uint32_t i = 0; i < pointCount_; ++i) {
+        checkCuda(cudaMemcpy(dst + mlpNParams + i * hgNParams,
+                             src + mlpNParams,
+                             hgNParams * sizeof(__half),
+                             cudaMemcpyHostToDevice),
+                  "cudaMemcpy hg params tile");
     }
 
+    network_->set_params(dst, dst, nullptr);
     return true;
 }
 
@@ -2245,7 +2154,7 @@ void RendererNeural::traceNeuralSegmentsForRays(bool useCameraRays,
 
     for (int iter = 0; iter < kMaxSegmentIterations && activeCount > 0; ++iter) {
         size_t activeCountSize = static_cast<size_t>(activeCount);
-        size_t granularity = static_cast<size_t>(tcnn::cpp::batch_size_granularity());
+        size_t granularity = static_cast<size_t>(tcnn::batch_size_granularity);
         size_t paddedActiveCount = roundUp(activeCountSize, granularity);
 
         const int buildBlock = 256;
@@ -2265,7 +2174,8 @@ void RendererNeural::traceNeuralSegmentsForRays(bool useCameraRays,
                 innerHitFlags_);
         checkCuda(cudaGetLastError(), "traceSegmentExitsKernel launch");
 
-        int pointCount = useMidpointEncoding_ ? 3 : 2;
+        uint32_t rayBatchSize = static_cast<uint32_t>(paddedActiveCount);
+
         buildSegmentNeuralInputsKernel<<<buildGrid, buildBlock>>>(
                 currentEntryPos_,
                 segmentExitPos_,
@@ -2274,80 +2184,22 @@ void RendererNeural::traceNeuralSegmentsForRays(bool useCameraRays,
                 activeCount,
                 outerMin,
                 outerInvExtent,
-                compactedPointInputs_,
-                compactedDirs_,
-                pointCount);
+                networkInputs_,
+                static_cast<int>(pointCount_),
+                static_cast<int>(inputDims_));
         checkCuda(cudaGetLastError(), "buildSegmentNeuralInputsKernel launch");
 
         if (paddedActiveCount > activeCountSize) {
             size_t tail = paddedActiveCount - activeCountSize;
-            size_t pointInputStride = pointCount * 3;
-            checkCuda(cudaMemset(compactedPointInputs_ + activeCountSize * pointInputStride, 0,
-                                 tail * pointInputStride * sizeof(float)),
-                      "cudaMemset point inputs tail");
-            checkCuda(cudaMemset(compactedDirs_ + activeCountSize * 3, 0, tail * 3 * sizeof(float)),
-                      "cudaMemset dirs tail");
+            checkCuda(cudaMemset(networkInputs_ + activeCountSize * inputDims_, 0,
+                                 tail * inputDims_ * sizeof(float)),
+                      "cudaMemset network inputs tail");
         }
 
-        uint32_t pointBatchSize = static_cast<uint32_t>(paddedActiveCount * pointCount);
-        uint32_t rayBatchSize = static_cast<uint32_t>(paddedActiveCount);
-
-        {
-            tcnn::cpp::Context ctx = pointEncoding_->forward(
-                0, pointBatchSize,
-                compactedPointInputs_,
-                pointEncOutput_,
-                pointEncParams_,
-                false);
-            (void)ctx;
-        }
-
-        uint32_t pointFeatureDims = pointEncOutDims_ * pointCount;
-        scatterPointEncodingsKernel<<<buildGrid, buildBlock>>>(
-                static_cast<const __half*>(pointEncOutput_),
-                pointEncOutDims_,
-                static_cast<uint32_t>(pointCount),
-                mlpInput_,
-                pointFeatureDims,
-                mlpInputDims_,
-                activeCount);
-        checkCuda(cudaGetLastError(), "scatterPointEncodingsKernel launch");
-
-        {
-            tcnn::cpp::Context ctx = dirEncoding_->forward(
-                0, rayBatchSize,
-                compactedDirs_,
-                dirEncOutput_,
-                dirEncParams_,
-                false);
-            (void)ctx;
-        }
-
-        appendDirectionEncodingsKernel<<<buildGrid, buildBlock>>>(
-                static_cast<const __half*>(dirEncOutput_),
-                dirEncOutDims_,
-                mlpInput_,
-                pointFeatureDims,
-                mlpInputDims_,
-                activeCount);
-        checkCuda(cudaGetLastError(), "appendDirectionEncodingsKernel launch");
-
-        if (paddedActiveCount > activeCountSize) {
-            size_t tail = paddedActiveCount - activeCountSize;
-            checkCuda(cudaMemset(mlpInput_ + activeCountSize * mlpInputDims_, 0,
-                                 tail * mlpInputDims_ * sizeof(float)),
-                      "cudaMemset mlp input tail");
-        }
-
-        {
-            tcnn::cpp::Context ctx = mlpNetwork_->forward(
-                0, rayBatchSize,
-                mlpInput_,
-                outputs_,
-                mlpParams_,
-                false);
-            (void)ctx;
-        }
+        // Single fused encoding + MLP inference; encoding runs in FP16 throughout.
+        tcnn::GPUMatrix<float> inputMatrix(networkInputs_, inputDims_, rayBatchSize);
+        tcnn::GPUMatrix<__half> outputMatrix(static_cast<__half*>(outputs_), mlpOutputDims_, rayBatchSize);
+        network_->inference_mixed_precision(/*stream=*/nullptr, inputMatrix, outputMatrix);
 
         applySegmentNeuralOutputKernel<<<buildGrid, buildBlock>>>(
                 static_cast<const __half*>(outputs_),
@@ -2447,8 +2299,8 @@ void RendererNeural::render(const Vec3& camPos, std::vector<uchar4>& hostPixels)
     }
     size_t elementCount = pixelCount * static_cast<size_t>(samplesPerPixel);
     size_t paddedCount = elementCount;
-    if (mlpNetwork_) {
-        size_t granularity = static_cast<size_t>(tcnn::cpp::batch_size_granularity());
+    if (network_) {
+        size_t granularity = static_cast<size_t>(tcnn::batch_size_granularity);
         paddedCount = roundUp(elementCount, granularity);
     }
     if (!ensureNetworkBuffers(paddedCount)) {
@@ -2546,7 +2398,7 @@ void RendererNeural::render(const Vec3& camPos, std::vector<uchar4>& hostPixels)
     dim3 block(8, 8);
     dim3 grid((width_ + block.x - 1) / block.x, (height_ + block.y - 1) / block.y);
 
-    bool neuralReady = useNeuralQuery_ && pointEncoding_ && mlpNetwork_ &&
+    bool neuralReady = useNeuralQuery_ && network_ &&
                        outerShell.numTriangles() > 0;
     if (neuralReady) {
         traceNeuralSegmentsForRays(
@@ -2869,11 +2721,7 @@ void RendererNeural::release() {
     };
     freePtr(devicePixels_);
     freePtr(accum_);
-    freePtr(compactedPointInputs_);
-    freePtr(compactedDirs_);
-    freePtr(pointEncOutput_);
-    freePtr(dirEncOutput_);
-    freePtr(mlpInput_);
+    freePtr(networkInputs_);
     freePtr(hitIndices_);
     freePtr(hitCount_);
     freePtr(outerHitPositions_);
@@ -2922,47 +2770,29 @@ void RendererNeural::release() {
     accumPixels_ = 0;
     accumSampleCount_ = 0;
     hasLastCamera_ = false;
-    pointEncPointCount_ = 0;
 }
 
 void RendererNeural::releaseNetwork() {
-    auto freePtr = [](auto*& ptr) {
-        if (ptr) {
-            cudaFree(ptr);
-            ptr = nullptr;
-        }
-    };
-    freePtr(pointEncParams_);
-    freePtr(dirEncParams_);
-    freePtr(mlpParams_);
-    delete pointEncoding_;
-    pointEncoding_ = nullptr;
-    delete dirEncoding_;
-    dirEncoding_ = nullptr;
-    delete mlpNetwork_;
-    mlpNetwork_ = nullptr;
-    pointEncParamsBytes_ = 0;
-    dirEncParamsBytes_ = 0;
-    mlpParamsBytes_ = 0;
-    pointEncOutDims_ = 0;
-    dirEncOutDims_ = 0;
-    mlpInputDims_ = 0;
+    if (networkParams_) {
+        cudaFree(networkParams_);
+        networkParams_ = nullptr;
+    }
+    network_.reset();
+    networkParamsBytes_ = 0;
+    inputDims_ = 0;
     mlpOutputDims_ = 0;
     mlpOutputElemSize_ = 0;
-    pointEncPointCount_ = 0;
 }
 
 bool RendererNeural::ensureNetworkBuffers(size_t elementCount) {
     if (elementCount == 0) {
         return false;
     }
-    uint32_t pointCount = useMidpointEncoding_ ? 3u : 2u;
     if (elementCount <= bufferElements_ &&
             hitPositions_ && hitNormals_ && hitColors_ && hitMaterialParams_ && hitFlags_ && hitDistances_ &&
             additionalHitPositions_ && additionalHitNormals_ && additionalHitColors_ && additionalHitMaterialParams_ && additionalHitFlags_ &&
             outerHitPositions_ && innerHitPositions_ && rayDirections_ && outerHitFlags_ &&
-            compactedPointInputs_ && compactedDirs_ &&
-            pointEncPointCount_ == pointCount &&
+            networkInputs_ &&
             hitIndices_ && hitCount_ &&
             bouncePositions_ && bounceNormals_ && bounceDirs_ && bounceColors_ && bounceMaterialParams_ && bounceHitFlags_ &&
             bounce2Positions_ && bounce2Normals_ && bounce2Dirs_ && bounce2Colors_ && bounce2HitFlags_ &&
@@ -2980,11 +2810,7 @@ bool RendererNeural::ensureNetworkBuffers(size_t elementCount) {
             ptr = nullptr;
         }
     };
-    freePtr(compactedPointInputs_);
-    freePtr(compactedDirs_);
-    freePtr(pointEncOutput_);
-    freePtr(dirEncOutput_);
-    freePtr(mlpInput_);
+    freePtr(networkInputs_);
     freePtr(hitIndices_);
     freePtr(hitCount_);
     freePtr(outerHitPositions_);
@@ -3030,8 +2856,6 @@ bool RendererNeural::ensureNetworkBuffers(size_t elementCount) {
     freePtr(innerHitFlags_);
     freePtr(segmentExitPos_);
 
-    pointEncPointCount_ = 0;
-
     size_t vec3Bytes = elementCount * 3 * sizeof(float);
     size_t intBytes = elementCount * sizeof(int);
 
@@ -3041,27 +2865,9 @@ bool RendererNeural::ensureNetworkBuffers(size_t elementCount) {
     checkCuda(cudaMalloc(&rayDirections_, vec3Bytes), "cudaMalloc rayDirections");
     checkCuda(cudaMalloc(&outerHitFlags_, intBytes), "cudaMalloc outerHitFlags");
 
-    // Encoding input buffers (entry/exit/midpoint per element).
-    size_t pointInputStride = pointCount * 3;
-    size_t pointInputBytes = elementCount * pointInputStride * sizeof(float);
-    checkCuda(cudaMalloc(&compactedPointInputs_, pointInputBytes), "cudaMalloc compactedPointInputs");
-    checkCuda(cudaMalloc(&compactedDirs_, vec3Bytes), "cudaMalloc compactedDirs");
-
-    // Encoding output buffers (FP16) for all concatenated points.
-    if (pointEncOutDims_ > 0) {
-        size_t encOutBytes = elementCount * pointCount * pointEncOutDims_ * sizeof(__half);
-        checkCuda(cudaMalloc(&pointEncOutput_, encOutBytes), "cudaMalloc pointEncOutput");
-    }
-    if (dirEncOutDims_ > 0) {
-        size_t dirEncOutBytes = elementCount * dirEncOutDims_ * sizeof(__half);
-        checkCuda(cudaMalloc(&dirEncOutput_, dirEncOutBytes), "cudaMalloc dirEncOutput");
-    }
-
-    // MLP input (FP32 concatenated encodings).
-    if (mlpInputDims_ > 0) {
-        checkCuda(cudaMalloc(&mlpInput_, elementCount * mlpInputDims_ * sizeof(float)),
-                  "cudaMalloc mlpInput");
-    }
+    // Raw network inputs: [entry.xyz | exit.xyz | [mid.xyz] | dir.xyz] per element.
+    checkCuda(cudaMalloc(&networkInputs_, elementCount * inputDims_ * sizeof(float)),
+              "cudaMalloc networkInputs");
 
     // Compaction buffers.
     checkCuda(cudaMalloc(&hitIndices_, intBytes), "cudaMalloc hitIndices");
@@ -3122,8 +2928,6 @@ bool RendererNeural::ensureNetworkBuffers(size_t elementCount) {
     checkCuda(cudaMalloc(&innerEnterT_, elementCount * sizeof(float)), "cudaMalloc innerEnterT");
     checkCuda(cudaMalloc(&innerHitFlags_, intBytes), "cudaMalloc innerHitFlags");
     checkCuda(cudaMalloc(&segmentExitPos_, vec3Bytes), "cudaMalloc segmentExitPos");
-
-    pointEncPointCount_ = pointCount;
 
     bufferElements_ = elementCount;
     return true;

@@ -23,7 +23,8 @@ namespace {
 const int kWidth = 1920;
 const int kHeight = 1080;
 const int kTotalSamples = 2048;
-const int kBatchSize = 4;  // Render in batches to avoid timeout.
+const int kBatchSizeGT = 8;
+const int kBatchSizeNeural = 8;
 const int kBounceCount = 3;
 
 const char* kOutputFolder = "comparison_output";
@@ -326,7 +327,7 @@ int main(int argc, char** argv) {
 
         int remainingSamples = kTotalSamples;
         while (remainingSamples > 0) {
-            int batchSamples = std::min(remainingSamples, kBatchSize);
+            int batchSamples = std::min(remainingSamples, kBatchSizeGT);
             renderer.setSamplesPerPixel(batchSamples);
 
             renderer.render(camera.position, groundTruthPixels);
@@ -351,7 +352,7 @@ int main(int argc, char** argv) {
 
         int remainingSamples = kTotalSamples;
         while (remainingSamples > 0) {
-            int batchSamples = std::min(remainingSamples, kBatchSize);
+            int batchSamples = std::min(remainingSamples, kBatchSizeNeural);
             renderer.setSamplesPerPixel(batchSamples);
 
             renderer.render(camera.position, neuralPixels);
