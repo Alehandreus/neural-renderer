@@ -106,7 +106,7 @@ __device__ inline void orthoBasis(Vec3& tangent, Vec3& bitangent, const Vec3& no
 // Texture Sampling Helpers
 // =============================================================================
 
-__device__ inline Vec3 sampleTextureRawDev(const TextureDeviceView& tex,
+__device__ __forceinline__ Vec3 sampleTextureRawDev(const TextureDeviceView& tex,
                                            float u, float v,
                                            bool nearestFilter)
 {
@@ -241,7 +241,7 @@ __device__ inline HitInfo computeHitData(
 // Sample Material Parameter
 // =============================================================================
 
-__device__ inline float sampleMaterialParam(
+__device__ __forceinline__ float sampleMaterialParam(
     const MaterialParam& param,
     Vec2 uv,
     const MeshDeviceView& mesh)
@@ -265,7 +265,7 @@ __device__ inline float sampleMaterialParam(
     return sampled.x;
 }
 
-__device__ inline Vec3 sampleMaterialParamVec3(
+__device__ __forceinline__ Vec3 sampleMaterialParamVec3(
     const MaterialParamVec3& param,
     Vec2 uv,
     const MeshDeviceView& mesh,
@@ -278,13 +278,14 @@ __device__ inline Vec3 sampleMaterialParamVec3(
         return param.value;
     }
 
-    Vec3 raw = sampleTextureRawDev(mesh.textures[param.textureId], uv.x, uv.y, mesh.textureNearest != 0);
+    const TextureDeviceView& tex = mesh.textures[param.textureId];
+    Vec3 raw = sampleTextureRawDev(tex, uv.x, uv.y, mesh.textureNearest != 0);
     if (raw.x < 0.0f) {
         return param.value;
     }
 
     // Check if texture is sRGB
-    if (applySrgb && mesh.textures[param.textureId].srgb) {
+    if (applySrgb && tex.srgb) {
         return srgbToLinearDev(raw);
     }
     return raw;
@@ -312,7 +313,7 @@ struct ResolvedMaterial {
     float specular_transmission;
 };
 
-__device__ inline ResolvedMaterial resolveMaterial(
+__device__ __forceinline__ ResolvedMaterial resolveMaterial(
     const Material& mat,
     Vec2 uv,
     const MeshDeviceView& mesh)

@@ -1282,6 +1282,48 @@ __global__ void traceAdditionalMeshPrimaryRaysKernel(
 }
 
 // ---------------------------------------------------------------------------
+// Resolve colors for hits written by OptiX raygen programs.
+// OptiX packs [uv.x, uv.y, reinterpret<float>(materialId)] into hitColors.
+// This regular CUDA kernel reads those and writes the actual resolved color.
+// ---------------------------------------------------------------------------
+__global__ void resolveHitColorsKernel(
+        float* hitColors,
+        float* hitMaterialParams,
+        const int* hitFlags,
+        RenderParams params,
+        MeshDeviceView mesh) {
+    int x = blockIdx.x * blockDim.x + threadIdx.x;
+    int y = blockIdx.y * blockDim.y + threadIdx.y;
+    if (x >= params.width || y >= params.height) return;
+
+    int pixelIdx = y * params.width + x;
+    for (int s = 0; s < params.samplesPerPixel; ++s) {
+        int sampleIdx = pixelIdx + s * params.pixelCount;
+        int base = sampleIdx * 3;
+        if (!hitFlags[sampleIdx]) continue;
+
+        float uvx = hitColors[base + 0];
+        float uvy = hitColors[base + 1];
+        int materialId = __float_as_int(hitColors[base + 2]);
+        Vec2 uv(uvx, uvy);
+
+        const Material* mat = &params.material;
+        if (materialId >= 0 && materialId < mesh.numMaterials && mesh.materials) {
+            mat = &mesh.materials[materialId];
+        }
+        ResolvedMaterial resolved = resolveMaterial(*mat, uv, mesh);
+        hitColors[base + 0] = resolved.base_color.x;
+        hitColors[base + 1] = resolved.base_color.y;
+        hitColors[base + 2] = resolved.base_color.z;
+        if (hitMaterialParams) {
+            hitMaterialParams[base + 0] = resolved.metallic;
+            hitMaterialParams[base + 1] = resolved.roughness;
+            hitMaterialParams[base + 2] = resolved.specular;
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Trace additional mesh for arbitrary rays (hybrid rendering).
 // ---------------------------------------------------------------------------
 __global__ void traceAdditionalMeshRaysKernel(
@@ -2304,8 +2346,8 @@ void RendererNeural::render(const Vec3& camPos) {
         MeshDeviceView additionalView = scene_->additionalMesh().deviceView();
 
 #ifdef USE_OPTIX
-        // if (useHardwareRT_ && optixState_ && optixState_->gasAdditional.handle) {
-        if (false) {
+        if (useHardwareRT_ && optixState_ && optixState_->gasAdditional.handle) {
+        // if (false) {
             OptixLaunchParams lp = {};
             lp.gas               = optixState_->gasAdditional.handle;
             lp.renderParams      = params;
@@ -2324,6 +2366,10 @@ void RendererNeural::render(const Vec3& camPos) {
                         static_cast<unsigned int>(params.width),
                         static_cast<unsigned int>(params.height), 1);
             checkCuda(cudaDeviceSynchronize(), "optixLaunch additionalPrimary");
+            resolveHitColorsKernel<<<grid, block>>>(
+                    additionalHitColors_, additionalHitMaterialParams_, additionalHitFlags_, params, additionalView);
+            checkCuda(cudaGetLastError(), "resolveHitColorsKernel additionalPrimary launch");
+            checkCuda(cudaDeviceSynchronize(), "resolveHitColorsKernel additionalPrimary sync");
         } else
 #endif
         {
@@ -2429,8 +2475,8 @@ void RendererNeural::render(const Vec3& camPos) {
                         bounceDistances_);
 
 #ifdef USE_OPTIX
-                // if (useHardwareRT_ && optixState_ && optixState_->gasAdditional.handle) {
-                if (false) {
+                if (useHardwareRT_ && optixState_ && optixState_->gasAdditional.handle) {
+                // if (false) {
                     OptixLaunchParams lp = {};
                     lp.gas               = optixState_->gasAdditional.handle;
                     lp.renderParams      = params;
@@ -2452,6 +2498,10 @@ void RendererNeural::render(const Vec3& camPos) {
                                 static_cast<unsigned int>(params.width),
                                 static_cast<unsigned int>(params.height), 1);
                     checkCuda(cudaDeviceSynchronize(), "optixLaunch additionalBounce");
+                    resolveHitColorsKernel<<<grid, block>>>(
+                            additionalHitColors_, additionalHitMaterialParams_, additionalHitFlags_, params, additionalView);
+                    checkCuda(cudaGetLastError(), "resolveHitColorsKernel additionalBounce launch");
+                    checkCuda(cudaDeviceSynchronize(), "resolveHitColorsKernel additionalBounce sync");
                 } else
 #endif
                 {
@@ -2530,8 +2580,8 @@ void RendererNeural::render(const Vec3& camPos) {
         // --- Ground truth mesh path tracing (wavefront architecture) ---
         // 1. Trace primary rays
 #ifdef USE_OPTIX
-        // if (useHardwareRT_ && optixState_ && optixState_->gasClassic.handle) {
-        if (false) {
+        if (useHardwareRT_ && optixState_ && optixState_->gasClassic.handle) {
+        // if (false) {
             OptixLaunchParams lp = {};
             lp.gas          = optixState_->gasClassic.handle;
             lp.renderParams = params;
@@ -2550,6 +2600,10 @@ void RendererNeural::render(const Vec3& camPos) {
                         static_cast<unsigned int>(params.width),
                         static_cast<unsigned int>(params.height), 1);
             checkCuda(cudaDeviceSynchronize(), "optixLaunch primaryGT");
+            resolveHitColorsKernel<<<grid, block>>>(
+                    hitColors_, hitMaterialParams_, hitFlags_, params, classicView);
+            checkCuda(cudaGetLastError(), "resolveHitColorsKernel launch");
+            checkCuda(cudaDeviceSynchronize(), "resolveHitColorsKernel sync");
         } else
 #endif
         {
@@ -2562,6 +2616,7 @@ void RendererNeural::render(const Vec3& camPos) {
                 params,
                 classicView);
         checkCuda(cudaGetLastError(), "intersectGroundTruthKernel launch");
+        checkCuda(cudaDeviceSynchronize(), "intersectGroundTruthKernel sync");
         }
 
         if (lambertView_) {
@@ -2614,8 +2669,8 @@ void RendererNeural::render(const Vec3& camPos) {
 
                 // Trace bounce rays against GT mesh
 #ifdef USE_OPTIX
-                // if (useHardwareRT_ && optixState_ && optixState_->gasClassic.handle) {
-                if (false) {
+                if (useHardwareRT_ && optixState_ && optixState_->gasClassic.handle) {
+                // if (false) {
                     OptixLaunchParams lp = {};
                     lp.gas         = optixState_->gasClassic.handle;
                     lp.renderParams = params;
@@ -2637,6 +2692,10 @@ void RendererNeural::render(const Vec3& camPos) {
                                 static_cast<unsigned int>(params.width),
                                 static_cast<unsigned int>(params.height), 1);
                     checkCuda(cudaDeviceSynchronize(), "optixLaunch bounceGT");
+                    resolveHitColorsKernel<<<grid, block>>>(
+                            bounceColors_, bounceMaterialParams_, bounceHitFlags_, params, classicView);
+                    checkCuda(cudaGetLastError(), "resolveHitColorsKernel bounceGT launch");
+                    checkCuda(cudaDeviceSynchronize(), "resolveHitColorsKernel bounceGT sync");
                 } else
 #endif
                 {

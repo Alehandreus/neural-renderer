@@ -15,8 +15,10 @@
 // OptixLaunchParams contains Vec3 (user-defined ctor) so it cannot be declared
 // as a __constant__ object directly (CUDA disallows dynamic initialisation of
 // __constant__ variables).  Instead we store raw bytes and reinterpret-cast.
+// __align__(8) ensures 8-byte-aligned constant memory so that pointer-sized
+// fields inside OptixLaunchParams are naturally aligned when read back.
 extern "C" {
-    __constant__ unsigned char launchParamsRaw[sizeof(OptixLaunchParams)];
+    __constant__ __align__(8) unsigned char launchParamsRaw[sizeof(OptixLaunchParams)];
 }
 // Convenience reference — all device code below uses this name unchanged.
 static __device__ __forceinline__ const OptixLaunchParams& launchParamsRef() {
@@ -85,15 +87,17 @@ extern "C" __global__ void __miss__default() {
 // ===========================================================================
 // Raygen helper: write hit result to output buffers
 // ===========================================================================
-__device__ inline void writeHitResult(
+// Pack position, normal, and UV+materialId for later SW resolution.
+// hitColors[0,1] = uv.x, uv.y; hitColors[2] = reinterpret_cast<float>(materialId)
+__device__ __forceinline__ void writeHitResult(
         int sampleIdx,
         const HitInfo& hitInfo,
-        const MeshDeviceView& mesh,
-        const RenderParams& rp,
+        const MeshDeviceView& /*mesh*/,
+        const RenderParams& /*rp*/,
         float* hitPositions,
         float* hitNormals,
         float* hitColors,
-        float* hitMaterialParams,
+        float* /*hitMaterialParams*/,
         int*   hitFlags) {
     int base = sampleIdx * 3;
     hitPositions[base + 0] = hitInfo.position.x;
@@ -102,22 +106,10 @@ __device__ inline void writeHitResult(
     hitNormals[base + 0]   = hitInfo.shadingNormal.x;
     hitNormals[base + 1]   = hitInfo.shadingNormal.y;
     hitNormals[base + 2]   = hitInfo.shadingNormal.z;
-
-    const Material* mat = &rp.material;
-    if (hitInfo.materialId >= 0 && hitInfo.materialId < mesh.numMaterials && mesh.materials) {
-        mat = &mesh.materials[hitInfo.materialId];
-    }
-    ResolvedMaterial resolved = resolveMaterial(*mat, hitInfo.uv, mesh);
-
-    hitColors[base + 0]         = resolved.base_color.x;
-    hitColors[base + 1]         = resolved.base_color.y;
-    hitColors[base + 2]         = resolved.base_color.z;
-    if (hitMaterialParams) {
-        hitMaterialParams[base + 0] = resolved.metallic;
-        hitMaterialParams[base + 1] = resolved.roughness;
-        hitMaterialParams[base + 2] = resolved.specular;
-    }
-    hitFlags[sampleIdx] = 1;
+    hitColors[base + 0]    = hitInfo.uv.x;
+    hitColors[base + 1]    = hitInfo.uv.y;
+    hitColors[base + 2]    = __int_as_float(hitInfo.materialId);
+    hitFlags[sampleIdx]    = 1;
 }
 
 __device__ inline void writeMissResult(

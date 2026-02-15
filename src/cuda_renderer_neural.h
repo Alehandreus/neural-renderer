@@ -38,7 +38,7 @@ class RendererNeural final {
     void setUseNeuralQuery(bool enabled) { useNeuralQuery_ = enabled; }
     bool useNeuralQuery() const { return useNeuralQuery_; }
 
-    void setUseHardwareRT(bool v) { useHardwareRT_ = v; }
+    void setUseHardwareRT(bool v) { if (v != useHardwareRT_) { useHardwareRT_ = v; resetAccum(); } }
     bool useHardwareRT() const { return useHardwareRT_; }
     bool loadWeightsFromFile(const std::string& path);
     // When true, the checkpoint has [hg_params | mlp_params] order instead of [mlp | hg].
