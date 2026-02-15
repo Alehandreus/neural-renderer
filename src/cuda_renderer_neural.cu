@@ -330,7 +330,8 @@ __global__ void sampleBounceDirectionsKernel(const float* hitPositions,
                                              float* bounceDirections,   // Output
                                              float* bouncePdfs,         // Output
                                              float* bounceBRDFs,        // Output (f * cos / pdf)
-                                             float* bounceDistances) {  // Output: pass through neural distances
+                                             float* bounceDistances,         // Output: pass through neural distances
+                                             const float* incomingDirections) { // Input: prev bounce dirs (null on first bounce)
     int x = blockIdx.x * blockDim.x + threadIdx.x;
     int y = blockIdx.y * blockDim.y + threadIdx.y;
     if (x >= params.width || y >= params.height) {
@@ -360,7 +361,6 @@ __global__ void sampleBounceDirectionsKernel(const float* hitPositions,
         }
 
         uint32_t rng = initRng(pixelIdx, params.sampleOffset, s);
-        Ray primaryRay = generatePrimaryRay(x, y, params, rng);
 
         Vec3 hitPos(hitPositions[base + 0], hitPositions[base + 1], hitPositions[base + 2]);
         Vec3 normal(hitNormals[base + 0], hitNormals[base + 1], hitNormals[base + 2]);
@@ -374,15 +374,24 @@ __global__ void sampleBounceDirectionsKernel(const float* hitPositions,
             normal = Vec3(0.0f, 1.0f, 0.0f);
         }
 
+        // Determine incoming ray direction: use stored previous bounce dir, or primary ray on first bounce
+        Vec3 incomingDir;
+        if (incomingDirections) {
+            incomingDir = Vec3(incomingDirections[base + 0], incomingDirections[base + 1], incomingDirections[base + 2]);
+        } else {
+            Ray primaryRay = generatePrimaryRay(x, y, params, rng);
+            incomingDir = primaryRay.direction;
+        }
+
         // Check for back-facing hit
-        if (dot(normal, primaryRay.direction) > 0.0f) {
+        if (dot(normal, incomingDir) > 0.0f) {
             if (pathActive) pathActive[sampleIdx] = 0;
             bouncePdfs[sampleIdx] = 0.0f;
             continue;
         }
 
         // Sample Disney BRDF for bounce direction
-        Vec3 wo = primaryRay.direction * -1.0f;
+        Vec3 wo = incomingDir * -1.0f;
 
         // Build tangent space
         Vec3 tangent, bitangent;
@@ -1204,7 +1213,7 @@ __global__ void applySegmentNeuralOutputKernel(
             // hitMaterialParams[base + 2] = material.specular.value;
             hitMaterialParams[base + 0] = 0.0;
             hitMaterialParams[base + 1] = 0.0;
-            hitMaterialParams[base + 2] = 0.0;
+            hitMaterialParams[base + 2] = 0.4;
         }
 
         hitFlags[sampleIdx] = 1;
@@ -2416,6 +2425,7 @@ void RendererNeural::render(const Vec3& camPos) {
             float* currentHitMaterialParams = hitMaterialParams_;
             int* currentHitFlags = hitFlags_;
             float* currentHitDistances = hitDistances_;
+            float* prevBounceDirections = nullptr;  // null on first bounce → kernel uses primary ray
 
             for (int bounce = 1; bounce <= maxBounces; ++bounce) {
                 // Sample bounce directions (Disney BRDF - shared with GT)
@@ -2432,7 +2442,8 @@ void RendererNeural::render(const Vec3& camPos) {
                         bounceDirections_,
                         bouncePdfs_,
                         bounceBRDFs_,
-                        bounceDistances_);
+                        bounceDistances_,
+                        prevBounceDirections);
                 checkCuda(cudaGetLastError(), "sampleBounceDirectionsKernel launch");
 
                 // Check for early termination before tracing
@@ -2540,6 +2551,13 @@ void RendererNeural::render(const Vec3& camPos) {
                         envView);
                 checkCuda(cudaGetLastError(), "integrateBounceKernel launch");
 
+                // Save bounce directions as incoming directions for next bounce
+                // Copy bounceDirections_ → prevBounceDirections_ so kernel has correct wo next iter
+                checkCuda(cudaMemcpy(prevBounceDirections_, bounceDirections_,
+                                     elementCount * 3 * sizeof(float), cudaMemcpyDeviceToDevice),
+                          "cudaMemcpy prevBounceDirections");
+                prevBounceDirections = prevBounceDirections_;
+
                 // Swap buffers for next bounce
                 currentHitPos = bouncePositions_;
                 currentHitNormals = bounceNormals_;
@@ -2641,6 +2659,7 @@ void RendererNeural::render(const Vec3& camPos) {
             float* currentHitColors = hitColors_;
             float* currentHitMaterialParams = hitMaterialParams_;
             int* currentHitFlags = hitFlags_;
+            float* prevBounceDirections = nullptr;  // null on first bounce → kernel uses primary ray
 
             for (int bounce = 1; bounce <= maxBounces; ++bounce) {
                 // Sample bounce directions (Disney BRDF)
@@ -2657,7 +2676,8 @@ void RendererNeural::render(const Vec3& camPos) {
                         bounceDirections_,
                         bouncePdfs_,
                         bounceBRDFs_,
-                        nullptr);
+                        nullptr,
+                        prevBounceDirections);
                 checkCuda(cudaGetLastError(), "sampleBounceDirectionsKernel launch");
 
                 // Trace bounce rays against GT mesh
@@ -2718,6 +2738,12 @@ void RendererNeural::render(const Vec3& camPos) {
                         params,
                         envView);
                 checkCuda(cudaGetLastError(), "integrateBounceKernel launch");
+
+                // Save bounce directions as incoming directions for next bounce
+                checkCuda(cudaMemcpy(prevBounceDirections_, bounceDirections_,
+                                     elementCount * 3 * sizeof(float), cudaMemcpyDeviceToDevice),
+                          "cudaMemcpy prevBounceDirections GT");
+                prevBounceDirections = prevBounceDirections_;
 
                 // Swap buffers for next bounce
                 currentHitPos = bouncePositions_;
@@ -2780,6 +2806,7 @@ void RendererNeural::release() {
     freePtr(pathActive_);
     freePtr(bounceOrigins_);
     freePtr(bounceDirections_);
+    freePtr(prevBounceDirections_);
     freePtr(bouncePdfs_);
     freePtr(bounceBRDFs_);
     freePtr(bounceDistances_);
@@ -2860,6 +2887,7 @@ bool RendererNeural::ensureNetworkBuffers(size_t elementCount) {
     freePtr(pathActive_);
     freePtr(bounceOrigins_);
     freePtr(bounceDirections_);
+    freePtr(prevBounceDirections_);
     freePtr(bouncePdfs_);
     freePtr(bounceBRDFs_);
     freePtr(bounceDistances_);
@@ -2922,6 +2950,7 @@ bool RendererNeural::ensureNetworkBuffers(size_t elementCount) {
     // Wavefront buffers.
     checkCuda(cudaMalloc(&bounceOrigins_, vec3Bytes), "cudaMalloc bounceOrigins");
     checkCuda(cudaMalloc(&bounceDirections_, vec3Bytes), "cudaMalloc bounceDirections");
+    checkCuda(cudaMalloc(&prevBounceDirections_, vec3Bytes), "cudaMalloc prevBounceDirections");
     checkCuda(cudaMalloc(&bouncePdfs_, elementCount * sizeof(float)), "cudaMalloc bouncePdfs");
     checkCuda(cudaMalloc(&bounceBRDFs_, vec3Bytes), "cudaMalloc bounceBRDFs");
     checkCuda(cudaMalloc(&bounceDistances_, elementCount * sizeof(float)), "cudaMalloc bounceDistances");

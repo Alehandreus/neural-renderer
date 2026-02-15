@@ -22,6 +22,7 @@ namespace {
 
 const int kWidth = 1920;
 const int kHeight = 1080;
+// const int kTotalSamples = 16384;
 const int kTotalSamples = 2048;
 const int kBatchSizeGT = 8;
 const int kBatchSizeNeural = 8;

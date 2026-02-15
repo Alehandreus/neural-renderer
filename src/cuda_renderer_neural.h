@@ -137,7 +137,8 @@ class RendererNeural final {
 
     // Wavefront path tracing buffers.
     float* bounceOrigins_ = nullptr;      // 3 floats per sample (ray origins)
-    float* bounceDirections_ = nullptr;   // 3 floats per sample (ray directions)
+    float* bounceDirections_ = nullptr;     // 3 floats per sample (ray directions)
+    float* prevBounceDirections_ = nullptr; // 3 floats per sample (incoming dir saved for next bounce)
     float* bouncePdfs_ = nullptr;         // 1 float per sample (BRDF PDF)
     float* bounceBRDFs_ = nullptr;        // 3 floats per sample (BRDF weight: f*cos/pdf)
     float* bounceDistances_ = nullptr;    // 1 float per sample (neural predicted distance from previous hit)

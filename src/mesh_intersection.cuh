@@ -285,9 +285,9 @@ __device__ __forceinline__ Vec3 sampleMaterialParamVec3(
     }
 
     // Check if texture is sRGB
-    if (applySrgb && tex.srgb) {
-        return srgbToLinearDev(raw);
-    }
+    // if (applySrgb && tex.srgb) {
+    //     return srgbToLinearDev(raw);
+    // }
     return raw;
 }
 
