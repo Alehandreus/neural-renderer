@@ -1201,20 +1201,26 @@ __global__ void applySegmentNeuralOutputKernel(
             neuralColor.y = saturate(cg);
             neuralColor.z = saturate(cb);
         }
-        hitColors[base + 0] = neuralColor.x;
-        hitColors[base + 1] = neuralColor.y;
-        hitColors[base + 2] = neuralColor.z;
-        // hitColors[base + 0] = 0.8;
-        // hitColors[base + 1] = 0.8;
-        // hitColors[base + 2] = 0.8;
+        // hitColors[base + 0] = neuralColor.x;
+        // hitColors[base + 1] = neuralColor.y;
+        // hitColors[base + 2] = neuralColor.z;
+        hitColors[base + 0] = 0.8;
+        hitColors[base + 1] = 0.8;
+        hitColors[base + 2] = 0.8;
         if (hitMaterialParams) {
             // hitMaterialParams[base + 0] = 0.1;
-            // hitMaterialParams[base + 1] = 0.0;
+            // hitMaterialParams[base + 1] = 0.2;
             // hitMaterialParams[base + 2] = 0.2;
+            
+            // exhibition
+            // hitMaterialParams[base + 0] = 0.0;
+            // hitMaterialParams[base + 1] = 0.2;
+            // hitMaterialParams[base + 2] = 0.4;
 
+            // statuette
             hitMaterialParams[base + 0] = 0.0;
-            hitMaterialParams[base + 1] = 0.0;
-            hitMaterialParams[base + 2] = 0.4;
+            hitMaterialParams[base + 1] = 1.0;
+            hitMaterialParams[base + 2] = 0.0;
 
             // hitMaterialParams[base + 0] = material.metallic.value;
             // hitMaterialParams[base + 1] = material.roughness.value;
