@@ -110,17 +110,6 @@ enum class TraceMode {
     BACKWARD_ONLY,
 };
 
-// ===========================================================================
-// Triangle geometric normal helper
-// ===========================================================================
-
-__device__ inline Vec3 getTriangleNormal(const MeshDeviceView& mesh, int triIdx) {
-    uint3 idx = mesh.indices[triIdx];
-    Vec3 v0 = mesh.vertices[idx.x];
-    Vec3 v1 = mesh.vertices[idx.y];
-    Vec3 v2 = mesh.vertices[idx.z];
-    return normalize(cross(v1 - v0, v2 - v0));
-}
 
 // ===========================================================================
 // BVH traversal — iterative DFS, software path

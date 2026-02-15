@@ -130,17 +130,6 @@ __device__ inline Vec3 sampleEnvironment(EnvironmentDeviceView env, Vec3 dir) {
     return lerp(skyBottom, skyTop, skyT);
 }
 
-__device__ inline Vec3 clampRadiance(Vec3 c, float maxLum) {
-    if (maxLum <= 0.0f) {
-        return c;
-    }
-    float lum = 0.2126f * c.x + 0.7152f * c.y + 0.0722f * c.z;
-    if (lum > maxLum) {
-        float scale = maxLum / lum;
-        return c * scale;
-    }
-    return c;
-}
 
 __device__ inline void buildTangentSpace(Vec3 normal, Vec3* tangent, Vec3* bitangent) {
     // Match NBVH's ortho_basis: pick most perpendicular cardinal axis
@@ -1730,15 +1719,6 @@ void checkCuda(cudaError_t result, const char* context) {
     }
 }
 
-size_t randomSeed() {
-    std::random_device device;
-    size_t seed = static_cast<size_t>(device());
-    if (seed == 0) {
-        seed = 1;
-    }
-    return seed;
-}
-
 }  // namespace
 
 // ===========================================================================
@@ -2776,10 +2756,7 @@ void RendererNeural::release() {
     freePtr(networkInputs_);
     freePtr(hitIndices_);
     freePtr(hitCount_);
-    freePtr(outerHitPositions_);
-    freePtr(innerHitPositions_);
     freePtr(rayDirections_);
-    freePtr(outerHitFlags_);
     freePtr(hitPositions_);
     freePtr(hitNormals_);
     freePtr(hitColors_);
@@ -2798,11 +2775,6 @@ void RendererNeural::release() {
     freePtr(bounceColors_);
     freePtr(bounceMaterialParams_);
     freePtr(bounceHitFlags_);
-    freePtr(bounce2Positions_);
-    freePtr(bounce2Normals_);
-    freePtr(bounce2Dirs_);
-    freePtr(bounce2Colors_);
-    freePtr(bounce2HitFlags_);
     freePtr(pathThroughput_);
     freePtr(pathRadiance_);
     freePtr(pathActive_);
@@ -2843,11 +2815,10 @@ bool RendererNeural::ensureNetworkBuffers(size_t elementCount) {
     if (elementCount <= bufferElements_ &&
             hitPositions_ && hitNormals_ && hitColors_ && hitMaterialParams_ && hitFlags_ && hitDistances_ &&
             additionalHitPositions_ && additionalHitNormals_ && additionalHitColors_ && additionalHitMaterialParams_ && additionalHitFlags_ &&
-            outerHitPositions_ && innerHitPositions_ && rayDirections_ && outerHitFlags_ &&
+            rayDirections_ &&
             networkInputs_ &&
             hitIndices_ && hitCount_ &&
             bouncePositions_ && bounceNormals_ && bounceDirs_ && bounceColors_ && bounceMaterialParams_ && bounceHitFlags_ &&
-            bounce2Positions_ && bounce2Normals_ && bounce2Dirs_ && bounce2Colors_ && bounce2HitFlags_ &&
             pathThroughput_ && pathRadiance_ && pathActive_ &&
             bounceOrigins_ && bounceDirections_ && bouncePdfs_ && bounceBRDFs_ && bounceDistances_ &&
             rayActiveFlags_ && accumT_ && currentEntryPos_ &&
@@ -2865,10 +2836,7 @@ bool RendererNeural::ensureNetworkBuffers(size_t elementCount) {
     freePtr(networkInputs_);
     freePtr(hitIndices_);
     freePtr(hitCount_);
-    freePtr(outerHitPositions_);
-    freePtr(innerHitPositions_);
     freePtr(rayDirections_);
-    freePtr(outerHitFlags_);
     freePtr(hitPositions_);
     freePtr(hitNormals_);
     freePtr(hitColors_);
@@ -2887,11 +2855,6 @@ bool RendererNeural::ensureNetworkBuffers(size_t elementCount) {
     freePtr(bounceColors_);
     freePtr(bounceMaterialParams_);
     freePtr(bounceHitFlags_);
-    freePtr(bounce2Positions_);
-    freePtr(bounce2Normals_);
-    freePtr(bounce2Dirs_);
-    freePtr(bounce2Colors_);
-    freePtr(bounce2HitFlags_);
     freePtr(pathThroughput_);
     freePtr(pathRadiance_);
     freePtr(pathActive_);
@@ -2912,10 +2875,7 @@ bool RendererNeural::ensureNetworkBuffers(size_t elementCount) {
     size_t intBytes = elementCount * sizeof(int);
 
     // Shell tracing buffers.
-    checkCuda(cudaMalloc(&outerHitPositions_, vec3Bytes), "cudaMalloc outerHitPositions");
-    checkCuda(cudaMalloc(&innerHitPositions_, vec3Bytes), "cudaMalloc innerHitPositions");
     checkCuda(cudaMalloc(&rayDirections_, vec3Bytes), "cudaMalloc rayDirections");
-    checkCuda(cudaMalloc(&outerHitFlags_, intBytes), "cudaMalloc outerHitFlags");
 
     // Raw network inputs: [entry.xyz | exit.xyz | [mid.xyz] | dir.xyz] per element.
     checkCuda(cudaMalloc(&networkInputs_, elementCount * inputDims_ * sizeof(float)),
@@ -2953,12 +2913,6 @@ bool RendererNeural::ensureNetworkBuffers(size_t elementCount) {
     checkCuda(cudaMalloc(&bounceMaterialParams_, vec3Bytes), "cudaMalloc bounceMaterialParams");
     checkCuda(cudaMalloc(&bounceDirs_, vec3Bytes), "cudaMalloc bounceDirs");
     checkCuda(cudaMalloc(&bounceHitFlags_, intBytes), "cudaMalloc bounceHitFlags");
-
-    checkCuda(cudaMalloc(&bounce2Positions_, vec3Bytes), "cudaMalloc bounce2Positions");
-    checkCuda(cudaMalloc(&bounce2Normals_, vec3Bytes), "cudaMalloc bounce2Normals");
-    checkCuda(cudaMalloc(&bounce2Colors_, vec3Bytes), "cudaMalloc bounce2Colors");
-    checkCuda(cudaMalloc(&bounce2Dirs_, vec3Bytes), "cudaMalloc bounce2Dirs");
-    checkCuda(cudaMalloc(&bounce2HitFlags_, intBytes), "cudaMalloc bounce2HitFlags");
 
     // Path state.
     checkCuda(cudaMalloc(&pathThroughput_, elementCount * sizeof(Vec3)), "cudaMalloc pathThroughput");

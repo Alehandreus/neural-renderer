@@ -105,10 +105,7 @@ class RendererNeural final {
     int* hitCount_ = nullptr;
 
     // Shell tracing buffers.
-    float* outerHitPositions_ = nullptr;
-    float* innerHitPositions_ = nullptr;
     float* rayDirections_ = nullptr;
-    int* outerHitFlags_ = nullptr;
 
     // Primary hit buffers.
     float* hitPositions_ = nullptr;
@@ -132,12 +129,6 @@ class RendererNeural final {
     float* bounceColors_ = nullptr;
     float* bounceMaterialParams_ = nullptr;
     int* bounceHitFlags_ = nullptr;
-
-    float* bounce2Positions_ = nullptr;
-    float* bounce2Normals_ = nullptr;
-    float* bounce2Dirs_ = nullptr;
-    float* bounce2Colors_ = nullptr;
-    int* bounce2HitFlags_ = nullptr;
 
     // Path tracing state.
     Vec3* pathThroughput_ = nullptr;

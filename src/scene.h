@@ -27,10 +27,6 @@ public:
     void releaseDevice();
     bool isValid() const { return width_ > 0 && height_ > 0 && !pixels_.empty(); }
     EnvironmentDeviceView deviceView() const { return EnvironmentDeviceView{devicePixels_, width_, height_, rotation_, strength_}; }
-    Vec3 averageColor() const { return averageColor_; }
-    float averageLuminance() const { return averageLuminance_; }
-    bool isLdr() const { return isLdr_; }
-    const std::string& path() const { return path_; }
     void setRotation(float rotation) { rotation_ = rotation; }
     void setStrength(float strength) { strength_ = strength; }
 
@@ -38,10 +34,6 @@ private:
     std::vector<Vec3> pixels_;
     int width_ = 0;
     int height_ = 0;
-    Vec3 averageColor_{};
-    float averageLuminance_ = 0.0f;
-    bool isLdr_ = false;
-    std::string path_;
     Vec3* devicePixels_ = nullptr;
     int deviceCount_ = 0;
     bool deviceDirty_ = true;

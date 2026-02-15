@@ -30,28 +30,24 @@ bool LoadConfigFromFile(const char* configPath, RendererConfig* config, std::str
                 auto& orig = scene["original_mesh"];
                 config->original_mesh.path = orig.value("path", "");
                 config->original_mesh.scale = orig.value("scale", 1.0f);
-                config->original_mesh.use_texture_color = orig.value("use_texture_color", false);
             }
 
             if (scene.contains("inner_shell")) {
                 auto& inner = scene["inner_shell"];
                 config->inner_shell.path = inner.value("path", "");
                 config->inner_shell.scale = inner.value("scale", 1.0f);
-                config->inner_shell.use_texture_color = inner.value("use_texture_color", false);
             }
 
             if (scene.contains("outer_shell")) {
                 auto& outer = scene["outer_shell"];
                 config->outer_shell.path = outer.value("path", "");
                 config->outer_shell.scale = outer.value("scale", 1.0f);
-                config->outer_shell.use_texture_color = outer.value("use_texture_color", false);
             }
 
             if (scene.contains("additional_mesh")) {
                 auto& additional = scene["additional_mesh"];
                 config->additional_mesh.path = additional.value("path", "");
                 config->additional_mesh.scale = additional.value("scale", 1.0f);
-                config->additional_mesh.use_texture_color = additional.value("use_texture_color", false);
             }
         }
 

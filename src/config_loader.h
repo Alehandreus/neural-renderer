@@ -6,7 +6,6 @@
 struct MeshConfig {
     std::string path;
     float scale = 1.0f;
-    bool use_texture_color = false;
 };
 
 struct EnvironmentConfig {

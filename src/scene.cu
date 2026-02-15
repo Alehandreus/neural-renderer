@@ -280,30 +280,6 @@ bool loadPngImage(const std::string& path,
     return true;
 }
 
-Vec3 computeAverageColor(const std::vector<Vec3>& pixels) {
-    if (pixels.empty()) {
-        return Vec3(0.0f, 0.0f, 0.0f);
-    }
-    Vec3 sum(0.0f, 0.0f, 0.0f);
-    for (const Vec3& c : pixels) {
-        sum += c;
-    }
-    return sum / static_cast<float>(pixels.size());
-}
-
-float computeLogAverageLuminance(const std::vector<Vec3>& pixels) {
-    if (pixels.empty()) {
-        return 0.0f;
-    }
-    const double kEps = 1e-4;
-    double sum = 0.0;
-    for (const Vec3& c : pixels) {
-        double lum = 0.2126 * c.x + 0.7152 * c.y + 0.0722 * c.z;
-        sum += std::log(kEps + lum);
-    }
-    return static_cast<float>(std::exp(sum / static_cast<double>(pixels.size())));
-}
-
 }  // namespace
 
 EnvironmentMap::~EnvironmentMap() {
@@ -316,14 +292,12 @@ bool EnvironmentMap::loadFromFile(const std::string& path, std::string* error) {
     int height = 0;
     std::string localError;
     bool loaded = false;
-    bool isLdr = false;
     if (endsWithIgnoreCase(path, ".exr")) {
         loaded = loadExrImage(path, &pixels, &width, &height, &localError);
     } else if (endsWithIgnoreCase(path, ".png") ||
                endsWithIgnoreCase(path, ".jpg") ||
                endsWithIgnoreCase(path, ".jpeg")) {
         loaded = loadPngImage(path, &pixels, &width, &height, &localError);
-        isLdr = loaded;
     } else {
         loaded = loadHdrImage(path, &pixels, &width, &height, &localError);
     }
@@ -337,10 +311,6 @@ bool EnvironmentMap::loadFromFile(const std::string& path, std::string* error) {
     pixels_ = std::move(pixels);
     width_ = width;
     height_ = height;
-    averageColor_ = computeAverageColor(pixels_);
-    averageLuminance_ = computeLogAverageLuminance(pixels_);
-    isLdr_ = isLdr;
-    path_ = path;
     deviceDirty_ = true;
     return true;
 }

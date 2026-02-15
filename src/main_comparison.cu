@@ -39,11 +39,10 @@ void ensureDirectory(const char* path) {
     std::filesystem::create_directories(path);
 }
 
-// Helper to load mesh (same as main.cu).
+
 bool loadMesh(const char* path, Mesh* mesh, const char* label, bool normalize, bool nearestTex, float scale = 1.0f) {
     if (!path || path[0] == '\0') return false;
     std::string loadError;
-    // Use LoadMeshAuto which auto-detects format
     bool loaded = LoadMeshAuto(path, mesh, &loadError, normalize, scale);
     if (loaded) {
         mesh->setTextureNearest(nearestTex);
