@@ -59,6 +59,10 @@ __device__ inline float clampf(float v, float lo, float hi) {
     return fminf(fmaxf(v, lo), hi);
 }
 
+__device__ inline float safeAcosf(float v) {
+    return acosf(clampf(v, -1.0f, 1.0f));
+}
+
 __device__ inline Vec3 mul(Vec3 a, Vec3 b) {
     return Vec3(a.x * b.x, a.y * b.y, a.z * b.z);
 }
@@ -98,23 +102,34 @@ __device__ inline Vec3 sampleEnvironment(EnvironmentDeviceView env, Vec3 dir) {
             dir.z = newZ;
         }
 
-        const float kInvTwoPi = 0.15915494309189535f;
+        // Match NBVH environment mapping and filtering.
         const float kInvPi = 0.3183098861837907f;
-        float u = 0.5f + atan2f(dir.z, dir.x) * kInvTwoPi;
-        float v = 0.5f - asinf(clampf(dir.y, -1.0f, 1.0f)) * kInvPi;
-        u -= floorf(u);
+        float u = atan2f(dir.x, -dir.z) * kInvPi * 0.5f + 0.5f;
+        float v = safeAcosf(dir.y) * kInvPi;
+        u = clampf(u, 0.0f, 1.0f);
         v = clampf(v, 0.0f, 1.0f);
-        int x = static_cast<int>(u * static_cast<float>(env.width));
-        int y = static_cast<int>(v * static_cast<float>(env.height));
-        if (x >= env.width) {
-            x = env.width - 1;
-        }
-        if (y >= env.height) {
-            y = env.height - 1;
-        }
 
-        // Sample environment and apply strength
-        Vec3 envColor = env.pixels[y * env.width + x] * env.strength;
+        // Bilinear sampling with clamp, matching CUDA texture behavior.
+        float x = u * static_cast<float>(env.width) - 0.5f;
+        float y = v * static_cast<float>(env.height) - 0.5f;
+        int x0 = static_cast<int>(floorf(x));
+        int y0 = static_cast<int>(floorf(y));
+        int x1 = x0 + 1;
+        int y1 = y0 + 1;
+        x0 = (x0 < 0) ? 0 : (x0 >= env.width ? env.width - 1 : x0);
+        y0 = (y0 < 0) ? 0 : (y0 >= env.height ? env.height - 1 : y0);
+        x1 = (x1 < 0) ? 0 : (x1 >= env.width ? env.width - 1 : x1);
+        y1 = (y1 < 0) ? 0 : (y1 >= env.height ? env.height - 1 : y1);
+        float tx = x - static_cast<float>(x0);
+        float ty = y - static_cast<float>(y0);
+
+        Vec3 c00 = env.pixels[y0 * env.width + x0];
+        Vec3 c10 = env.pixels[y0 * env.width + x1];
+        Vec3 c01 = env.pixels[y1 * env.width + x0];
+        Vec3 c11 = env.pixels[y1 * env.width + x1];
+        Vec3 c0 = c00 * (1.0f - tx) + c10 * tx;
+        Vec3 c1 = c01 * (1.0f - tx) + c11 * tx;
+        Vec3 envColor = (c0 * (1.0f - ty) + c1 * ty) * env.strength;
 
         // Clamp to 100.0 to avoid fireflies from bright light sources (matching nbvh)
         envColor.x = fminf(envColor.x, 100.0f);
@@ -124,9 +139,10 @@ __device__ inline Vec3 sampleEnvironment(EnvironmentDeviceView env, Vec3 dir) {
         return envColor;
     }
 
-    Vec3 skyTop(0.2f, 0.4f, 0.7f);
-    Vec3 skyBottom(0.8f, 0.9f, 1.0f);
+    // NBVH skylike background.
     float skyT = 0.5f * (dir.y + 1.0f);
+    Vec3 skyBottom(1.0f, 1.0f, 1.0f);
+    Vec3 skyTop(0.5f, 0.7f, 1.0f);
     return lerp(skyBottom, skyTop, skyT);
 }
 
@@ -2225,7 +2241,7 @@ void RendererNeural::render(const Vec3& camPos) {
     MeshDeviceView outerView = outerShell.deviceView();
     MeshDeviceView innerView = innerShell.deviceView();
     EnvironmentDeviceView envView = environment.deviceView();
-    envView.rotation = envmapRotation_ - 90.0f;  // Convert from nbvh convention
+    envView.rotation = envmapRotation_;
 
     size_t pixelCount = static_cast<size_t>(width_) * static_cast<size_t>(height_);
     int samplesPerPixel = samplesPerPixel_;
