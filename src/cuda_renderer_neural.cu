@@ -509,7 +509,7 @@ __global__ void checkBounceEarlyTerminationKernel(
         bool hitOuter = traceMeshWithMode(ray, outerShell, &outerHit, TraceMode::ANY, false, params.material);
 
         HitInfo innerHit;
-        bool hitInner = traceMeshWithMode(ray, innerShell, &innerHit, TraceMode::FORWARD_ONLY, false, params.material);
+        bool hitInner = traceMeshWithMode(ray, innerShell, &innerHit, TraceMode::ANY, false, params.material);
 
         // HitInfo innerHitForward;
         // bool hitInnerForward = traceMeshWithMode(ray, innerShell, &innerHitForward, TraceMode::FORWARD_ONLY, false, params.material);
@@ -1172,7 +1172,11 @@ __global__ void applySegmentNeuralOutputKernel(
         // (matching Python: pred_t_global = pred_t + accum_t)
         // But note: the neural network predicts distance from shifted entry point
         Vec3 shiftedEntry = entryPos + dir * kSegmentEpsilon;
-        Vec3 hitPos = shiftedEntry + dir * distance * 0.9;
+        float clampedDist = distance * 1.0f;
+        if (innerEnterT[sampleIdx] > 0.0f) {
+            clampedDist = fminf(clampedDist, innerEnterT[sampleIdx] - kSegmentEpsilon);
+        }
+        Vec3 hitPos = shiftedEntry + dir * clampedDist;
 
         hitPositions[base + 0] = hitPos.x;
         hitPositions[base + 1] = hitPos.y;
