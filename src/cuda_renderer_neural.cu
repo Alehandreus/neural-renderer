@@ -2280,12 +2280,12 @@ void RendererNeural::render(const Vec3& camPos) {
     if (sceneScale_ < 1e-6f) {
         sceneScale_ = 1.0f;  // Fallback for invalid bounds.
     }
-    static bool printedOnce = false;
-    if (!printedOnce) {
-        printf("Scene scale: %.6f (extent: %.6f, %.6f, %.6f)\n",
-               sceneScale_, sceneExtent.x, sceneExtent.y, sceneExtent.z);
-        printedOnce = true;
-    }
+    // static bool printedOnce = false;
+    // if (!printedOnce) {
+    //     printf("Scene scale: %.6f (extent: %.6f, %.6f, %.6f)\n",
+    //            sceneScale_, sceneExtent.x, sceneExtent.y, sceneExtent.z);
+    //     printedOnce = true;
+    // }
 
     // Camera change detection.
     bool cameraMoved = !hasLastCamera_;

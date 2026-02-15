@@ -2,6 +2,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
+#include <chrono>
 #include <string>
 #include <vector>
 
@@ -40,6 +41,67 @@ void ensureDirectory(const char* path) {
     std::filesystem::create_directories(path);
 }
 
+struct ProgressBar {
+    const char* label = "";
+    int total = 0;
+    int width = 40;
+    std::chrono::steady_clock::time_point start = std::chrono::steady_clock::now();
+    int lastPrinted = -1;
+
+    void begin(const char* newLabel, int totalIters) {
+        label = newLabel;
+        total = totalIters > 0 ? totalIters : 1;
+        start = std::chrono::steady_clock::now();
+        lastPrinted = -1;
+        update(0);
+    }
+
+    static void formatDuration(double seconds, char* out, size_t outSize) {
+        if (seconds < 0.0) {
+            std::snprintf(out, outSize, "--:--");
+            return;
+        }
+        int sec = static_cast<int>(seconds + 0.5);
+        int mins = sec / 60;
+        int hrs = mins / 60;
+        sec %= 60;
+        mins %= 60;
+        if (hrs > 0) {
+            std::snprintf(out, outSize, "%d:%02d:%02d", hrs, mins, sec);
+        } else {
+            std::snprintf(out, outSize, "%02d:%02d", mins, sec);
+        }
+    }
+
+    void update(int current) {
+        if (current < 0) current = 0;
+        if (current > total) current = total;
+        if (current == lastPrinted) {
+            return;
+        }
+        lastPrinted = current;
+
+        double progress = static_cast<double>(current) / static_cast<double>(total);
+        int filled = static_cast<int>(progress * width);
+        auto now = std::chrono::steady_clock::now();
+        double elapsed = std::chrono::duration<double>(now - start).count();
+        double eta = (current > 0) ? (elapsed / current) * (total - current) : -1.0;
+        char etaBuf[32];
+        char elapsedBuf[32];
+        formatDuration(eta, etaBuf, sizeof(etaBuf));
+        formatDuration(elapsed, elapsedBuf, sizeof(elapsedBuf));
+
+        std::printf("\r%s [", label);
+        for (int i = 0; i < width; ++i) {
+            std::printf(i < filled ? "=" : " ");
+        }
+        std::printf("] %d/%d ETA %s Elapsed %s", current, total, etaBuf, elapsedBuf);
+        std::fflush(stdout);
+        if (current == total) {
+            std::printf("\n");
+        }
+    }
+};
 
 bool loadMesh(const char* path, Mesh* mesh, const char* label, bool normalize, bool nearestTex, float scale = 1.0f) {
     if (!path || path[0] == '\0') return false;
@@ -326,6 +388,10 @@ int main(int argc, char** argv) {
         renderer.resetSamples();  // Reset accumulation to ensure clean state.
 
         int remainingSamples = kTotalSamples;
+        int totalIters = (kTotalSamples + kBatchSizeGT - 1) / kBatchSizeGT;
+        int iter = 0;
+        ProgressBar bar;
+        bar.begin("Ground truth", totalIters);
         while (remainingSamples > 0) {
             int batchSamples = std::min(remainingSamples, kBatchSizeGT);
             renderer.setSamplesPerPixel(batchSamples);
@@ -333,7 +399,8 @@ int main(int argc, char** argv) {
             renderer.render(camera.position);
 
             remainingSamples -= batchSamples;
-            std::printf("  Progress: %d / %d samples\n", kTotalSamples - remainingSamples, kTotalSamples);
+            ++iter;
+            bar.update(iter);
         }
 
         cudaMemcpy(groundTruthPixels.data(), renderer.devicePixels(),
@@ -351,6 +418,10 @@ int main(int argc, char** argv) {
         renderer.resetSamples();  // Reset accumulation to ensure clean state.
 
         int remainingSamples = kTotalSamples;
+        int totalIters = (kTotalSamples + kBatchSizeNeural - 1) / kBatchSizeNeural;
+        int iter = 0;
+        ProgressBar bar;
+        bar.begin("Neural", totalIters);
         while (remainingSamples > 0) {
             int batchSamples = std::min(remainingSamples, kBatchSizeNeural);
             renderer.setSamplesPerPixel(batchSamples);
@@ -358,7 +429,8 @@ int main(int argc, char** argv) {
             renderer.render(camera.position);
 
             remainingSamples -= batchSamples;
-            std::printf("  Progress: %d / %d samples\n", kTotalSamples - remainingSamples, kTotalSamples);
+            ++iter;
+            bar.update(iter);
         }
 
         cudaMemcpy(neuralPixels.data(), renderer.devicePixels(),
