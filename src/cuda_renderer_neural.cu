@@ -1208,12 +1208,17 @@ __global__ void applySegmentNeuralOutputKernel(
         // hitColors[base + 1] = 0.8;
         // hitColors[base + 2] = 0.8;
         if (hitMaterialParams) {
-            // hitMaterialParams[base + 0] = material.metallic.value;
-            // hitMaterialParams[base + 1] = material.roughness.value;
-            // hitMaterialParams[base + 2] = material.specular.value;
+            // hitMaterialParams[base + 0] = 0.1;
+            // hitMaterialParams[base + 1] = 0.0;
+            // hitMaterialParams[base + 2] = 0.2;
+
             hitMaterialParams[base + 0] = 0.0;
             hitMaterialParams[base + 1] = 0.0;
             hitMaterialParams[base + 2] = 0.4;
+
+            // hitMaterialParams[base + 0] = material.metallic.value;
+            // hitMaterialParams[base + 1] = material.roughness.value;
+            // hitMaterialParams[base + 2] = material.specular.value;
         }
 
         hitFlags[sampleIdx] = 1;

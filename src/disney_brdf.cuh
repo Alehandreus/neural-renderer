@@ -224,7 +224,7 @@ __device__ inline Vec3 disney_eval(const Material& mat,
 __device__ inline Vec3 sample_ggx(Vec3 n, float alpha, float u1, float u2) {
     float phi = 2.0f * 3.14159265358979323846f * u1;
     float cos_theta = sqrtf((1.0f - u2) / (1.0f + (alpha * alpha - 1.0f) * u2));
-    float sin_theta = sqrtf(1.0f - cos_theta * cos_theta);
+    float sin_theta = 1.0f - cos_theta * cos_theta;
 
     Vec3 h;
     h.x = sin_theta * cosf(phi);
@@ -263,7 +263,7 @@ __device__ inline Vec3 sample_gtr_1_h(Vec3 n, Vec3 tangent, Vec3 bitangent,
     float alpha_sqr = alpha * alpha;
     float cos_theta_h_sqr = (1.0f - powf(alpha_sqr, 1.0f - u2)) / (1.0f - alpha_sqr);
     float cos_theta_h = sqrtf(cos_theta_h_sqr);
-    float sin_theta_h = sqrtf(1.0f - cos_theta_h_sqr);
+    float sin_theta_h = 1.0f - cos_theta_h_sqr;
 
     Vec3 h;
     h.x = sin_theta_h * cosf(phi_h);
