@@ -23,6 +23,8 @@ struct CameraConfig {
 struct RenderingConfig {
     bool normalize_meshes = false;
     bool nearest_texture_sampling = true;
+    int total_samples = 2048;
+    int bounce_count = 3;
 };
 
 struct MaterialConfig {
@@ -42,6 +44,7 @@ struct MaterialConfig {
 
 struct NeuralNetworkConfig {
     int log2_hashmap_size = 14;
+    int base_resolution = 16;
     bool use_neural_query = false;
     bool use_midpoint_encoding = false;
 };

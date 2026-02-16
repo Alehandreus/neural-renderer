@@ -197,7 +197,7 @@ extern "C" __global__ void __raygen__bounceGT() {
 
         uint32_t primIdx; float t, u, v;
         bool hit = traceMeshOptiX(launchParams.gas, ray, 1e-6f, 1e30f,
-                                  TraceMode::FORWARD_ONLY, primIdx, t, u, v);
+                                  TraceMode::ANY, primIdx, t, u, v);
         if (hit) {
             PreliminaryHitInfo pi; pi.t = t; pi.u = u; pi.v = v; pi.primIdx = primIdx;
             HitInfo hi = computeHitData(pi, primIdx, ray, launchParams.mesh);
@@ -473,7 +473,6 @@ extern "C" __global__ void __raygen__additionalBounce() {
         Ray ray(origin, dir);
 
         uint32_t primIdx; float t, u, v;
-        // cullBackfaces=false for bounce rays against additional mesh (matching SW)
         bool hit = traceMeshOptiX(launchParams.gas, ray, 1e-6f, 1e30f,
                                   TraceMode::ANY, primIdx, t, u, v);
         if (hit) {

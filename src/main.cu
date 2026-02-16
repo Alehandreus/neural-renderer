@@ -116,7 +116,6 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    const int kBounceCount = 2;
     const int kSamplesPerPixel = 1;
 
     Scene scene;
@@ -223,7 +222,7 @@ int main(int argc, char** argv) {
     renderer.setConstantNeuralColor(config.material.use_constant_neural_color, config.material.constant_neural_color);
     bool loaded = false;
     renderer.setUseNeuralQuery(false);
-    renderer.setBounceCount(kBounceCount);
+    renderer.setBounceCount(config.rendering.bounce_count);
     renderer.setSamplesPerPixel(kSamplesPerPixel);
     if (!config.checkpoint_path.empty()) {
         loaded = renderer.loadWeightsFromFile(config.checkpoint_path.c_str());
@@ -259,7 +258,7 @@ int main(int argc, char** argv) {
 #ifdef USE_OPTIX
     bool useHardwareRT = true;
 #endif
-    int bounceCount = kBounceCount;
+    int bounceCount = config.rendering.bounce_count;
     int samplesPerPixel = kSamplesPerPixel;
     int classicMeshIndex = 0;
     float envmapRotation = config.environment.rotation;

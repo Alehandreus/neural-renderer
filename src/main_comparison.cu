@@ -24,10 +24,10 @@ namespace {
 const int kWidth = 1920;
 const int kHeight = 1080;
 // const int kTotalSamples = 16384;
-const int kTotalSamples = 2048;
+// kTotalSamples is now read from config: rendering.total_samples
 const int kBatchSizeGT = 8;
 const int kBatchSizeNeural = 8;
-const int kBounceCount = 3;
+// kBounceCount is now read from config: rendering.bounce_count
 
 const char* kOutputFolder = "comparison_output";
 const char* kGroundTruthOutput = "ground_truth.png";
@@ -284,6 +284,8 @@ int main(int argc, char** argv) {
         std::fprintf(stderr, "Failed to load config: %s\n", configError.c_str());
         return 1;
     }
+    const int kTotalSamples = config.rendering.total_samples;
+    const int kBounceCount = config.rendering.bounce_count;
 
     // Create output directory.
     ensureDirectory(kOutputFolder);

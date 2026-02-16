@@ -589,7 +589,7 @@ __global__ void traceGroundTruthBouncesKernel(const float* bounceOrigins,
         Ray bounceRay(origin, direction);
 
         HitInfo hitInfo;
-        bool hit = traceMesh(bounceRay, mesh, &hitInfo, true, params.material);
+        bool hit = traceMesh(bounceRay, mesh, &hitInfo, false, params.material);
 
         if (hit) {
             bounceHitPositions[base + 0] = hitInfo.position.x;
@@ -1750,8 +1750,10 @@ RendererNeural::RendererNeural(Scene& scene, const NeuralNetworkConfig* nnConfig
           lightDir_(normalize(Vec3(1.0f, 1.5f, -1.0f))),
           useMidpointEncoding_(nnConfig ? nnConfig->use_midpoint_encoding : false) {
     int log2HashmapSize = 14;
+    int baseResolution = 16;
     if (nnConfig != nullptr) {
         log2HashmapSize = nnConfig->log2_hashmap_size;
+        baseResolution = nnConfig->base_resolution;
     }
 
     pointCount_ = useMidpointEncoding_ ? 3u : 2u;
@@ -1765,7 +1767,7 @@ RendererNeural::RendererNeural(Scene& scene, const NeuralNetworkConfig* nnConfig
         {"n_levels", 8},
         {"n_features_per_level", 4},
         {"log2_hashmap_size", log2HashmapSize},
-        {"base_resolution", 16},
+        {"base_resolution", baseResolution},
         {"per_level_scale", 2.0f},
         {"fixed_point_pos", false},
     };

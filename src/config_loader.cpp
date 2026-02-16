@@ -87,6 +87,8 @@ bool LoadConfigFromFile(const char* configPath, RendererConfig* config, std::str
             auto& render = j["rendering"];
             config->rendering.normalize_meshes = render.value("normalize_meshes", false);
             config->rendering.nearest_texture_sampling = render.value("nearest_texture_sampling", true);
+            config->rendering.total_samples = render.value("total_samples", 2048);
+            config->rendering.bounce_count = render.value("bounce_count", 3);
         }
 
         // Parse material settings
@@ -121,6 +123,7 @@ bool LoadConfigFromFile(const char* configPath, RendererConfig* config, std::str
         if (j.contains("neural_network")) {
             auto& nn = j["neural_network"];
             config->neural_network.log2_hashmap_size = nn.value("log2_hashmap_size", 14);
+            config->neural_network.base_resolution = nn.value("base_resolution", 16);
             config->neural_network.use_neural_query = nn.value("use_neural_query", false);
             config->neural_network.use_midpoint_encoding = nn.value("use_midpoint_encoding", false);
         }
