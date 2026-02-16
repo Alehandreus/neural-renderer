@@ -507,12 +507,13 @@ __global__ void checkBounceEarlyTerminationKernel(
         }
 
         // Skip if no neural distance available
-        if (!bounceDistances || bounceDistances[sampleIdx] <= 0.0f) {
-            continue;
-        }
+        // if (!bounceDistances || bounceDistances[sampleIdx] <= 0.0f) {
+        //     continue;
+        // }
 
         Vec3 origin(bounceOrigins[base + 0], bounceOrigins[base + 1], bounceOrigins[base + 2]);
         Vec3 dir(bounceDirections[base + 0], bounceDirections[base + 1], bounceDirections[base + 2]);
+        // origin = origin - dir * 1e-6;
         Ray ray(origin, dir);
 
         HitInfo outerHit;
@@ -535,6 +536,12 @@ __global__ void checkBounceEarlyTerminationKernel(
                 pathActive[sampleIdx] = 0;
             }
         }
+
+        // if (hitInner) {
+        //     if (pathActive) {
+        //         pathActive[sampleIdx] = 0;
+        //     }
+        // }
 
         // If no forward hit, ray is inside the outer shell
         // if (!hitOuter) {
