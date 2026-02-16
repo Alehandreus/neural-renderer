@@ -30,6 +30,13 @@ void glfwErrorCallback(int error, const char* description) {
     std::fprintf(stderr, "GLFW error %d: %s\n", error, description);
 }
 
+std::string filenameFromPath(const std::string& path) {
+    if (path.empty()) {
+        return "(none)";
+    }
+    return std::filesystem::path(path).filename().string();
+}
+
 bool loadMesh(const char* path, Mesh* mesh, const char* label, bool normalize, bool nearestTex, float scale = 1.0f) {
     if (!path || path[0] == '\0') return false;
     std::string loadError;
@@ -118,16 +125,13 @@ int main(int argc, char** argv) {
     Mesh& outerShell = scene.outerShell();
     Mesh& additionalMesh = scene.additionalMesh();
 
-    std::string originalMeshLabel = "procedural sphere";
     std::string innerShellLabel = "(none)";
     std::string outerShellLabel = "(none)";
-    std::string additionalMeshLabel = "(none)";
 
     if (!config.original_mesh.path.empty() && loadMesh(config.original_mesh.path.c_str(), &originalMesh, "original",
                                                         config.rendering.normalize_meshes,
                                                         config.rendering.nearest_texture_sampling,
                                                         config.original_mesh.scale)) {
-        originalMeshLabel = config.original_mesh.path;
     }
     if (originalMesh.numTriangles() == 0) {
         GenerateUvSphere(&originalMesh, 48, 96, 1.0f);
@@ -136,20 +140,19 @@ int main(int argc, char** argv) {
     if (!config.inner_shell.path.empty() && loadMesh(config.inner_shell.path.c_str(), &innerShell, "inner shell",
                                                       config.rendering.normalize_meshes, false,
                                                       config.inner_shell.scale)) {
-        innerShellLabel = config.inner_shell.path;
+        innerShellLabel = filenameFromPath(config.inner_shell.path);
     }
 
     if (!config.outer_shell.path.empty() && loadMesh(config.outer_shell.path.c_str(), &outerShell, "outer shell",
                                                       config.rendering.normalize_meshes, false,
                                                       config.outer_shell.scale)) {
-        outerShellLabel = config.outer_shell.path;
+        outerShellLabel = filenameFromPath(config.outer_shell.path);
     }
 
     if (!config.additional_mesh.path.empty() && loadMesh(config.additional_mesh.path.c_str(), &additionalMesh, "additional mesh",
                                                           config.rendering.normalize_meshes,
                                                           config.rendering.nearest_texture_sampling,
                                                           config.additional_mesh.scale)) {
-        additionalMeshLabel = config.additional_mesh.path;
     }
 
     std::string envError;
@@ -464,31 +467,49 @@ int main(int argc, char** argv) {
         ImGui::Text("Resolution: %d x %d", fbWidth, fbHeight);
         ImGui::Separator();
         if (ImGui::TreeNode("Mesh & BVH Info")) {
-            ImGui::Text("Original: %s", originalMeshLabel.c_str());
-            ImGui::Text("  triangles: %d, BVH: %d (%.2f MB)",
-                        originalMesh.numTriangles(),
-                        originalMesh.nodeCount(),
-                        static_cast<double>(originalMesh.bvhStorageBytes()) / (1024.0 * 1024.0));
             ImGui::Text("Inner shell: %s", innerShellLabel.c_str());
-            if (innerShell.numTriangles() > 0) {
-                ImGui::Text("  triangles: %d, BVH: %d (%.2f MB)",
+            {
+                const size_t vertBytes = innerShell.vertices_.size() * sizeof(Vec3);
+                const size_t faceBytes = innerShell.indices_.size() * sizeof(uint3);
+                const size_t bvhBytes = innerShell.bvhStorageBytes();
+                const size_t totalBytes = vertBytes + faceBytes + bvhBytes;
+                ImGui::Text("  vertices: %d, buffer: %zu bytes (%.2f MB)",
+                            innerShell.numVertices(),
+                            vertBytes,
+                            static_cast<double>(vertBytes) / (1024.0 * 1024.0));
+                ImGui::Text("  faces: %d, buffer: %zu bytes (%.2f MB)",
                             innerShell.numTriangles(),
+                            faceBytes,
+                            static_cast<double>(faceBytes) / (1024.0 * 1024.0));
+                ImGui::Text("  BVH nodes: %d, buffer: %zu bytes (%.2f MB)",
                             innerShell.nodeCount(),
-                            static_cast<double>(innerShell.bvhStorageBytes()) / (1024.0 * 1024.0));
+                            bvhBytes,
+                            static_cast<double>(bvhBytes) / (1024.0 * 1024.0));
+                ImGui::Text("  total: %zu bytes (%.2f MB)",
+                            totalBytes,
+                            static_cast<double>(totalBytes) / (1024.0 * 1024.0));
             }
             ImGui::Text("Outer shell: %s", outerShellLabel.c_str());
-            if (outerShell.numTriangles() > 0) {
-                ImGui::Text("  triangles: %d, BVH: %d (%.2f MB)",
+            {
+                const size_t vertBytes = outerShell.vertices_.size() * sizeof(Vec3);
+                const size_t faceBytes = outerShell.indices_.size() * sizeof(uint3);
+                const size_t bvhBytes = outerShell.bvhStorageBytes();
+                const size_t totalBytes = vertBytes + faceBytes + bvhBytes;
+                ImGui::Text("  vertices: %d, buffer: %zu bytes (%.2f MB)",
+                            outerShell.numVertices(),
+                            vertBytes,
+                            static_cast<double>(vertBytes) / (1024.0 * 1024.0));
+                ImGui::Text("  faces: %d, buffer: %zu bytes (%.2f MB)",
                             outerShell.numTriangles(),
+                            faceBytes,
+                            static_cast<double>(faceBytes) / (1024.0 * 1024.0));
+                ImGui::Text("  BVH nodes: %d, buffer: %zu bytes (%.2f MB)",
                             outerShell.nodeCount(),
-                            static_cast<double>(outerShell.bvhStorageBytes()) / (1024.0 * 1024.0));
-            }
-            ImGui::Text("Additional: %s", additionalMeshLabel.c_str());
-            if (additionalMesh.numTriangles() > 0) {
-                ImGui::Text("  triangles: %d, BVH: %d (%.2f MB)",
-                            additionalMesh.numTriangles(),
-                            additionalMesh.nodeCount(),
-                            static_cast<double>(additionalMesh.bvhStorageBytes()) / (1024.0 * 1024.0));
+                            bvhBytes,
+                            static_cast<double>(bvhBytes) / (1024.0 * 1024.0));
+                ImGui::Text("  total: %zu bytes (%.2f MB)",
+                            totalBytes,
+                            static_cast<double>(totalBytes) / (1024.0 * 1024.0));
             }
             ImGui::Text("Network params (fp16): %.2f MB",
                         static_cast<double>(renderer.paramsBytes()) / (1024.0 * 1024.0));

@@ -1225,9 +1225,9 @@ __global__ void applySegmentNeuralOutputKernel(
         // hitColors[base + 2] = 0.8;
         if (hitMaterialParams) {
             // chess
-            hitMaterialParams[base + 0] = 0.1;
-            hitMaterialParams[base + 1] = 0.2;
-            hitMaterialParams[base + 2] = 0.2;
+            // hitMaterialParams[base + 0] = 0.1;
+            // hitMaterialParams[base + 1] = 0.2;
+            // hitMaterialParams[base + 2] = 0.2;
             
             // exhibition
             // hitMaterialParams[base + 0] = 0.0;
@@ -1240,9 +1240,9 @@ __global__ void applySegmentNeuralOutputKernel(
             // hitMaterialParams[base + 2] = 0.0;
 
             // andalusian
-            // hitMaterialParams[base + 0] = 0.6;
-            // hitMaterialParams[base + 1] = 0.4;
-            // hitMaterialParams[base + 2] = 0.5;            
+            hitMaterialParams[base + 0] = 0.6;
+            hitMaterialParams[base + 1] = 0.4;
+            hitMaterialParams[base + 2] = 0.5;            
 
             // hitMaterialParams[base + 0] = material.metallic.value;
             // hitMaterialParams[base + 1] = material.roughness.value;

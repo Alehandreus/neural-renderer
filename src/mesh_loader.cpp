@@ -300,9 +300,9 @@ bool LoadGltfWithMaterials(const std::string& path,
         mat.specular.textured = false;
 
         // chess
-        mat.metallic.value = 0.1f;
-        mat.roughness.value = 0.2f;
-        mat.specular.value = 0.2f;        
+        // mat.metallic.value = 0.1f;
+        // mat.roughness.value = 0.2f;
+        // mat.specular.value = 0.2f;        
 
         // exhibition
         // mat.metallic.value = 0.0f;
@@ -313,6 +313,14 @@ bool LoadGltfWithMaterials(const std::string& path,
         // mat.metallic.value = 0.0f;
         // mat.roughness.value = 1.0f;
         // mat.specular.value = 0.0f;
+
+        // andalusian
+        // mat.metallic.value = 0.6f;
+        // mat.roughness.value = 0.4f;
+        // mat.specular.value = 0.5f;
+        mat.metallic.value = 0.0f;
+        mat.roughness.value = 1.0f;
+        mat.specular.value = 0.0f;        
 
         // mat.specular.textured = false;
         // mat.specular.value = 0.5f;

@@ -51,6 +51,9 @@ float computeFlip(const std::vector<uchar4>& ref, const std::vector<uchar4>& tes
     // Calculate PPD.
     flipOptions.PPD = calculatePPD(flipOptions.monitorDistance, flipOptions.monitorResolutionX, flipOptions.monitorWidth);
 
+    reference.LinearRGB2sRGB();
+    testImage.LinearRGB2sRGB();
+
     // Compute FLIP.
     errorMapFLIP.FLIP(reference, testImage, flipOptions.PPD);
 
@@ -107,6 +110,65 @@ float computeFlip(const std::vector<uchar4>& ref, const std::vector<uchar4>& tes
     return pooledValues.getMean();
 }
 
+// Compute FLIP error between two images and save visualization.
+// float computeFlip(
+//     const std::vector<uchar4>& ref,
+//     const std::vector<uchar4>& test,
+//     int width, int height,
+//     const char* outputPath
+// ) {
+//     struct {
+//         float PPD                = 0;        // If PPD==0.0, then it will be computed from the parameters below.
+//         float monitorDistance    = 0.7f;     // Unit: meters.
+//         float monitorWidth       = 0.7f;     // Unit: meters.
+//         float monitorResolutionX = 3840.0f;  // Unit: pixels.
+//     } gFLIPOptions;
+
+//     FLIP::image<FLIP::color3> magmaMap(FLIP::MapMagma, 256);
+//     FLIP::image<float> errorMapFLIP(width, height, 0.0f);
+
+//     FLIP::image<FLIP::color3> reference(width, height);
+//     FLIP::image<FLIP::color3> test(width, height);
+
+//     // accum buffer to flip compatible image
+//     {
+//         reference.synchronizeDevice();
+//         test.synchronizeDevice();
+//         copy_framebuffers_to_flip_image<<<reference.getGridDim(), reference.getBlockDim()>>>(
+//             m_accumulated_spp + 1, reference.getDeviceData(), test.getDeviceData(), reference.getDimensions());
+//         CUDA_SYNC_CHECK();
+//         reference.setState(FLIP::CudaTensorState::DEVICE_ONLY);
+//         test.setState(FLIP::CudaTensorState::DEVICE_ONLY);
+//     }
+//     reference.LinearRGB2sRGB();
+//     test.LinearRGB2sRGB();
+
+//     gFLIPOptions.PPD =
+//         calculatePPD(gFLIPOptions.monitorDistance, gFLIPOptions.monitorResolutionX, gFLIPOptions.monitorWidth);
+
+//     // Compute flip
+//     errorMapFLIP.FLIP(reference, test, gFLIPOptions.PPD);
+
+//     pooling<float> pooledValues;
+//     for (int y = 0; y < errorMapFLIP.getHeight(); y++) {
+//         for (int x = 0; x < errorMapFLIP.getWidth(); x++) {
+//             pooledValues.update(x, y, errorMapFLIP.get(x, y));
+//         }
+//     }
+//     FLIP::image<FLIP::color3> ldr_flip(reference.getWidth(), reference.getHeight());
+//     ldr_flip.copyFloat2Color3(errorMapFLIP);
+//     ldr_flip.colorMap(errorMapFLIP, magmaMap);
+//     // colormapped flip error to framebuffer
+//     {
+//         test.synchronizeDevice();
+//         flip_image_to_framebuffer<<<ldr_flip.getGridDim(), ldr_flip.getBlockDim()>>>(ldr_flip.getDeviceData(),
+//                                                                                         ldr_flip.getDimensions());
+//         CUDA_SYNC_CHECK();
+//     }
+
+//     return pooledValues.getMean();
+// }
+
 // Compute PSNR between two images.
 float computePsnr(const std::vector<uchar4>& ref, const std::vector<uchar4>& test, int width, int height) {
     double mse = 0.0;
@@ -129,12 +191,28 @@ float computePsnr(const std::vector<uchar4>& ref, const std::vector<uchar4>& tes
     return static_cast<float>(psnr);
 }
 
+void flipVertically(std::vector<uchar4>& pixels, int width, int height) {
+    for (int y = 0; y < height / 2; ++y) {
+        int oppositeY = height - 1 - y;
+        for (int x = 0; x < width; ++x) {
+            int topIdx = y * width + x;
+            int bottomIdx = oppositeY * width + x;
+            uchar4 tmp = pixels[topIdx];
+            pixels[topIdx] = pixels[bottomIdx];
+            pixels[bottomIdx] = tmp;
+        }
+    }
+}
+
 // Load image using stb_image.
 bool loadImage(const char* path, std::vector<uchar4>& pixels, int& width, int& height) {
-    int channels;
-    unsigned char* data = stbi_load(path, &width, &height, &channels, 0);
+    // Make loading deterministic and avoid hidden orientation transforms.
+    stbi_set_flip_vertically_on_load(false);
+
+    int channels = 0;
+    unsigned char* data = stbi_load(path, &width, &height, &channels, 3);
     if (!data) {
-        std::fprintf(stderr, "Failed to load image: %s\n", path);
+        std::fprintf(stderr, "Failed to load image: %s (%s)\n", path, stbi_failure_reason());
         return false;
     }
 
@@ -142,36 +220,14 @@ bool loadImage(const char* path, std::vector<uchar4>& pixels, int& width, int& h
     size_t pixelCount = static_cast<size_t>(width) * static_cast<size_t>(height);
     pixels.resize(pixelCount);
 
-    if (channels == 1) {
-        // Grayscale - replicate to RGB.
-        for (size_t i = 0; i < pixelCount; ++i) {
-            unsigned char val = data[i];
-            pixels[i] = {val, val, val, 255};
-        }
-    } else if (channels == 3) {
-        // RGB - add alpha.
-        for (size_t i = 0; i < pixelCount; ++i) {
-            pixels[i] = {
-                data[i * 3 + 0],
-                data[i * 3 + 1],
-                data[i * 3 + 2],
-                255
-            };
-        }
-    } else if (channels == 4) {
-        // RGBA - use directly (ignore alpha for comparison).
-        for (size_t i = 0; i < pixelCount; ++i) {
-            pixels[i] = {
-                data[i * 4 + 0],
-                data[i * 4 + 1],
-                data[i * 4 + 2],
-                255
-            };
-        }
-    } else {
-        std::fprintf(stderr, "Unsupported channel count: %d\n", channels);
-        stbi_image_free(data);
-        return false;
+    // data is forced to RGB above (3 channels).
+    for (size_t i = 0; i < pixelCount; ++i) {
+        pixels[i] = {
+            data[i * 3 + 0],
+            data[i * 3 + 1],
+            data[i * 3 + 2],
+            255
+        };
     }
 
     stbi_image_free(data);
@@ -216,6 +272,18 @@ int main(int argc, char* argv[]) {
         std::fprintf(stderr, "  Reference: %dx%d\n", refWidth, refHeight);
         std::fprintf(stderr, "  Test:      %dx%d\n", testWidth, testHeight);
         return 1;
+    }
+
+    // Some renderers/write paths disagree on image origin. Detect and fix this
+    // before computing FLIP so compare_images matches evaluate semantics.
+    float psnrNoFlip = computePsnr(refPixels, testPixels, refWidth, refHeight);
+    std::vector<uchar4> testPixelsFlipped = testPixels;
+    flipVertically(testPixelsFlipped, refWidth, refHeight);
+    float psnrFlipY = computePsnr(refPixels, testPixelsFlipped, refWidth, refHeight);
+    if (psnrFlipY > psnrNoFlip + 3.0f) {
+        testPixels.swap(testPixelsFlipped);
+        std::printf("Detected Y-flipped test image (PSNR %.2f -> %.2f dB). Using flipped orientation.\n",
+                    psnrNoFlip, psnrFlipY);
     }
 
     // Compute PSNR.
