@@ -98,7 +98,6 @@ add_executable(imgui_renderer
     src/stb_image_write.cpp
     src/tinyexr.cpp
     src/tinygltf.cpp
-    src/triangle.h
     src/vec3.h
 )
 target_include_directories(imgui_renderer PRIVATE
@@ -237,7 +236,6 @@ add_executable(evaluate
     src/scene.cu
     src/scene.h
     src/tinygltf.cpp
-    src/triangle.h
     src/vec3.h
 )
 target_include_directories(evaluate PRIVATE

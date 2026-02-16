@@ -313,11 +313,9 @@ __global__ void initializePathStateKernel(Vec3* throughput,
             } else {
                 normal = Vec3(0.0f, 1.0f, 0.0f);
             }
+            // Flip normal to face viewer (match NBVH's shading_frame)
             if (dot(normal, primaryRay.direction) > 0.0f) {
-                throughput[sampleIdx] = Vec3(0.0f, 0.0f, 0.0f);
-                radiance[sampleIdx] = Vec3(0.0f, 0.0f, 0.0f);
-                active[sampleIdx] = 0;
-                continue;
+                normal = normal * -1.0f;
             }
             // Initialize throughput to 1.0 (albedo is in BRDF)
             sampleThroughput = Vec3(1.0f, 1.0f, 1.0f);
@@ -399,11 +397,9 @@ __global__ void sampleBounceDirectionsKernel(const float* hitPositions,
             incomingDir = primaryRay.direction;
         }
 
-        // Check for back-facing hit
+        // Flip normal to face viewer (match NBVH's shading_frame)
         if (dot(normal, incomingDir) > 0.0f) {
-            if (pathActive) pathActive[sampleIdx] = 0;
-            bouncePdfs[sampleIdx] = 0.0f;
-            continue;
+            normal = normal * -1.0f;
         }
 
         // Sample Disney BRDF for bounce direction
@@ -1721,12 +1717,12 @@ __global__ void lambertKernel(uchar4* output,
             } else {
                 normal = Vec3(0.0f, 1.0f, 0.0f);
             }
+            // Flip normal to face viewer (match NBVH's shading_frame)
             if (dot(normal, primaryRay.direction) > 0.0f) {
-                color = Vec3(0.0f, 0.0f, 0.0f);
-            } else {
-                float ndotl = fmaxf(0.0f, dot(normal, -primaryRay.direction));
-                color = baseColor * ndotl;
+                normal = normal * -1.0f;
             }
+            float ndotl = fmaxf(0.0f, dot(normal, -primaryRay.direction));
+            color = baseColor * ndotl;
         } else {
             color = sampleEnvironment(env, primaryRay.direction);
         }

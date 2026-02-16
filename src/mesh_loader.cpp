@@ -315,12 +315,12 @@ bool LoadGltfWithMaterials(const std::string& path,
         // mat.specular.value = 0.0f;
 
         // andalusian
-        // mat.metallic.value = 0.6f;
-        // mat.roughness.value = 0.4f;
-        // mat.specular.value = 0.5f;
-        mat.metallic.value = 0.0f;
-        mat.roughness.value = 1.0f;
-        mat.specular.value = 0.0f;        
+        mat.metallic.value = 0.6f;
+        mat.roughness.value = 0.4f;
+        mat.specular.value = 0.5f;
+        // mat.metallic.value = 0.0f;
+        // mat.roughness.value = 1.0f;
+        // mat.specular.value = 0.0f;        
 
         // mat.specular.textured = false;
         // mat.specular.value = 0.5f;
