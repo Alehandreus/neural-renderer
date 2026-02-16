@@ -210,8 +210,15 @@ int main(int argc, char** argv) {
     if (!config.checkpoint_path.empty()) {
         loaded = renderer.loadWeightsFromFile(config.checkpoint_path.c_str());
     }
+    size_t checkpointFileBytes = 0;
+    if (loaded && !config.checkpoint_path.empty()) {
+        std::error_code ec;
+        auto sz = std::filesystem::file_size(config.checkpoint_path, ec);
+        if (!ec) checkpointFileBytes = static_cast<size_t>(sz);
+    }
     if (loaded) {
-        std::printf("Neural parameters loaded from file.\n");
+        std::printf("Neural parameters loaded from file (%.2f MB).\n",
+                    static_cast<double>(checkpointFileBytes) / (1024.0 * 1024.0));
     } else {
         std::printf("Neural parameters not loaded (using initialization).\n");
     }
@@ -479,8 +486,18 @@ int main(int argc, char** argv) {
                             totalBytes,
                             static_cast<double>(totalBytes) / (1024.0 * 1024.0));
             }
-            ImGui::Text("Network params (fp16): %.2f MB",
-                        static_cast<double>(renderer.paramsBytes()) / (1024.0 * 1024.0));
+            ImGui::Text("Network (checkpoint): %.2f MB",
+                        static_cast<double>(checkpointFileBytes) / (1024.0 * 1024.0));
+            auto meshBytes = [](const Mesh& m) -> size_t {
+                return m.vertices_.size() * sizeof(Vec3)
+                     + m.indices_.size() * sizeof(uint3)
+                     + m.bvhStorageBytes();
+            };
+            const size_t totalAllBytes = checkpointFileBytes
+                + meshBytes(innerShell) + meshBytes(outerShell);
+            ImGui::Separator();
+            ImGui::Text("Total (network + shells): %.2f MB",
+                        static_cast<double>(totalAllBytes) / (1024.0 * 1024.0));
             ImGui::TreePop();
         }
         ImGui::Text("FPS: %.1f", io.Framerate);
