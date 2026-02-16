@@ -1754,8 +1754,7 @@ void checkCuda(cudaError_t result, const char* context) {
 
 RendererNeural::RendererNeural(Scene& scene, const NeuralNetworkConfig* nnConfig)
         : scene_(&scene),
-          lightDir_(normalize(Vec3(1.0f, 1.5f, -1.0f))),
-          useMidpointEncoding_(nnConfig ? nnConfig->use_midpoint_encoding : false) {
+          lightDir_(normalize(Vec3(1.0f, 1.5f, -1.0f))) {
     int log2HashmapSize = 14;
     int baseResolution = 16;
     if (nnConfig != nullptr) {
@@ -1763,7 +1762,7 @@ RendererNeural::RendererNeural(Scene& scene, const NeuralNetworkConfig* nnConfig
         baseResolution = nnConfig->base_resolution;
     }
 
-    pointCount_ = useMidpointEncoding_ ? 3u : 2u;
+    pointCount_ = 3u;
     // Raw input: [entry.xyz | exit.xyz | [mid.xyz] | dir.xyz]
     inputDims_ = pointCount_ * 3u + 3u;
 
@@ -1790,9 +1789,7 @@ RendererNeural::RendererNeural(Scene& scene, const NeuralNetworkConfig* nnConfig
     tcnn::json nestedEncodings = tcnn::json::array();
     nestedEncodings.push_back(hashgridConfig);   // dims 0–2: entry
     nestedEncodings.push_back(hashgridConfig);   // dims 3–5: exit
-    if (useMidpointEncoding_) {
-        nestedEncodings.push_back(hashgridConfig);  // dims 6–8: midpoint
-    }
+    nestedEncodings.push_back(hashgridConfig);   // dims 6–8: midpoint
     nestedEncodings.push_back(dirEncConfig);     // dims (pointCount*3) – (pointCount*3+2): direction
 
     tcnn::json encodingConfig = {

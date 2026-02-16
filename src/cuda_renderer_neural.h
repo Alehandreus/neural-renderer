@@ -171,7 +171,6 @@ class RendererNeural final {
 
     bool lambertView_ = false;
     bool useNeuralQuery_ = false;
-    bool useMidpointEncoding_ = false;
     bool swapParamOrder_ = true;  // checkpoint has [hg | mlp] instead of [mlp | hg]
     int samplesPerPixel_ = 1;
     int bounceCount_ = 0;

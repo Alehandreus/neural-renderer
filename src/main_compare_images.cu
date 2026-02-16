@@ -51,8 +51,8 @@ float computeFlip(const std::vector<uchar4>& ref, const std::vector<uchar4>& tes
     // Calculate PPD.
     flipOptions.PPD = calculatePPD(flipOptions.monitorDistance, flipOptions.monitorResolutionX, flipOptions.monitorWidth);
 
-    reference.LinearRGB2sRGB();
-    testImage.LinearRGB2sRGB();
+    // reference.LinearRGB2sRGB();
+    // testImage.LinearRGB2sRGB();
 
     // Compute FLIP.
     errorMapFLIP.FLIP(reference, testImage, flipOptions.PPD);

@@ -3,6 +3,7 @@
 #include <json/json.hpp>
 #include <fstream>
 #include <cmath>
+#include <filesystem>
 
 using json = nlohmann::json;
 
@@ -12,6 +13,13 @@ bool LoadConfigFromFile(const char* configPath, RendererConfig* config, std::str
         *error = std::string("Failed to open config file: ") + configPath;
         return false;
     }
+
+    // Resolve relative paths against the config file's directory.
+    std::filesystem::path configDir = std::filesystem::path(configPath).parent_path();
+    auto resolvePath = [&](const std::string& p) -> std::string {
+        if (p.empty() || std::filesystem::path(p).is_absolute()) return p;
+        return (configDir / p).string();
+    };
 
     json j;
     try {
@@ -28,36 +36,36 @@ bool LoadConfigFromFile(const char* configPath, RendererConfig* config, std::str
 
             if (scene.contains("original_mesh")) {
                 auto& orig = scene["original_mesh"];
-                config->original_mesh.path = orig.value("path", "");
+                config->original_mesh.path = resolvePath(orig.value("path", ""));
                 config->original_mesh.scale = orig.value("scale", 1.0f);
             }
 
             if (scene.contains("inner_shell")) {
                 auto& inner = scene["inner_shell"];
-                config->inner_shell.path = inner.value("path", "");
+                config->inner_shell.path = resolvePath(inner.value("path", ""));
                 config->inner_shell.scale = inner.value("scale", 1.0f);
             }
 
             if (scene.contains("outer_shell")) {
                 auto& outer = scene["outer_shell"];
-                config->outer_shell.path = outer.value("path", "");
+                config->outer_shell.path = resolvePath(outer.value("path", ""));
                 config->outer_shell.scale = outer.value("scale", 1.0f);
             }
 
             if (scene.contains("additional_mesh")) {
                 auto& additional = scene["additional_mesh"];
-                config->additional_mesh.path = additional.value("path", "");
+                config->additional_mesh.path = resolvePath(additional.value("path", ""));
                 config->additional_mesh.scale = additional.value("scale", 1.0f);
             }
         }
 
         // Parse checkpoint path
-        config->checkpoint_path = j.value("checkpoint_path", "");
+        config->checkpoint_path = resolvePath(j.value("checkpoint_path", ""));
 
         // Parse environment
         if (j.contains("environment")) {
             auto& env = j["environment"];
-            config->environment.hdri_path = env.value("hdri_path", "");
+            config->environment.hdri_path = resolvePath(env.value("hdri_path", ""));
             config->environment.rotation = env.value("rotation", 0.0f);
             config->environment.strength = env.value("strength", 1.0f);
         }
@@ -125,7 +133,6 @@ bool LoadConfigFromFile(const char* configPath, RendererConfig* config, std::str
             config->neural_network.log2_hashmap_size = nn.value("log2_hashmap_size", 14);
             config->neural_network.base_resolution = nn.value("base_resolution", 16);
             config->neural_network.use_neural_query = nn.value("use_neural_query", false);
-            config->neural_network.use_midpoint_encoding = nn.value("use_midpoint_encoding", false);
         }
 
     } catch (const std::exception& e) {
