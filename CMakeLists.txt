@@ -75,7 +75,7 @@ target_compile_definitions(imgui PUBLIC IMGUI_DISABLE_OBSOLETE_FUNCTIONS)
 
 find_package(OpenGL REQUIRED)
 
-add_executable(imgui_renderer
+add_executable(viewer
     src/bvh_data.h
     src/config_loader.cpp
     src/config_loader.h
@@ -83,7 +83,7 @@ add_executable(imgui_renderer
     src/cuda_renderer_neural.h
     src/input_controller.cpp
     src/input_controller.h
-    src/main.cu
+    src/viewer.cu
     src/mesh.cu
     src/mesh.h
     src/mesh_bvh.cpp
@@ -100,20 +100,20 @@ add_executable(imgui_renderer
     src/tinygltf.cpp
     src/vec3.h
 )
-target_include_directories(imgui_renderer PRIVATE
+target_include_directories(viewer PRIVATE
     ${tinyexr_SOURCE_DIR}
     ${tinyexr_SOURCE_DIR}/deps/miniz
     ${stb_SOURCE_DIR}
 )
-target_link_libraries(imgui_renderer PRIVATE imgui glfw OpenGL::GL bvh tiny-cuda-nn nfd)
+target_link_libraries(viewer PRIVATE imgui glfw OpenGL::GL bvh tiny-cuda-nn nfd)
 if (TARGET assimp::assimp)
-    target_link_libraries(imgui_renderer PRIVATE assimp::assimp)
+    target_link_libraries(viewer PRIVATE assimp::assimp)
 else()
-    target_link_libraries(imgui_renderer PRIVATE assimp)
+    target_link_libraries(viewer PRIVATE assimp)
 endif()
 
 # ---------------------------------------------------------------------------
-# OptiX hardware ray tracing (optional — set OPTIX_ROOT_DIR to SDK root)
+# OptiX hardware ray tracing (optional)
 # ---------------------------------------------------------------------------
 option(USE_OPTIX "Enable OptiX hardware ray tracing" OFF)
 
@@ -199,22 +199,22 @@ if(USE_OPTIX)
     add_dependencies(optix_ptx_header optix_programs_ptx)
 
     # -----------------------------------------------------------------------
-    # Wire into imgui_renderer
+    # Wire into viewer
     # -----------------------------------------------------------------------
-    target_sources(imgui_renderer PRIVATE
+    target_sources(viewer PRIVATE
         src/rt/optix_state.cu
         src/rt/optix_state.h
         src/rt/optix_launch_params.h
     )
 
-    add_dependencies(imgui_renderer optix_ptx_header)
+    add_dependencies(viewer optix_ptx_header)
 
-    target_include_directories(imgui_renderer PRIVATE
+    target_include_directories(viewer PRIVATE
         ${OPTIX_INCLUDE_DIR}
         ${CMAKE_CURRENT_BINARY_DIR}   # for optix_programs_ptx.h
     )
-    target_compile_definitions(imgui_renderer PRIVATE USE_OPTIX)
-    target_link_libraries(imgui_renderer PRIVATE CUDA::cuda_driver)
+    target_compile_definitions(viewer PRIVATE USE_OPTIX)
+    target_link_libraries(viewer PRIVATE CUDA::cuda_driver)
 endif()
 
 # Evaluation tool (ground truth vs neural comparison with PSNR and FLIP)
@@ -224,7 +224,8 @@ add_executable(evaluate
     src/config_loader.h
     src/cuda_renderer_neural.cu
     src/cuda_renderer_neural.h
-    src/main_comparison.cu
+    src/evaluate.cu
+    src/image_utils.h
     src/mesh.cu
     src/mesh.h
     src/mesh_bvh.cpp
@@ -235,6 +236,8 @@ add_executable(evaluate
     src/renderer.h
     src/scene.cu
     src/scene.h
+    src/stb_image.cpp
+    src/stb_image_write.cpp
     src/tinygltf.cpp
     src/vec3.h
 )
@@ -254,7 +257,10 @@ endif()
 
 # Image comparison tool (PSNR and FLIP between two existing images)
 add_executable(compare_images
-    src/main_compare_images.cu
+    src/compare_images.cu
+    src/image_utils.h
+    src/stb_image.cpp
+    src/stb_image_write.cpp
 )
 target_include_directories(compare_images PRIVATE
     ${stb_SOURCE_DIR}

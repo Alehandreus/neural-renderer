@@ -37,21 +37,6 @@ std::string filenameFromPath(const std::string& path) {
     return std::filesystem::path(path).filename().string();
 }
 
-bool loadMesh(const char* path, Mesh* mesh, const char* label, bool normalize, bool nearestTex, float scale = 1.0f) {
-    if (!path || path[0] == '\0') return false;
-    std::string loadError;
-    // Use LoadMeshAuto which auto-detects format:
-    // - .gltf/.glb -> LoadGltfWithMaterials (full material/texture support)
-    // - others -> LoadMeshFromFile (geometry only, use global material)
-    bool loaded = LoadMeshAuto(path, mesh, &loadError, normalize, scale);
-    if (loaded) {
-        mesh->setTextureNearest(nearestTex);
-    } else {
-        std::fprintf(stderr, "Failed to load %s mesh '%s': %s\n", label, path, loadError.c_str());
-    }
-    return loaded;
-}
-
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -71,7 +56,7 @@ int main(int argc, char** argv) {
 
     const int startWidth = 1920;
     const int startHeight = 1080;
-    GLFWwindow* window = glfwCreateWindow(startWidth, startHeight, "CUDA ImGui Sphere", nullptr, nullptr);
+    GLFWwindow* window = glfwCreateWindow(startWidth, startHeight, "Neural Renderer", nullptr, nullptr);
     if (!window) {
         std::fprintf(stderr, "Failed to create GLFW window.\n");
         glfwTerminate();
@@ -127,29 +112,29 @@ int main(int argc, char** argv) {
     std::string innerShellLabel = "(none)";
     std::string outerShellLabel = "(none)";
 
-    if (!config.original_mesh.path.empty() && loadMesh(config.original_mesh.path.c_str(), &originalMesh, "original",
-                                                        false, true,
-                                                        config.original_mesh.scale)) {
+    if (!config.original_mesh.path.empty() &&
+        LoadMeshLabeled(config.original_mesh.path.c_str(), &originalMesh, "original",
+                        false, true, config.original_mesh.scale)) {
     }
     if (originalMesh.numTriangles() == 0) {
         GenerateUvSphere(&originalMesh, 48, 96, 1.0f);
     }
 
-    if (!config.inner_shell.path.empty() && loadMesh(config.inner_shell.path.c_str(), &innerShell, "inner shell",
-                                                      false, false,
-                                                      config.inner_shell.scale)) {
+    if (!config.inner_shell.path.empty() &&
+        LoadMeshLabeled(config.inner_shell.path.c_str(), &innerShell, "inner shell",
+                        false, false, config.inner_shell.scale)) {
         innerShellLabel = filenameFromPath(config.inner_shell.path);
     }
 
-    if (!config.outer_shell.path.empty() && loadMesh(config.outer_shell.path.c_str(), &outerShell, "outer shell",
-                                                      false, false,
-                                                      config.outer_shell.scale)) {
+    if (!config.outer_shell.path.empty() &&
+        LoadMeshLabeled(config.outer_shell.path.c_str(), &outerShell, "outer shell",
+                        false, false, config.outer_shell.scale)) {
         outerShellLabel = filenameFromPath(config.outer_shell.path);
     }
 
-    if (!config.additional_mesh.path.empty() && loadMesh(config.additional_mesh.path.c_str(), &additionalMesh, "additional mesh",
-                                                          false, true,
-                                                          config.additional_mesh.scale)) {
+    if (!config.additional_mesh.path.empty() &&
+        LoadMeshLabeled(config.additional_mesh.path.c_str(), &additionalMesh, "additional mesh",
+                        false, true, config.additional_mesh.scale)) {
     }
 
     std::string envError;

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdio>
 #include <string>
 
 #include "mesh.h"
@@ -33,3 +34,17 @@ bool LoadMeshAuto(const std::string& path,
 
 // Generate a UV sphere mesh (for testing/default geometry)
 void GenerateUvSphere(Mesh* outMesh, int stacks, int slices, float radius);
+
+// Convenience wrapper: auto-load a mesh with an error label and optional nearest-neighbor textures.
+inline bool LoadMeshLabeled(const char* path, Mesh* mesh, const char* label,
+                             bool normalize, bool nearestTex, float scale = 1.0f) {
+    if (!path || path[0] == '\0') return false;
+    std::string loadError;
+    bool loaded = LoadMeshAuto(path, mesh, &loadError, normalize, scale);
+    if (loaded) {
+        mesh->setTextureNearest(nearestTex);
+    } else {
+        std::fprintf(stderr, "Failed to load %s mesh '%s': %s\n", label, path, loadError.c_str());
+    }
+    return loaded;
+}
