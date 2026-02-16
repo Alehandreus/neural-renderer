@@ -507,9 +507,9 @@ __global__ void checkBounceEarlyTerminationKernel(
         }
 
         // Skip if no neural distance available
-        // if (!bounceDistances || bounceDistances[sampleIdx] <= 0.0f) {
-        //     continue;
-        // }
+        if (!bounceDistances || bounceDistances[sampleIdx] <= 0.0f) {
+            continue;
+        }
 
         Vec3 origin(bounceOrigins[base + 0], bounceOrigins[base + 1], bounceOrigins[base + 2]);
         Vec3 dir(bounceDirections[base + 0], bounceDirections[base + 1], bounceDirections[base + 2]);

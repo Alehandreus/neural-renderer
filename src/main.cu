@@ -128,8 +128,7 @@ int main(int argc, char** argv) {
     std::string outerShellLabel = "(none)";
 
     if (!config.original_mesh.path.empty() && loadMesh(config.original_mesh.path.c_str(), &originalMesh, "original",
-                                                        config.rendering.normalize_meshes,
-                                                        config.rendering.nearest_texture_sampling,
+                                                        false, true,
                                                         config.original_mesh.scale)) {
     }
     if (originalMesh.numTriangles() == 0) {
@@ -137,20 +136,19 @@ int main(int argc, char** argv) {
     }
 
     if (!config.inner_shell.path.empty() && loadMesh(config.inner_shell.path.c_str(), &innerShell, "inner shell",
-                                                      config.rendering.normalize_meshes, false,
+                                                      false, false,
                                                       config.inner_shell.scale)) {
         innerShellLabel = filenameFromPath(config.inner_shell.path);
     }
 
     if (!config.outer_shell.path.empty() && loadMesh(config.outer_shell.path.c_str(), &outerShell, "outer shell",
-                                                      config.rendering.normalize_meshes, false,
+                                                      false, false,
                                                       config.outer_shell.scale)) {
         outerShellLabel = filenameFromPath(config.outer_shell.path);
     }
 
     if (!config.additional_mesh.path.empty() && loadMesh(config.additional_mesh.path.c_str(), &additionalMesh, "additional mesh",
-                                                          config.rendering.normalize_meshes,
-                                                          config.rendering.nearest_texture_sampling,
+                                                          false, true,
                                                           config.additional_mesh.scale)) {
     }
 

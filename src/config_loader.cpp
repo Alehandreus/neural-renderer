@@ -93,8 +93,6 @@ bool LoadConfigFromFile(const char* configPath, RendererConfig* config, std::str
         // Parse rendering settings
         if (j.contains("rendering")) {
             auto& render = j["rendering"];
-            config->rendering.normalize_meshes = render.value("normalize_meshes", false);
-            config->rendering.nearest_texture_sampling = render.value("nearest_texture_sampling", true);
             config->rendering.total_samples = render.value("total_samples", 2048);
             config->rendering.bounce_count = render.value("bounce_count", 3);
         }

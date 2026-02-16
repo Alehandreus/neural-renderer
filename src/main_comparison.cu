@@ -307,22 +307,21 @@ int main(int argc, char** argv) {
     Mesh& additionalMesh = scene.additionalMesh();
 
     if (!loadMesh(config.original_mesh.path.c_str(), &originalMesh, "original",
-                  config.rendering.normalize_meshes, config.rendering.nearest_texture_sampling,
-                  config.original_mesh.scale)) {
+                  false, true, config.original_mesh.scale)) {
         std::fprintf(stderr, "Failed to load original mesh: %s\n", config.original_mesh.path.c_str());
         return 1;
     }
     std::printf("Loaded original mesh: %d triangles\n", originalMesh.numTriangles());
 
     if (!loadMesh(config.inner_shell.path.c_str(), &innerShell, "inner shell",
-                  config.rendering.normalize_meshes, false, config.inner_shell.scale)) {
+                  false, false, config.inner_shell.scale)) {
         std::fprintf(stderr, "Failed to load inner shell: %s\n", config.inner_shell.path.c_str());
         return 1;
     }
     std::printf("Loaded inner shell: %d triangles\n", innerShell.numTriangles());
 
     if (!loadMesh(config.outer_shell.path.c_str(), &outerShell, "outer shell",
-                  config.rendering.normalize_meshes, false, config.outer_shell.scale)) {
+                  false, false, config.outer_shell.scale)) {
         std::fprintf(stderr, "Failed to load outer shell: %s\n", config.outer_shell.path.c_str());
         return 1;
     }
@@ -330,8 +329,7 @@ int main(int argc, char** argv) {
 
     if (!config.additional_mesh.path.empty() &&
         loadMesh(config.additional_mesh.path.c_str(), &additionalMesh, "additional mesh",
-                 config.rendering.normalize_meshes, config.rendering.nearest_texture_sampling,
-                 config.additional_mesh.scale)) {
+                 false, true, config.additional_mesh.scale)) {
         std::printf("Loaded additional mesh: %d triangles\n", additionalMesh.numTriangles());
     }
 

@@ -21,8 +21,6 @@ struct CameraConfig {
 };
 
 struct RenderingConfig {
-    bool normalize_meshes = false;
-    bool nearest_texture_sampling = true;
     int total_samples = 2048;
     int bounce_count = 3;
 };
