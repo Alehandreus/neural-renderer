@@ -108,6 +108,13 @@ bool LoadConfigFromFile(const char* configPath, RendererConfig* config, std::str
             config->material.sheen_tint = mat.value("sheen_tint", 0.0f);
             config->material.clearcoat = mat.value("clearcoat", 0.0f);
             config->material.clearcoat_gloss = mat.value("clearcoat_gloss", 0.0f);
+            config->material.use_constant_neural_color = mat.value("use_constant_neural_color", false);
+
+            if (mat.contains("constant_neural_color") && mat["constant_neural_color"].is_array() && mat["constant_neural_color"].size() == 3) {
+                config->material.constant_neural_color.x = mat["constant_neural_color"][0].get<float>();
+                config->material.constant_neural_color.y = mat["constant_neural_color"][1].get<float>();
+                config->material.constant_neural_color.z = mat["constant_neural_color"][2].get<float>();
+            }
         }
 
         // Parse neural network settings

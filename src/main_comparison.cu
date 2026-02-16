@@ -333,17 +333,35 @@ int main(int argc, char** argv) {
         std::printf("Loaded additional mesh: %d triangles\n", additionalMesh.numTriangles());
     }
 
-    // Apply material config to scene (use global material for non-GLTF meshes)
-    scene.globalMaterial().base_color = MaterialParamVec3::constant(config.material.base_color);
-    scene.globalMaterial().roughness = MaterialParam::constant(config.material.roughness);
-    scene.globalMaterial().metallic = MaterialParam::constant(config.material.metallic);
-    scene.globalMaterial().specular = MaterialParam::constant(config.material.specular);
-    scene.globalMaterial().specular_tint = MaterialParam::constant(config.material.specular_tint);
-    scene.globalMaterial().anisotropy = MaterialParam::constant(config.material.anisotropy);
-    scene.globalMaterial().sheen = MaterialParam::constant(config.material.sheen);
-    scene.globalMaterial().sheen_tint = MaterialParam::constant(config.material.sheen_tint);
-    scene.globalMaterial().clearcoat = MaterialParam::constant(config.material.clearcoat);
-    scene.globalMaterial().clearcoat_gloss = MaterialParam::constant(config.material.clearcoat_gloss);
+    // Apply material config to scene
+    auto applyMaterialConfig = [&](Material& mat) {
+        mat.base_color = MaterialParamVec3::constant(config.material.base_color);
+        mat.roughness = MaterialParam::constant(config.material.roughness);
+        mat.metallic = MaterialParam::constant(config.material.metallic);
+        mat.specular = MaterialParam::constant(config.material.specular);
+        mat.specular_tint = MaterialParam::constant(config.material.specular_tint);
+        mat.anisotropy = MaterialParam::constant(config.material.anisotropy);
+        mat.sheen = MaterialParam::constant(config.material.sheen);
+        mat.sheen_tint = MaterialParam::constant(config.material.sheen_tint);
+        mat.clearcoat = MaterialParam::constant(config.material.clearcoat);
+        mat.clearcoat_gloss = MaterialParam::constant(config.material.clearcoat_gloss);
+    };
+    auto applyMaterialParamsOnly = [&](Material& mat) {
+        mat.roughness = MaterialParam::constant(config.material.roughness);
+        mat.metallic = MaterialParam::constant(config.material.metallic);
+        mat.specular = MaterialParam::constant(config.material.specular);
+        mat.specular_tint = MaterialParam::constant(config.material.specular_tint);
+        mat.anisotropy = MaterialParam::constant(config.material.anisotropy);
+        mat.sheen = MaterialParam::constant(config.material.sheen);
+        mat.sheen_tint = MaterialParam::constant(config.material.sheen_tint);
+        mat.clearcoat = MaterialParam::constant(config.material.clearcoat);
+        mat.clearcoat_gloss = MaterialParam::constant(config.material.clearcoat_gloss);
+    };
+    applyMaterialConfig(scene.globalMaterial());
+    for (auto& mat : originalMesh.materials_) applyMaterialParamsOnly(mat);
+    for (auto& mat : innerShell.materials_) applyMaterialParamsOnly(mat);
+    for (auto& mat : outerShell.materials_) applyMaterialParamsOnly(mat);
+    for (auto& mat : additionalMesh.materials_) applyMaterialParamsOnly(mat);
 
     // Load environment.
     std::string envError;
@@ -357,6 +375,7 @@ int main(int argc, char** argv) {
 
     // Create renderer.
     RendererNeural renderer(scene, &config.neural_network);
+    renderer.setConstantNeuralColor(config.material.use_constant_neural_color, config.material.constant_neural_color);
     renderer.resize(kWidth, kHeight);
     renderer.setBounceCount(kBounceCount);
     renderer.setLambertView(false);

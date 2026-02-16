@@ -162,17 +162,36 @@ int main(int argc, char** argv) {
     scene.environment().setRotation(config.environment.rotation);
     scene.environment().setStrength(config.environment.strength);
 
-    // Apply material config to scene (use global material for non-GLTF meshes)
-    scene.globalMaterial().base_color = MaterialParamVec3::constant(config.material.base_color);
-    scene.globalMaterial().roughness = MaterialParam::constant(config.material.roughness);
-    scene.globalMaterial().metallic = MaterialParam::constant(config.material.metallic);
-    scene.globalMaterial().specular = MaterialParam::constant(config.material.specular);
-    scene.globalMaterial().specular_tint = MaterialParam::constant(config.material.specular_tint);
-    scene.globalMaterial().anisotropy = MaterialParam::constant(config.material.anisotropy);
-    scene.globalMaterial().sheen = MaterialParam::constant(config.material.sheen);
-    scene.globalMaterial().sheen_tint = MaterialParam::constant(config.material.sheen_tint);
-    scene.globalMaterial().clearcoat = MaterialParam::constant(config.material.clearcoat);
-    scene.globalMaterial().clearcoat_gloss = MaterialParam::constant(config.material.clearcoat_gloss);
+    // Apply material config to scene
+    auto applyMaterialConfig = [&](Material& mat) {
+        mat.base_color = MaterialParamVec3::constant(config.material.base_color);
+        mat.roughness = MaterialParam::constant(config.material.roughness);
+        mat.metallic = MaterialParam::constant(config.material.metallic);
+        mat.specular = MaterialParam::constant(config.material.specular);
+        mat.specular_tint = MaterialParam::constant(config.material.specular_tint);
+        mat.anisotropy = MaterialParam::constant(config.material.anisotropy);
+        mat.sheen = MaterialParam::constant(config.material.sheen);
+        mat.sheen_tint = MaterialParam::constant(config.material.sheen_tint);
+        mat.clearcoat = MaterialParam::constant(config.material.clearcoat);
+        mat.clearcoat_gloss = MaterialParam::constant(config.material.clearcoat_gloss);
+    };
+    // Override only non-texture material params on per-mesh materials (preserve base_color textures)
+    auto applyMaterialParamsOnly = [&](Material& mat) {
+        mat.roughness = MaterialParam::constant(config.material.roughness);
+        mat.metallic = MaterialParam::constant(config.material.metallic);
+        mat.specular = MaterialParam::constant(config.material.specular);
+        mat.specular_tint = MaterialParam::constant(config.material.specular_tint);
+        mat.anisotropy = MaterialParam::constant(config.material.anisotropy);
+        mat.sheen = MaterialParam::constant(config.material.sheen);
+        mat.sheen_tint = MaterialParam::constant(config.material.sheen_tint);
+        mat.clearcoat = MaterialParam::constant(config.material.clearcoat);
+        mat.clearcoat_gloss = MaterialParam::constant(config.material.clearcoat_gloss);
+    };
+    applyMaterialConfig(scene.globalMaterial());
+    for (auto& mat : originalMesh.materials_) applyMaterialParamsOnly(mat);
+    for (auto& mat : innerShell.materials_) applyMaterialParamsOnly(mat);
+    for (auto& mat : outerShell.materials_) applyMaterialParamsOnly(mat);
+    for (auto& mat : additionalMesh.materials_) applyMaterialParamsOnly(mat);
 
     // Set camera from config matrix
     Vec3 configCamPos;
@@ -201,6 +220,7 @@ int main(int argc, char** argv) {
     }
 
     RendererNeural renderer(scene, &config.neural_network);
+    renderer.setConstantNeuralColor(config.material.use_constant_neural_color, config.material.constant_neural_color);
     bool loaded = false;
     renderer.setUseNeuralQuery(false);
     renderer.setBounceCount(kBounceCount);
@@ -246,7 +266,6 @@ int main(int argc, char** argv) {
     float envmapStrength = config.environment.strength;
     float lastEnvmapStrength = envmapStrength;
     bool uiWantsMouse = false;
-    Material lastMaterial = scene.globalMaterial();
 
     while (!glfwWindowShouldClose(window)) {
         double now = glfwGetTime();
@@ -350,39 +369,6 @@ int main(int argc, char** argv) {
         float fovDeg = camera.fovY * (180.0f / 3.14159265f);
         if (ImGui::SliderFloat("FOV", &fovDeg, 10.0f, 120.0f, "%.1f deg")) {
             input.camera().fovY = fovDeg * (3.14159265f / 180.0f);
-        }
-        if (ImGui::TreeNode("Material properties")) {
-            Material& mat = scene.globalMaterial();
-            ImGui::ColorEdit3("Base color", &mat.base_color.value.x);
-            ImGui::SliderFloat("Roughness", &mat.roughness.value, 0.0f, 1.0f);
-            ImGui::SliderFloat("Metallic", &mat.metallic.value, 0.0f, 1.0f);
-            ImGui::SliderFloat("Specular", &mat.specular.value, 0.0f, 1.0f);
-            ImGui::SliderFloat("Specular tint", &mat.specular_tint.value, 0.0f, 1.0f);
-            ImGui::SliderFloat("Anisotropy", &mat.anisotropy.value, 0.0f, 1.0f);
-            ImGui::SliderFloat("Sheen", &mat.sheen.value, 0.0f, 1.0f);
-            ImGui::SliderFloat("Sheen tint", &mat.sheen_tint.value, 0.0f, 1.0f);
-            ImGui::SliderFloat("Clearcoat", &mat.clearcoat.value, 0.0f, 1.0f);
-            ImGui::SliderFloat("Clearcoat gloss", &mat.clearcoat_gloss.value, 0.0f, 1.0f);
-            ImGui::TreePop();
-        }
-        // Reset ray accumulation if material properties changed
-        {
-            Material& mat = scene.globalMaterial();
-            if (mat.base_color.value.x != lastMaterial.base_color.value.x ||
-                mat.base_color.value.y != lastMaterial.base_color.value.y ||
-                mat.base_color.value.z != lastMaterial.base_color.value.z ||
-                mat.roughness.value != lastMaterial.roughness.value ||
-                mat.metallic.value != lastMaterial.metallic.value ||
-                mat.specular.value != lastMaterial.specular.value ||
-                mat.specular_tint.value != lastMaterial.specular_tint.value ||
-                mat.anisotropy.value != lastMaterial.anisotropy.value ||
-                mat.sheen.value != lastMaterial.sheen.value ||
-                mat.sheen_tint.value != lastMaterial.sheen_tint.value ||
-                mat.clearcoat.value != lastMaterial.clearcoat.value ||
-                mat.clearcoat_gloss.value != lastMaterial.clearcoat_gloss.value) {
-                renderer.resetSamples();
-                lastMaterial = mat;
-            }
         }
         // Reset ray accumulation if envmap strength changed
         if (envmapStrength != lastEnvmapStrength) {

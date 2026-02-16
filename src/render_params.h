@@ -14,6 +14,8 @@ struct RenderParams {
     Vec3 outerShellMin;
     Vec3 outerShellInvExtent;
     Material material;
+    bool useConstantNeuralColor;
+    Vec3 constantNeuralColor;
     float fovY;
     float maxRadiance;
     float sceneScale;

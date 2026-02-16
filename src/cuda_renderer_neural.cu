@@ -1138,7 +1138,9 @@ __global__ void applySegmentNeuralOutputKernel(
         int* hitFlags,
         int* activeFlags,
         float* hitDistances,
-        Material material) {
+        Material material,
+        bool useConstantNeuralColor,
+        Vec3 constantNeuralColor) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= hitCount) {
         return;
@@ -1204,45 +1206,25 @@ __global__ void applySegmentNeuralOutputKernel(
         hitNormals[base + 1] = normal.y;
         hitNormals[base + 2] = normal.z;
 
-        Vec3 fallbackColor(material.base_color.value.x,
-                           material.base_color.value.y,
-                           material.base_color.value.z);
-        Vec3 neuralColor = fallbackColor;
-        if (outputStride >= 8) {
+        Vec3 neuralColor;
+        if (useConstantNeuralColor) {
+            neuralColor = constantNeuralColor;
+        } else if (outputStride >= 8) {
             neuralColor.x = saturate(cr);
             neuralColor.y = saturate(cg);
             neuralColor.z = saturate(cb);
+        } else {
+            neuralColor.x = material.base_color.value.x;
+            neuralColor.y = material.base_color.value.y;
+            neuralColor.z = material.base_color.value.z;
         }
         hitColors[base + 0] = neuralColor.x;
         hitColors[base + 1] = neuralColor.y;
         hitColors[base + 2] = neuralColor.z;
-        // hitColors[base + 0] = 0.8;
-        // hitColors[base + 1] = 0.8;
-        // hitColors[base + 2] = 0.8;
         if (hitMaterialParams) {
-            // chess
-            // hitMaterialParams[base + 0] = 0.1;
-            // hitMaterialParams[base + 1] = 0.2;
-            // hitMaterialParams[base + 2] = 0.2;
-            
-            // exhibition
-            // hitMaterialParams[base + 0] = 0.0;
-            // hitMaterialParams[base + 1] = 0.2;
-            // hitMaterialParams[base + 2] = 0.4;
-
-            // statuette
-            // hitMaterialParams[base + 0] = 0.0;
-            // hitMaterialParams[base + 1] = 1.0;
-            // hitMaterialParams[base + 2] = 0.0;
-
-            // andalusian
-            hitMaterialParams[base + 0] = 0.6;
-            hitMaterialParams[base + 1] = 0.4;
-            hitMaterialParams[base + 2] = 0.5;            
-
-            // hitMaterialParams[base + 0] = material.metallic.value;
-            // hitMaterialParams[base + 1] = material.roughness.value;
-            // hitMaterialParams[base + 2] = material.specular.value;
+            hitMaterialParams[base + 0] = material.metallic.value;
+            hitMaterialParams[base + 1] = material.roughness.value;
+            hitMaterialParams[base + 2] = material.specular.value;
         }
 
         hitFlags[sampleIdx] = 1;
@@ -2157,7 +2139,9 @@ void RendererNeural::traceNeuralSegmentsForRays(bool useCameraRays,
                 outHitFlags,
                 rayActiveFlags_,
                 outHitDistances,
-                params.material);
+                params.material,
+                params.useConstantNeuralColor,
+                params.constantNeuralColor);
         checkCuda(cudaGetLastError(), "applySegmentNeuralOutputKernel launch");
 
         prepareNextIterationKernel<<<buildGrid, buildBlock>>>(
@@ -2338,6 +2322,8 @@ void RendererNeural::render(const Vec3& camPos) {
     params.outerShellMin = outerMin;
     params.outerShellInvExtent = outerInvExtent;
     params.material = material;
+    params.useConstantNeuralColor = useConstantNeuralColor_;
+    params.constantNeuralColor = constantNeuralColor_;
     params.fovY = basis_.fovY;
     params.maxRadiance = 100.0f;
     params.sceneScale = sceneScale_;

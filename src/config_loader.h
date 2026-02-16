@@ -36,6 +36,8 @@ struct MaterialConfig {
     float sheen_tint = 0.0f;
     float clearcoat = 0.0f;
     float clearcoat_gloss = 0.0f;
+    bool use_constant_neural_color = false;
+    Vec3 constant_neural_color{0.8f, 0.8f, 0.8f};
 };
 
 struct NeuralNetworkConfig {

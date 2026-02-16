@@ -52,6 +52,7 @@ class RendererNeural final {
     int classicMeshIndex() const { return classicMeshIndex_; }
     void setEnvmapRotation(float degrees) { envmapRotation_ = degrees; }
     float envmapRotation() const { return envmapRotation_; }
+    void setConstantNeuralColor(bool use, Vec3 color) { useConstantNeuralColor_ = use; constantNeuralColor_ = color; }
     void resetSamples() { resetAccum(); }
 
     int samplesPerPixel() const { return samplesPerPixel_; }
@@ -176,6 +177,8 @@ class RendererNeural final {
     int bounceCount_ = 0;
     int classicMeshIndex_ = 0;
     float envmapRotation_ = 0.0f;
+    bool useConstantNeuralColor_ = false;
+    Vec3 constantNeuralColor_{0.8f, 0.8f, 0.8f};
     uint32_t accumSampleCount_ = 0;
 
 #ifdef USE_OPTIX
