@@ -671,16 +671,17 @@ __global__ void integrateBounceKernel(Vec3* throughput,
             continue;
         }
 
-        // Russian roulette path termination (after 3 bounces)
-        if (bounceIndex > 3) {
+        // Russian roulette: survival probability = max throughput component (clamped to 1).
+        // Applied every bounce (bounceIndex >= 1 here == NBVH rr_start_depth 2).
+        {
             Vec3 tp = throughput[sampleIdx];
-            float q = fmaxf(0.05f, 1.0f - fmaxf(tp.x, fmaxf(tp.y, tp.z)));
+            float survivalProb = fminf(1.0f, fmaxf(tp.x, fmaxf(tp.y, tp.z)));
             uint32_t rng = initRng(pixelIdx, params.sampleOffset + bounceIndex, s);
-            if (rand01(rng) < q) {
+            if (rand01(rng) >= survivalProb) {
                 active[sampleIdx] = 0;
                 continue;
             }
-            throughput[sampleIdx] = tp * (1.0f / (1.0f - q));
+            throughput[sampleIdx] = tp * (1.0f / survivalProb);
         }
     }
 }
