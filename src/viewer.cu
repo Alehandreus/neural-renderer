@@ -254,6 +254,8 @@ int main(int argc, char** argv) {
     float envmapRotation = config.environment.rotation;
     float envmapStrength = config.environment.strength;
     float lastEnvmapStrength = envmapStrength;
+    bool useDirectEnvColor = false;
+    float directEnvColor[3] = {0.0f, 0.0f, 0.0f};
     bool uiWantsMouse = false;
 
     while (!glfwWindowShouldClose(window)) {
@@ -279,6 +281,7 @@ int main(int argc, char** argv) {
         renderer.setClassicMeshIndex(classicMeshIndex);
         renderer.setEnvmapRotation(envmapRotation);
         scene.environment().setStrength(envmapStrength);
+        renderer.setDirectEnvColor(useDirectEnvColor, Vec3(directEnvColor[0], directEnvColor[1], directEnvColor[2]));
 
         glfwGetFramebufferSize(window, &fbWidth, &fbHeight);
         if (fbWidth != renderer.width() || fbHeight != renderer.height()) {
@@ -363,6 +366,16 @@ int main(int argc, char** argv) {
         if (envmapStrength != lastEnvmapStrength) {
             renderer.resetSamples();
             lastEnvmapStrength = envmapStrength;
+        }
+        if (ImGui::Checkbox("Direct env color", &useDirectEnvColor)) {
+            renderer.resetSamples();
+        }
+        if (useDirectEnvColor) {
+            ImGui::SameLine();
+            if (ImGui::ColorEdit3("##directEnvColor", directEnvColor,
+                                  ImGuiColorEditFlags_NoLabel | ImGuiColorEditFlags_Float)) {
+                renderer.resetSamples();
+            }
         }
         if (ImGui::TreeNode("Camera matrix")) {
             float matrix[16];

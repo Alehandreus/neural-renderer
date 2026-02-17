@@ -53,6 +53,7 @@ class RendererNeural final {
     void setEnvmapRotation(float degrees) { envmapRotation_ = degrees; }
     float envmapRotation() const { return envmapRotation_; }
     void setConstantNeuralColor(bool use, Vec3 color) { useConstantNeuralColor_ = use; constantNeuralColor_ = color; }
+    void setDirectEnvColor(bool use, Vec3 color) { useDirectEnvColor_ = use; directEnvColor_ = color; }
     void resetSamples() { resetAccum(); }
 
     int samplesPerPixel() const { return samplesPerPixel_; }
@@ -178,6 +179,8 @@ class RendererNeural final {
     float envmapRotation_ = 0.0f;
     bool useConstantNeuralColor_ = false;
     Vec3 constantNeuralColor_{0.8f, 0.8f, 0.8f};
+    bool useDirectEnvColor_ = false;
+    Vec3 directEnvColor_{0.0f, 0.0f, 0.0f};
     uint32_t accumSampleCount_ = 0;
 
 #ifdef USE_OPTIX

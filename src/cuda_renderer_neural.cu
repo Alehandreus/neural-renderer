@@ -321,7 +321,9 @@ __global__ void initializePathStateKernel(Vec3* throughput,
             sampleThroughput = Vec3(1.0f, 1.0f, 1.0f);
             isActive = 1;
         } else {
-            Vec3 envLight = sampleEnvironmentWithClamp(env, primaryRay.direction, params.maxRadiance);
+            Vec3 envLight = params.useDirectEnvColor
+                ? params.directEnvColor
+                : sampleEnvironmentWithClamp(env, primaryRay.direction, params.maxRadiance);
             sampleRadiance = envLight;
         }
 
@@ -2331,6 +2333,8 @@ void RendererNeural::render(const Vec3& camPos) {
     params.material = material;
     params.useConstantNeuralColor = useConstantNeuralColor_;
     params.constantNeuralColor = constantNeuralColor_;
+    params.useDirectEnvColor = useDirectEnvColor_;
+    params.directEnvColor = directEnvColor_;
     params.fovY = basis_.fovY;
     params.maxRadiance = 100.0f;
     params.sceneScale = sceneScale_;

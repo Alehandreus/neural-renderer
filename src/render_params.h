@@ -16,6 +16,8 @@ struct RenderParams {
     Material material;
     bool useConstantNeuralColor;
     Vec3 constantNeuralColor;
+    bool useDirectEnvColor;
+    Vec3 directEnvColor;
     float fovY;
     float maxRadiance;
     float sceneScale;
