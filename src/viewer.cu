@@ -256,6 +256,7 @@ int main(int argc, char** argv) {
     float lastEnvmapStrength = envmapStrength;
     bool useDirectEnvColor = false;
     float directEnvColor[3] = {0.0f, 0.0f, 0.0f};
+    bool useAdditionalMesh = additionalMesh.numTriangles() > 0;
     bool uiWantsMouse = false;
 
     while (!glfwWindowShouldClose(window)) {
@@ -282,6 +283,7 @@ int main(int argc, char** argv) {
         renderer.setEnvmapRotation(envmapRotation);
         scene.environment().setStrength(envmapStrength);
         renderer.setDirectEnvColor(useDirectEnvColor, Vec3(directEnvColor[0], directEnvColor[1], directEnvColor[2]));
+        renderer.setUseAdditionalMesh(useAdditionalMesh);
 
         glfwGetFramebufferSize(window, &fbWidth, &fbHeight);
         if (fbWidth != renderer.width() || fbHeight != renderer.height()) {
@@ -347,15 +349,18 @@ int main(int argc, char** argv) {
         ImGui::Begin("Info", nullptr, infoFlags);
         ImGui::Text("WASD move, Q/E up/down, mouse look.");
         ImGui::Text("ESC releases mouse, click to recapture.");
-        ImGui::Checkbox("Neural query", &useNeuralQuery);
+        ImGui::Checkbox("Neural Mode", &useNeuralQuery);
 #ifdef USE_OPTIX
         ImGui::Checkbox("Hardware RT (OptiX)", &useHardwareRT);
 #endif
-        ImGui::Checkbox("Lambert (no bounces)", &lambertView);
+        ImGui::Checkbox("Lambert shading", &lambertView);
         ImGui::InputInt("Max bounces", &bounceCount);
         ImGui::InputInt("Samples per pixel", &samplesPerPixel);
         const char* meshNames[] = {"Original", "Inner shell", "Outer shell"};
         ImGui::Combo("Classic mesh", &classicMeshIndex, meshNames, 3);
+        if (additionalMesh.numTriangles() > 0) {
+            ImGui::Checkbox("Extra mesh (uncompressed)", &useAdditionalMesh);
+        }
         ImGui::DragFloat("Envmap rotation", &envmapRotation, 1.0f, 0.0f, 360.0f, "%.1f deg");
         ImGui::InputFloat("Envmap strength", &envmapStrength);
         float fovDeg = camera.fovY * (180.0f / 3.14159265f);

@@ -54,6 +54,7 @@ class RendererNeural final {
     float envmapRotation() const { return envmapRotation_; }
     void setConstantNeuralColor(bool use, Vec3 color) { useConstantNeuralColor_ = use; constantNeuralColor_ = color; }
     void setDirectEnvColor(bool use, Vec3 color) { useDirectEnvColor_ = use; directEnvColor_ = color; }
+    void setUseAdditionalMesh(bool enabled) { useAdditionalMesh_ = enabled; }
     void resetSamples() { resetAccum(); }
 
     int samplesPerPixel() const { return samplesPerPixel_; }
@@ -181,6 +182,7 @@ class RendererNeural final {
     Vec3 constantNeuralColor_{0.8f, 0.8f, 0.8f};
     bool useDirectEnvColor_ = false;
     Vec3 directEnvColor_{0.0f, 0.0f, 0.0f};
+    bool useAdditionalMesh_ = true;
     uint32_t accumSampleCount_ = 0;
 
 #ifdef USE_OPTIX
@@ -194,6 +196,7 @@ class RendererNeural final {
     int lastBounceCount_ = -1;
     int lastSamplesPerPixel_ = -1;
     int lastClassicMeshIndex_ = -1;
+    bool lastUseAdditionalMesh_ = true;
     float lastEnvmapRotation_ = 0.0f;
     bool hasLastCamera_ = false;
     Vec3 lastCamPos_{};

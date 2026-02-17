@@ -1940,6 +1940,10 @@ void RendererNeural::traceNeuralSegmentsForRays(bool useCameraRays,
         return;
     }
 
+#ifdef USE_OPTIX
+    const bool useHardwareRT_ = this->useHardwareRT_ && (classicMeshIndex_ == 0);
+#endif
+
     dim3 block(8, 8);
     dim3 grid((width_ + block.x - 1) / block.x, (height_ + block.y - 1) / block.y);
 
@@ -2194,6 +2198,12 @@ void RendererNeural::render(const Vec3& camPos) {
         maxBounces = 0;
     }
 
+    // Hardware RT (OptiX) is only valid for the original mesh GAS.
+    // When a shell is selected as the classic mesh, fall back to software BVH.
+#ifdef USE_OPTIX
+    const bool useHardwareRT_ = this->useHardwareRT_ && (classicMeshIndex_ == 0);
+#endif
+
     Mesh& originalMesh = scene_->originalMesh();
     Mesh& outerShell = scene_->outerShell();
     Mesh& innerShell = scene_->innerShell();
@@ -2306,7 +2316,8 @@ void RendererNeural::render(const Vec3& camPos) {
     }
     if (cameraMoved || useNeuralQuery_ != lastUseNeuralQuery_ || lambertView_ != lastLambertView_ ||
         maxBounces != lastBounceCount_ || samplesPerPixel != lastSamplesPerPixel_ ||
-        classicMeshIndex_ != lastClassicMeshIndex_ || envmapRotation_ != lastEnvmapRotation_) {
+        classicMeshIndex_ != lastClassicMeshIndex_ || envmapRotation_ != lastEnvmapRotation_ ||
+        useAdditionalMesh_ != lastUseAdditionalMesh_) {
         resetAccum();
     }
     lastUseNeuralQuery_ = useNeuralQuery_;
@@ -2315,6 +2326,7 @@ void RendererNeural::render(const Vec3& camPos) {
     lastSamplesPerPixel_ = samplesPerPixel;
     lastClassicMeshIndex_ = classicMeshIndex_;
     lastEnvmapRotation_ = envmapRotation_;
+    lastUseAdditionalMesh_ = useAdditionalMesh_;
     lastCamPos_ = camPos;
     lastBasis_ = basis_;
     lastFovY_ = basis_.fovY;
@@ -2370,8 +2382,10 @@ void RendererNeural::render(const Vec3& camPos) {
                 hitFlags_,
                 hitDistances_);
 
-        // Always trace additional mesh (empty mesh results in all misses)
-        MeshDeviceView additionalView = scene_->additionalMesh().deviceView();
+        // Use additional mesh unless disabled; empty view results in all misses.
+        MeshDeviceView additionalView = useAdditionalMesh_
+            ? scene_->additionalMesh().deviceView()
+            : MeshDeviceView{};
 
 #ifdef USE_OPTIX
         if (useHardwareRT_ && optixState_ && optixState_->gasAdditional.handle) {
