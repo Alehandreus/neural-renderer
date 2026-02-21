@@ -520,45 +520,11 @@ __global__ void checkBounceEarlyTerminationKernel(
         HitInfo innerHit;
         bool hitInner = traceMeshWithMode(ray, innerShell, &innerHit, TraceMode::ANY, false, params.material);
 
-        // HitInfo innerHitForward;
-        // bool hitInnerForward = traceMeshWithMode(ray, innerShell, &innerHitForward, TraceMode::FORWARD_ONLY, false, params.material);
-
-        // if (hitInner && hitOuter && (innerHit.t < outerHit.t) && (outerHit.t > 0.01)) {
-        //     if (pathActive) {
-        //         pathActive[sampleIdx] = 0;
-        //     }
-        // }
-
         if (hitInner && hitOuter && (innerHit.t < outerHit.t)) {
             if (pathActive) {
                 pathActive[sampleIdx] = 0;
             }
         }
-
-        // if (hitInner) {
-        //     if (pathActive) {
-        //         pathActive[sampleIdx] = 0;
-        //     }
-        // }
-
-        // If no forward hit, ray is inside the outer shell
-        // if (!hitOuter) {
-        //     // Find the exit point
-        //     HitInfo exitHit;
-        //     bool hitExit = traceMeshWithMode(ray, outerShell, &exitHit, TraceMode::BACKWARD_ONLY, false, params.material);
-
-        //     if (hitExit) {
-        //         float neuralDist = bounceDistances[sampleIdx];
-
-        //         // If neural distance is less than exit distance, surface exists before exit
-        //         // Terminate the ray - it already hit the neural surface
-        //         if (exitHit.t > neuralDist * 100) {
-        //             if (pathActive) {
-        //                 pathActive[sampleIdx] = 0;
-        //             }
-        //         }
-        //     }
-        // }
     }
 }
 
@@ -680,118 +646,6 @@ __global__ void integrateBounceKernel(Vec3* throughput,
                 continue;
             }
             throughput[sampleIdx] = tp * (1.0f / survivalProb);
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Trace hybrid bounces: check both shells and additional mesh (two-box early culling)
-// ---------------------------------------------------------------------------
-__global__ void traceHybridBouncesKernel(
-        const float* bounceOrigins,
-        const float* bounceDirections,
-        const float* bouncePdfs,
-        MeshDeviceView outerShell,
-        MeshDeviceView additionalMesh,
-        BoundingBox shellsBounds,
-        BoundingBox additionalBounds,
-        RenderParams params,
-        float* bouncePositions,
-        float* bounceNormals,
-        float* bounceColors,
-        int* bounceHitFlags) {
-    int x = blockIdx.x * blockDim.x + threadIdx.x;
-    int y = blockIdx.y * blockDim.y + threadIdx.y;
-    if (x >= params.width || y >= params.height) return;
-
-    int pixelIdx = y * params.width + x;
-    for (int s = 0; s < params.samplesPerPixel; ++s) {
-        int sampleIdx = pixelIdx + s * params.pixelCount;
-        int base = sampleIdx * 3;
-
-        // Reconstruct bounce ray
-        Vec3 origin(bounceOrigins[base+0], bounceOrigins[base+1], bounceOrigins[base+2]);
-        Vec3 dir(bounceDirections[base+0], bounceDirections[base+1], bounceDirections[base+2]);
-        Ray ray(origin, dir);
-
-        HitInfo closestHit;
-        MeshDeviceView hitMesh = outerShell;  // Track which mesh we hit for material resolution
-        float closestT = 1e30f;
-
-        // If additional mesh is empty, only trace shells
-        if (additionalMesh.numTriangles == 0) {
-            traceMesh(ray, outerShell, &closestHit, true, params.material);
-        } else {
-            // Two-box early culling
-            Vec3 invDir(1.0f/dir.x, 1.0f/dir.y, 1.0f/dir.z);
-            float tNearShells = 0.0f, tNearAdditional = 0.0f;
-            bool hitShellsBox = intersectAabb(ray, invDir, shellsBounds.min, shellsBounds.max, 1e30f, &tNearShells);
-            bool hitAdditionalBox = intersectAabb(ray, invDir, additionalBounds.min, additionalBounds.max, 1e30f, &tNearAdditional);
-
-            // Trace in near-to-far order with early exit
-            if (hitShellsBox && hitAdditionalBox) {
-                if (tNearShells < tNearAdditional) {
-                    // Check shells first
-                    HitInfo shellHit;
-                    if (traceMesh(ray, outerShell, &shellHit, true, params.material) && shellHit.t < closestT) {
-                        closestHit = shellHit;
-                        closestT = shellHit.t;
-                        hitMesh = outerShell;
-                    }
-                    // Only check additional if it could be closer
-                    if (tNearAdditional < closestT) {
-                        HitInfo addHit;
-                        if (traceMesh(ray, additionalMesh, &addHit, true, params.material) && addHit.t < closestT) {
-                            closestHit = addHit;
-                            hitMesh = additionalMesh;
-                        }
-                    }
-                } else {
-                    // Check additional first, then shells
-                    HitInfo addHit;
-                    if (traceMesh(ray, additionalMesh, &addHit, true, params.material) && addHit.t < closestT) {
-                        closestHit = addHit;
-                        closestT = addHit.t;
-                        hitMesh = additionalMesh;
-                    }
-                    if (tNearShells < closestT) {
-                        HitInfo shellHit;
-                        if (traceMesh(ray, outerShell, &shellHit, true, params.material) && shellHit.t < closestT) {
-                            closestHit = shellHit;
-                            hitMesh = outerShell;
-                        }
-                    }
-                }
-            } else if (hitShellsBox) {
-                traceMesh(ray, outerShell, &closestHit, true, params.material);
-            } else if (hitAdditionalBox) {
-                if (traceMesh(ray, additionalMesh, &closestHit, true, params.material)) {
-                    hitMesh = additionalMesh;
-                }
-            }
-        }
-
-        // Populate output
-        if (closestHit.valid()) {
-            bouncePositions[base+0] = closestHit.position.x;
-            bouncePositions[base+1] = closestHit.position.y;
-            bouncePositions[base+2] = closestHit.position.z;
-            bounceNormals[base+0] = closestHit.shadingNormal.x;
-            bounceNormals[base+1] = closestHit.shadingNormal.y;
-            bounceNormals[base+2] = closestHit.shadingNormal.z;
-
-            // Resolve material
-            const Material* mat = &params.material;
-            if (closestHit.materialId >= 0 && closestHit.materialId < hitMesh.numMaterials && hitMesh.materials) {
-                mat = &hitMesh.materials[closestHit.materialId];
-            }
-            ResolvedMaterial resolved = resolveMaterial(*mat, closestHit.uv, hitMesh);
-            bounceColors[base+0] = resolved.base_color.x;
-            bounceColors[base+1] = resolved.base_color.y;
-            bounceColors[base+2] = resolved.base_color.z;
-            bounceHitFlags[sampleIdx] = 1;
-        } else {
-            bounceHitFlags[sampleIdx] = 0;
         }
     }
 }
@@ -1801,7 +1655,7 @@ RendererNeural::RendererNeural(Scene& scene, const NeuralNetworkConfig* nnConfig
         {"activation", "LeakyReLU"},
         {"output_activation", "None"},
         {"n_neurons", 128},
-        {"n_hidden_layers", 8},
+        {"n_hidden_layers", 4},
     };
 
     network_ = std::make_shared<tcnn::NetworkWithInputEncoding<__half>>(
@@ -2281,13 +2135,6 @@ void RendererNeural::render(const Vec3& camPos) {
     if (sceneScale_ < 1e-6f) {
         sceneScale_ = 1.0f;  // Fallback for invalid bounds.
     }
-    // static bool printedOnce = false;
-    // if (!printedOnce) {
-    //     printf("Scene scale: %.6f (extent: %.6f, %.6f, %.6f)\n",
-    //            sceneScale_, sceneExtent.x, sceneExtent.y, sceneExtent.z);
-    //     printedOnce = true;
-    // }
-
     // Camera change detection.
     bool cameraMoved = !hasLastCamera_;
     const float kEps = 1e-4f;
@@ -2385,7 +2232,7 @@ void RendererNeural::render(const Vec3& camPos) {
 
 #ifdef USE_OPTIX
         if (useHardwareRT_ && optixState_ && optixState_->gasAdditional.handle) {
-        // if (false) {
+
             OptixLaunchParams lp = {};
             lp.gas               = optixState_->gasAdditional.handle;
             lp.renderParams      = params;
@@ -2516,7 +2363,7 @@ void RendererNeural::render(const Vec3& camPos) {
 
 #ifdef USE_OPTIX
                 if (useHardwareRT_ && optixState_ && optixState_->gasAdditional.handle) {
-                // if (false) {
+        
                     OptixLaunchParams lp = {};
                     lp.gas               = optixState_->gasAdditional.handle;
                     lp.renderParams      = params;
@@ -2628,7 +2475,7 @@ void RendererNeural::render(const Vec3& camPos) {
         // 1. Trace primary rays
 #ifdef USE_OPTIX
         if (useHardwareRT_ && optixState_ && optixState_->gasClassic.handle) {
-        // if (false) {
+
             OptixLaunchParams lp = {};
             lp.gas          = optixState_->gasClassic.handle;
             lp.renderParams = params;
@@ -2719,7 +2566,7 @@ void RendererNeural::render(const Vec3& camPos) {
                 // Trace bounce rays against GT mesh
 #ifdef USE_OPTIX
                 if (useHardwareRT_ && optixState_ && optixState_->gasClassic.handle) {
-                // if (false) {
+        
                     OptixLaunchParams lp = {};
                     lp.gas         = optixState_->gasClassic.handle;
                     lp.renderParams = params;
@@ -2833,7 +2680,7 @@ void RendererNeural::release() {
     freePtr(outputs_);
     freePtr(bouncePositions_);
     freePtr(bounceNormals_);
-    freePtr(bounceDirs_);
+
     freePtr(bounceColors_);
     freePtr(bounceMaterialParams_);
     freePtr(bounceHitFlags_);
@@ -2881,7 +2728,7 @@ bool RendererNeural::ensureNetworkBuffers(size_t elementCount) {
             rayDirections_ &&
             networkInputs_ &&
             hitIndices_ && hitCount_ &&
-            bouncePositions_ && bounceNormals_ && bounceDirs_ && bounceColors_ && bounceMaterialParams_ && bounceHitFlags_ &&
+            bouncePositions_ && bounceNormals_ && bounceColors_ && bounceMaterialParams_ && bounceHitFlags_ &&
             pathThroughput_ && pathRadiance_ && pathActive_ &&
             bounceOrigins_ && bounceDirections_ && bouncePdfs_ && bounceBRDFs_ && bounceDistances_ &&
             rayActiveFlags_ && accumT_ && currentEntryPos_ &&
@@ -2914,7 +2761,7 @@ bool RendererNeural::ensureNetworkBuffers(size_t elementCount) {
     freePtr(outputs_);
     freePtr(bouncePositions_);
     freePtr(bounceNormals_);
-    freePtr(bounceDirs_);
+
     freePtr(bounceColors_);
     freePtr(bounceMaterialParams_);
     freePtr(bounceHitFlags_);
@@ -2975,7 +2822,6 @@ bool RendererNeural::ensureNetworkBuffers(size_t elementCount) {
     checkCuda(cudaMalloc(&bounceNormals_, vec3Bytes), "cudaMalloc bounceNormals");
     checkCuda(cudaMalloc(&bounceColors_, vec3Bytes), "cudaMalloc bounceColors");
     checkCuda(cudaMalloc(&bounceMaterialParams_, vec3Bytes), "cudaMalloc bounceMaterialParams");
-    checkCuda(cudaMalloc(&bounceDirs_, vec3Bytes), "cudaMalloc bounceDirs");
     checkCuda(cudaMalloc(&bounceHitFlags_, intBytes), "cudaMalloc bounceHitFlags");
 
     // Path state.

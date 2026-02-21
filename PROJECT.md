@@ -202,7 +202,6 @@ finalizePathTracingKernel (tonemap + sRGB)
 | `traceOuterShellEntryFromRaysKernel` | Same but for arbitrary bounce rays (handles inside-shell start) |
 | `traceSegmentExitsKernel` | Find outer-exit and inner-enter per active ray |
 | `traceGroundTruthBouncesKernel` | Trace bounce rays vs GT mesh (GT mode) |
-| `traceHybridBouncesKernel` | Trace bounces vs outerShell + additionalMesh with two-box culling |
 | `traceAdditionalMeshPrimaryRaysKernel` / `traceAdditionalMeshRaysKernel` | Trace vs additionalMesh_ |
 | `checkBounceEarlyTerminationKernel` | Neural mode: terminate bounce if it re-enters shell region |
 | `initializePathStateKernel` | Set throughput=1, sample env on miss, read hit albedo/normal |

@@ -128,7 +128,6 @@ class RendererNeural final {
     // Bounce buffers (ping-pong).
     float* bouncePositions_ = nullptr;
     float* bounceNormals_ = nullptr;
-    float* bounceDirs_ = nullptr;
     float* bounceColors_ = nullptr;
     float* bounceMaterialParams_ = nullptr;
     int* bounceHitFlags_ = nullptr;
