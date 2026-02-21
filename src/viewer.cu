@@ -521,6 +521,73 @@ int main(int argc, char** argv) {
         ImGui::Text("FPS: %.1f", io.Framerate);
         ImGui::End();
 
+#ifdef PROFILE_KERNELS
+        {
+            const KernelTimings& kt = renderer.lastFrameTimings();
+            const double rayCount = static_cast<double>(kt.rayCount);
+
+            ImGuiWindowFlags profFlags =
+                ImGuiWindowFlags_NoDecoration        |
+                ImGuiWindowFlags_AlwaysAutoResize    |
+                ImGuiWindowFlags_NoSavedSettings     |
+                ImGuiWindowFlags_NoFocusOnAppearing  |
+                ImGuiWindowFlags_NoNav;
+            // Anchor top-right corner of this window at (displayWidth - 10, 10)
+            ImGui::SetNextWindowPos(
+                ImVec2(io.DisplaySize.x - 10.0f, 10.0f),
+                ImGuiCond_Always,
+                ImVec2(1.0f, 0.0f));
+            ImGui::Begin("GPU Kernel Timings", nullptr, profFlags);
+            ImGui::Text("GPU Kernel Timings (last frame)");
+            ImGui::Separator();
+
+            if (ImGui::BeginTable("kerneltbl", 3,
+                    ImGuiTableFlags_BordersInnerV | ImGuiTableFlags_RowBg)) {
+                ImGui::TableSetupColumn("Kernel",
+                    ImGuiTableColumnFlags_WidthStretch);
+                ImGui::TableSetupColumn("ms",
+                    ImGuiTableColumnFlags_WidthFixed, 55.0f);
+                ImGui::TableSetupColumn("ns/ray",
+                    ImGuiTableColumnFlags_WidthFixed, 70.0f);
+                ImGui::TableHeadersRow();
+
+                for (int i = 0; i < KID_COUNT; ++i) {
+                    const double ms = kt.ms[i];
+                    if (ms < 0.001) continue;
+                    const double nsPerRay = rayCount > 0.0
+                        ? ms * 1.0e6 / rayCount : 0.0;
+                    ImGui::TableNextRow();
+                    ImGui::TableSetColumnIndex(0);
+                    ImGui::TextUnformatted(KernelTimings::name(i));
+                    ImGui::TableSetColumnIndex(1);
+                    ImGui::Text("%.2f", ms);
+                    ImGui::TableSetColumnIndex(2);
+                    ImGui::Text("%.1f", nsPerRay);
+                }
+
+                // Total row
+                {
+                    const double totalMs = kt.totalMs();
+                    const double totalNsPerRay = rayCount > 0.0
+                        ? totalMs * 1.0e6 / rayCount : 0.0;
+                    ImGui::TableNextRow();
+                    ImGui::TableSetColumnIndex(0);
+                    ImGui::TextUnformatted("Total");
+                    ImGui::TableSetColumnIndex(1);
+                    ImGui::Text("%.2f", totalMs);
+                    ImGui::TableSetColumnIndex(2);
+                    ImGui::Text("%.1f", totalNsPerRay);
+                }
+
+                ImGui::EndTable();
+            }
+
+            ImGui::Text("Rays: %d  (%.2f Mrays)", kt.rayCount,
+                        static_cast<double>(kt.rayCount) / 1.0e6);
+            ImGui::End();
+        }
+#endif  // PROFILE_KERNELS
+
         uiWantsMouse = io.WantCaptureMouse;
 
         ImGui::Render();

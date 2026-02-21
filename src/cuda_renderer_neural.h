@@ -10,6 +10,61 @@
 
 #include "renderer.h"
 
+// ---------------------------------------------------------------------------
+// Per-kernel GPU timing (only compiled when PROFILE_KERNELS is defined).
+// ---------------------------------------------------------------------------
+#ifdef PROFILE_KERNELS
+enum KernelId {
+    // GT mode (zero in neural mode)
+    KID_primaryTrace,           // intersectGroundTruth / OptiX primaryGT
+    KID_bounceTrace,            // traceGroundTruthBounces / OptiX bounceGT (×bounces)
+    // Neural mode (zero in GT mode)
+    KID_shellTrace,             // all shell BVH traversals: outer entry + segment exits (×iters×calls)
+    KID_neuralForward,          // network_->inference_mixed_precision (×iters×calls)
+    // Shared (both modes)
+    KID_additionalMeshPrimary,  // traceAdditionalMeshPrimaryRays / OptiX additional primary
+    KID_selectClosestPrimary,   // selectClosestPrimaryHitKernel
+    KID_initPathState,          // initializePathStateKernel
+    KID_sampleBounce,           // sampleBounceDirectionsKernel ×bounces
+    KID_earlyTermination,       // checkBounceEarlyTerminationKernel ×bounces (neural only)
+    KID_additionalMeshBounce,   // traceAdditionalMeshRaysKernel ×bounces
+    KID_selectClosestBounce,    // selectClosestHitKernel ×bounces
+    KID_integrateBounce,        // integrateBounceKernel ×bounces
+    KID_finalize,               // finalizePathTracingKernel or lambertKernel
+    KID_COUNT
+};
+
+struct KernelTimings {
+    double ms[KID_COUNT] = {};
+    int rayCount = 0;  // width * height * samplesPerPixel
+
+    static const char* name(int kid) {
+        static const char* kNames[KID_COUNT] = {
+            "GT primary intersect",
+            "GT bounce intersect",
+            "Shell intersection",
+            "Neural forward pass",
+            "Additional mesh (primary)",
+            "Select closest (primary)",
+            "Init path state",
+            "Sample bounce dirs",
+            "Bounce early term.",
+            "Additional mesh (bounce)",
+            "Select closest (bounce)",
+            "Integrate bounce",
+            "Finalize / lambert",
+        };
+        return (kid >= 0 && kid < KID_COUNT) ? kNames[kid] : "?";
+    }
+
+    double totalMs() const {
+        double t = 0.0;
+        for (int i = 0; i < KID_COUNT; ++i) t += ms[i];
+        return t;
+    }
+};
+#endif  // PROFILE_KERNELS
+
 struct MeshDeviceView;
 struct RenderParams;
 
@@ -62,6 +117,10 @@ class RendererNeural final {
     size_t paramsBytes() const { return networkParamsBytes_; }
     int width() const { return width_; }
     int height() const { return height_; }
+
+#ifdef PROFILE_KERNELS
+    const KernelTimings& lastFrameTimings() const { return lastFrameTimings_; }
+#endif
 
  private:
     void release();
@@ -189,6 +248,18 @@ class RendererNeural final {
     OptixLaunchParams*  dLaunchParams_    = nullptr;
 #endif
     bool useHardwareRT_ = false;
+
+#ifdef PROFILE_KERNELS
+    static constexpr int kProfilePoolSize = 512;
+    struct ProfileSlot {
+        cudaEvent_t start = nullptr;
+        cudaEvent_t stop  = nullptr;
+        int         kid   = -1;
+    };
+    ProfileSlot   profilePool_[kProfilePoolSize];
+    int           profilePoolUsed_ = 0;
+    KernelTimings lastFrameTimings_;
+#endif
 
     bool lastUseNeuralQuery_ = true;
     bool lastLambertView_ = false;

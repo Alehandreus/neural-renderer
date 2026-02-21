@@ -217,6 +217,12 @@ if(USE_OPTIX)
     target_link_libraries(viewer PRIVATE CUDA::cuda_driver)
 endif()
 
+# Kernel profiling option (viewer only; zero overhead when OFF)
+option(PROFILE_KERNELS "Enable per-kernel GPU timing in the viewer" OFF)
+if(PROFILE_KERNELS)
+    target_compile_definitions(viewer PRIVATE PROFILE_KERNELS)
+endif()
+
 # Evaluation tool (ground truth vs neural comparison with PSNR and FLIP)
 add_executable(evaluate
     src/bvh_data.h

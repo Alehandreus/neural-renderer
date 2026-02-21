@@ -32,6 +32,30 @@
 #include "optix_programs_ptx.h"
 #endif
 
+// ---------------------------------------------------------------------------
+// GPU timing macros — only active when PROFILE_KERNELS is defined.
+// Must be used inside RendererNeural member functions (they reference member vars).
+// ---------------------------------------------------------------------------
+#ifdef PROFILE_KERNELS
+#define PROF_BEGIN(kid_val) \
+    do { \
+        if (profilePoolUsed_ < kProfilePoolSize) { \
+            profilePool_[profilePoolUsed_].kid = static_cast<int>(kid_val); \
+            cudaEventRecord(profilePool_[profilePoolUsed_].start, 0); \
+        } \
+    } while (0)
+#define PROF_END() \
+    do { \
+        if (profilePoolUsed_ < kProfilePoolSize) { \
+            cudaEventRecord(profilePool_[profilePoolUsed_].stop, 0); \
+            profilePoolUsed_++; \
+        } \
+    } while (0)
+#else
+#define PROF_BEGIN(kid_val) do {} while (0)
+#define PROF_END()          do {} while (0)
+#endif  // PROFILE_KERNELS
+
 namespace {
 
 struct BoundingBox {
@@ -1684,6 +1708,13 @@ RendererNeural::RendererNeural(Scene& scene, const NeuralNetworkConfig* nnConfig
     optixState_ = optixCreateState(kOptixProgramsPtx);
     std::printf("OptiX state initialised (hardware RT available).\n");
 #endif
+
+#ifdef PROFILE_KERNELS
+    for (int i = 0; i < kProfilePoolSize; ++i) {
+        cudaEventCreate(&profilePool_[i].start);
+        cudaEventCreate(&profilePool_[i].stop);
+    }
+#endif
 }
 
 RendererNeural::~RendererNeural() {
@@ -1692,6 +1723,13 @@ RendererNeural::~RendererNeural() {
 #ifdef USE_OPTIX
     optixDestroyState(optixState_);
     optixState_ = nullptr;
+#endif
+
+#ifdef PROFILE_KERNELS
+    for (int i = 0; i < kProfilePoolSize; ++i) {
+        if (profilePool_[i].start) { cudaEventDestroy(profilePool_[i].start); profilePool_[i].start = nullptr; }
+        if (profilePool_[i].stop)  { cudaEventDestroy(profilePool_[i].stop);  profilePool_[i].stop  = nullptr; }
+    }
 #endif
 }
 
@@ -1813,6 +1851,7 @@ void RendererNeural::traceNeuralSegmentsForRays(bool useCameraRays,
     }
 
     const float* segmentRayDirections = nullptr;
+    PROF_BEGIN(KID_shellTrace);
     if (useCameraRays) {
 #ifdef USE_OPTIX
         if (useHardwareRT_ && optixState_ && optixState_->gasOuter.handle) {
@@ -1893,6 +1932,7 @@ void RendererNeural::traceNeuralSegmentsForRays(bool useCameraRays,
         }
         segmentRayDirections = rayDirections;
     }
+    PROF_END();  // KID_shellTrace (outer entry)
 
     checkCuda(cudaMemset(hitCount_, 0, sizeof(int)), "cudaMemset hitCount");
     compactInputsKernel<<<compactGrid, compactBlock>>>(
@@ -1914,6 +1954,7 @@ void RendererNeural::traceNeuralSegmentsForRays(bool useCameraRays,
         const int buildBlock = 256;
         int buildGrid = (activeCount + buildBlock - 1) / buildBlock;
 
+        PROF_BEGIN(KID_shellTrace);
 #ifdef USE_OPTIX
         if (useHardwareRT_ && optixState_ &&
             optixState_->gasOuter.handle && optixState_->gasInner.handle) {
@@ -1956,6 +1997,7 @@ void RendererNeural::traceNeuralSegmentsForRays(bool useCameraRays,
                 innerHitFlags_);
         checkCuda(cudaGetLastError(), "traceSegmentExitsKernel launch");
         }
+        PROF_END();  // KID_shellTrace (segment exits)
 
         uint32_t rayBatchSize = static_cast<uint32_t>(paddedActiveCount);
 
@@ -1982,7 +2024,9 @@ void RendererNeural::traceNeuralSegmentsForRays(bool useCameraRays,
         // Single fused encoding + MLP inference; encoding runs in FP16 throughout.
         tcnn::GPUMatrix<float> inputMatrix(networkInputs_, inputDims_, rayBatchSize);
         tcnn::GPUMatrix<__half> outputMatrix(static_cast<__half*>(outputs_), mlpOutputDims_, rayBatchSize);
+        PROF_BEGIN(KID_neuralForward);
         network_->inference_mixed_precision(/*stream=*/nullptr, inputMatrix, outputMatrix);
+        PROF_END();  // KID_neuralForward
 
         applySegmentNeuralOutputKernel<<<buildGrid, buildBlock>>>(
                 static_cast<const __half*>(outputs_),
@@ -2047,6 +2091,10 @@ void RendererNeural::render(const Vec3& camPos) {
     if (maxBounces < 0) {
         maxBounces = 0;
     }
+
+#ifdef PROFILE_KERNELS
+    profilePoolUsed_ = 0;
+#endif
 
     // Hardware RT (OptiX) is only valid for the original mesh GAS.
     // When a shell is selected as the classic mesh, fall back to software BVH.
@@ -2230,6 +2278,7 @@ void RendererNeural::render(const Vec3& camPos) {
             ? scene_->additionalMesh().deviceView()
             : MeshDeviceView{};
 
+        PROF_BEGIN(KID_additionalMeshPrimary);
 #ifdef USE_OPTIX
         if (useHardwareRT_ && optixState_ && optixState_->gasAdditional.handle) {
 
@@ -2269,8 +2318,10 @@ void RendererNeural::render(const Vec3& camPos) {
         checkCuda(cudaGetLastError(), "traceAdditionalMeshPrimaryRaysKernel launch");
         checkCuda(cudaDeviceSynchronize(), "traceAdditionalMeshPrimaryRaysKernel sync");
         }
+        PROF_END();  // KID_additionalMeshPrimary
 
         // Always select closest hit (if additional mesh empty, shell hits win)
+        PROF_BEGIN(KID_selectClosestPrimary);
         selectClosestPrimaryHitKernel<<<grid, block>>>(
                 hitPositions_,
                 hitNormals_,
@@ -2285,11 +2336,13 @@ void RendererNeural::render(const Vec3& camPos) {
                 params);
         checkCuda(cudaGetLastError(), "selectClosestPrimaryHitKernel launch");
         checkCuda(cudaDeviceSynchronize(), "selectClosestPrimaryHitKernel sync");
+        PROF_END();  // KID_selectClosestPrimary
 
         // 4. Path trace from neural hits using wavefront architecture.
         // (Step numbers continue from multi-segment iteration above)
         if (!lambertView_) {
             // Initialize path state from neural primary hits
+            PROF_BEGIN(KID_initPathState);
             initializePathStateKernel<<<grid, block>>>(
                     pathThroughput_,
                     pathRadiance_,
@@ -2300,6 +2353,7 @@ void RendererNeural::render(const Vec3& camPos) {
                     params,
                     envView);
             checkCuda(cudaGetLastError(), "initializePathStateKernel launch");
+            PROF_END();  // KID_initPathState
 
             // Wavefront bounce loop for neural mode (neural segments + additional mesh)
             float* currentHitPos = hitPositions_;
@@ -2312,6 +2366,7 @@ void RendererNeural::render(const Vec3& camPos) {
 
             for (int bounce = 1; bounce <= maxBounces; ++bounce) {
                 // Sample bounce directions (Disney BRDF - shared with GT)
+                PROF_BEGIN(KID_sampleBounce);
                 sampleBounceDirectionsKernel<<<grid, block>>>(
                         currentHitPos,
                         currentHitNormals,
@@ -2328,9 +2383,11 @@ void RendererNeural::render(const Vec3& camPos) {
                         bounceDistances_,
                         prevBounceDirections);
                 checkCuda(cudaGetLastError(), "sampleBounceDirectionsKernel launch");
+                PROF_END();  // KID_sampleBounce
 
                 // Check for early termination before tracing
                 // If neural distance predicts hit before exiting outer shell, terminate the ray
+                PROF_BEGIN(KID_earlyTermination);
                 checkBounceEarlyTerminationKernel<<<grid, block>>>(
                         bounceOrigins_,
                         bounceDirections_,
@@ -2341,6 +2398,7 @@ void RendererNeural::render(const Vec3& camPos) {
                         outerView,
                         innerView);
                 checkCuda(cudaGetLastError(), "checkBounceEarlyTerminationKernel launch");
+                PROF_END();  // KID_earlyTermination
 
                 traceNeuralSegmentsForRays(
                         false,
@@ -2361,9 +2419,10 @@ void RendererNeural::render(const Vec3& camPos) {
                         bounceHitFlags_,
                         bounceDistances_);
 
+                PROF_BEGIN(KID_additionalMeshBounce);
 #ifdef USE_OPTIX
                 if (useHardwareRT_ && optixState_ && optixState_->gasAdditional.handle) {
-        
+
                     OptixLaunchParams lp = {};
                     lp.gas               = optixState_->gasAdditional.handle;
                     lp.renderParams      = params;
@@ -2405,7 +2464,9 @@ void RendererNeural::render(const Vec3& camPos) {
                         additionalView);
                 checkCuda(cudaGetLastError(), "traceAdditionalMeshRaysKernel launch");
                 }
+                PROF_END();  // KID_additionalMeshBounce
 
+                PROF_BEGIN(KID_selectClosestBounce);
                 selectClosestHitKernel<<<grid, block>>>(
                         bouncePositions_,
                         bounceNormals_,
@@ -2420,8 +2481,10 @@ void RendererNeural::render(const Vec3& camPos) {
                         bounceOrigins_,
                         params);
                 checkCuda(cudaGetLastError(), "selectClosestHitKernel launch");
+                PROF_END();  // KID_selectClosestBounce
 
                 // Integrate bounce results (shared with GT)
+                PROF_BEGIN(KID_integrateBounce);
                 integrateBounceKernel<<<grid, block>>>(
                         pathThroughput_,
                         pathRadiance_,
@@ -2433,6 +2496,7 @@ void RendererNeural::render(const Vec3& camPos) {
                         params,
                         envView);
                 checkCuda(cudaGetLastError(), "integrateBounceKernel launch");
+                PROF_END();  // KID_integrateBounce
 
                 // Save bounce directions as incoming directions for next bounce
                 // Copy bounceDirections_ → prevBounceDirections_ so kernel has correct wo next iter
@@ -2451,15 +2515,18 @@ void RendererNeural::render(const Vec3& camPos) {
             }
 
             // Finalize and output
+            PROF_BEGIN(KID_finalize);
             finalizePathTracingKernel<<<grid, block>>>(
                     devicePixels_,
                     accum_,
                     pathRadiance_,
                     params);
             checkCuda(cudaGetLastError(), "finalizePathTracingKernel launch");
+            PROF_END();  // KID_finalize
             accumSampleCount_ += static_cast<uint32_t>(samplesPerPixel);
 
         } else {
+            PROF_BEGIN(KID_finalize);
             lambertKernel<<<grid, block>>>(
                     devicePixels_,
                     hitNormals_,
@@ -2468,11 +2535,13 @@ void RendererNeural::render(const Vec3& camPos) {
                     params,
                     envView);
             checkCuda(cudaGetLastError(), "lambertKernel launch");
+            PROF_END();  // KID_finalize
             accumSampleCount_ = 0;
         }
     } else {
         // --- Ground truth mesh path tracing (wavefront architecture) ---
         // 1. Trace primary rays
+        PROF_BEGIN(KID_primaryTrace);
 #ifdef USE_OPTIX
         if (useHardwareRT_ && optixState_ && optixState_->gasClassic.handle) {
 
@@ -2512,8 +2581,10 @@ void RendererNeural::render(const Vec3& camPos) {
         checkCuda(cudaGetLastError(), "intersectGroundTruthKernel launch");
         checkCuda(cudaDeviceSynchronize(), "intersectGroundTruthKernel sync");
         }
+        PROF_END();  // KID_primaryTrace
 
         if (lambertView_) {
+            PROF_BEGIN(KID_finalize);
             lambertKernel<<<grid, block>>>(
                     devicePixels_,
                     hitNormals_,
@@ -2522,9 +2593,11 @@ void RendererNeural::render(const Vec3& camPos) {
                     params,
                     envView);
             checkCuda(cudaGetLastError(), "lambertKernel launch");
+            PROF_END();  // KID_finalize
             accumSampleCount_ = 0;
         } else {
             // 2. Initialize path state
+            PROF_BEGIN(KID_initPathState);
             initializePathStateKernel<<<grid, block>>>(
                     pathThroughput_,
                     pathRadiance_,
@@ -2535,6 +2608,7 @@ void RendererNeural::render(const Vec3& camPos) {
                     params,
                     envView);
             checkCuda(cudaGetLastError(), "initializePathStateKernel launch");
+            PROF_END();  // KID_initPathState
 
             // 3. Wavefront bounce loop
             float* currentHitPos = hitPositions_;
@@ -2546,6 +2620,7 @@ void RendererNeural::render(const Vec3& camPos) {
 
             for (int bounce = 1; bounce <= maxBounces; ++bounce) {
                 // Sample bounce directions (Disney BRDF)
+                PROF_BEGIN(KID_sampleBounce);
                 sampleBounceDirectionsKernel<<<grid, block>>>(
                         currentHitPos,
                         currentHitNormals,
@@ -2562,11 +2637,13 @@ void RendererNeural::render(const Vec3& camPos) {
                         nullptr,
                         prevBounceDirections);
                 checkCuda(cudaGetLastError(), "sampleBounceDirectionsKernel launch");
+                PROF_END();  // KID_sampleBounce
 
                 // Trace bounce rays against GT mesh
+                PROF_BEGIN(KID_bounceTrace);
 #ifdef USE_OPTIX
                 if (useHardwareRT_ && optixState_ && optixState_->gasClassic.handle) {
-        
+
                     OptixLaunchParams lp = {};
                     lp.gas         = optixState_->gasClassic.handle;
                     lp.renderParams = params;
@@ -2608,8 +2685,10 @@ void RendererNeural::render(const Vec3& camPos) {
                         bounceHitFlags_);
                 checkCuda(cudaGetLastError(), "traceGroundTruthBouncesKernel launch");
                 }
+                PROF_END();  // KID_bounceTrace
 
                 // Integrate bounce results
+                PROF_BEGIN(KID_integrateBounce);
                 integrateBounceKernel<<<grid, block>>>(
                         pathThroughput_,
                         pathRadiance_,
@@ -2621,6 +2700,7 @@ void RendererNeural::render(const Vec3& camPos) {
                         params,
                         envView);
                 checkCuda(cudaGetLastError(), "integrateBounceKernel launch");
+                PROF_END();  // KID_integrateBounce
 
                 // Save bounce directions as incoming directions for next bounce
                 checkCuda(cudaMemcpy(prevBounceDirections_, bounceDirections_,
@@ -2637,15 +2717,35 @@ void RendererNeural::render(const Vec3& camPos) {
             }
 
             // 4. Finalize and output
+            PROF_BEGIN(KID_finalize);
             finalizePathTracingKernel<<<grid, block>>>(
                     devicePixels_,
                     accum_,
                     pathRadiance_,
                     params);
             checkCuda(cudaGetLastError(), "finalizePathTracingKernel launch");
+            PROF_END();  // KID_finalize
             accumSampleCount_ += static_cast<uint32_t>(samplesPerPixel);
         }
     }
+
+#ifdef PROFILE_KERNELS
+    // Synchronize and collect all timing events recorded this frame.
+    checkCuda(cudaDeviceSynchronize(), "profile end sync");
+    {
+        KernelTimings t;
+        t.rayCount = width_ * height_ * samplesPerPixel;
+        for (int i = 0; i < profilePoolUsed_; ++i) {
+            if (profilePool_[i].kid >= 0 && profilePool_[i].kid < KID_COUNT) {
+                float ms = 0.0f;
+                cudaEventElapsedTime(&ms, profilePool_[i].start, profilePool_[i].stop);
+                t.ms[profilePool_[i].kid] += static_cast<double>(ms);
+            }
+        }
+        lastFrameTimings_ = t;
+    }
+    profilePoolUsed_ = 0;
+#endif
 
 }
 

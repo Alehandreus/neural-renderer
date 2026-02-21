@@ -276,6 +276,37 @@ cmake -B build -DUSE_OPTIX=ON -DOPTIX_PTX_ARCH=compute_89
 cmake --build build --target viewer
 ```
 
+### CMake Options
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `USE_OPTIX` | `OFF` | Enable OptiX hardware ray tracing |
+| `OPTIX_PTX_ARCH` | `compute_89` | Virtual CUDA arch for PTX (do not use `compute_120`; see MEMORY.md) |
+| `PROFILE_KERNELS` | `OFF` | Per-kernel GPU timing (zero overhead when OFF) |
+
+With `PROFILE_KERNELS=ON`, `RendererNeural` records CUDA events around every major kernel dispatch. At the end of each frame, elapsed times are accumulated by kernel category and exposed via `lastFrameTimings()`. The viewer shows a **GPU Kernel Timings** ImGui panel (top-right) listing per-kernel total ms and ns/ray for the last frame.
+
+Kernel categories (`KernelId` enum in `cuda_renderer_neural.h`):
+
+| Category | When active |
+|----------|-------------|
+| GT primary intersect | GT mode: primary rays vs `originalMesh_` |
+| GT bounce intersect | GT mode: bounce rays ×bounces |
+| Shell intersection | Neural mode: all shell BVH traversals (outer entry + segment exits ×iters) |
+| Neural forward pass | Neural mode: `network_->inference_mixed_precision` ×iters |
+| Additional mesh (primary/bounce) | Hybrid: trace vs `additionalMesh_` |
+| Select closest (primary/bounce) | Merge neural + additional mesh hits |
+| Init path state | Per sample: throughput init, env miss |
+| Sample bounce dirs | Disney BRDF sampling ×bounces |
+| Bounce early term. | Neural mode: early termination check ×bounces |
+| Integrate bounce | Throughput update, Russian roulette ×bounces |
+| Finalize / lambert | Tonemap + sRGB encode |
+
+```bash
+cmake -B build -DUSE_OPTIX=ON -DOPTIX_PTX_ARCH=compute_89 -DPROFILE_KERNELS=ON
+cmake --build build --target viewer
+```
+
 ---
 
 ## Config Format (JSON)
