@@ -216,10 +216,6 @@ __forceinline__ __device__ HitData traceRayGT(const Ray& ray,
     return result;
 }
 
-// Device function: Unified ray intersection wrapper
-// NOTE: Currently uses GT mesh for both modes. Neural inference for arbitrary rays
-// would require significant architectural changes (batched host-side inference).
-// For bounce rays, using GT mesh provides accurate lighting even in neural mode.
 // Kernel: Intersect primary rays with ground truth mesh
 __global__ void intersectGroundTruthKernel(float* hitPositions,
                                            float* hitNormals,
@@ -1805,7 +1801,7 @@ RendererNeural::RendererNeural(Scene& scene, const NeuralNetworkConfig* nnConfig
         {"activation", "LeakyReLU"},
         {"output_activation", "None"},
         {"n_neurons", 128},
-        {"n_hidden_layers", 4},
+        {"n_hidden_layers", 8},
     };
 
     network_ = std::make_shared<tcnn::NetworkWithInputEncoding<__half>>(
