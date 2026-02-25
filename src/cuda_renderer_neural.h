@@ -35,8 +35,9 @@ enum KernelId {
 };
 
 struct KernelTimings {
-    double ms[KID_COUNT] = {};
-    int rayCount = 0;  // width * height * samplesPerPixel
+    double   ms[KID_COUNT]   = {};
+    int      rayCount        = 0;  // width * height * samplesPerPixel
+    uint64_t neuralRayCalls  = 0;  // sum of active-ray counts across all neural forward passes
 
     static const char* name(int kid) {
         static const char* kNames[KID_COUNT] = {
@@ -258,6 +259,7 @@ class RendererNeural final {
     };
     ProfileSlot   profilePool_[kProfilePoolSize];
     int           profilePoolUsed_ = 0;
+    uint64_t      neuralRayCalls_  = 0;
     KernelTimings lastFrameTimings_;
 #endif
 

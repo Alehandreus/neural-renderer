@@ -2024,6 +2024,9 @@ void RendererNeural::traceNeuralSegmentsForRays(bool useCameraRays,
         // Single fused encoding + MLP inference; encoding runs in FP16 throughout.
         tcnn::GPUMatrix<float> inputMatrix(networkInputs_, inputDims_, rayBatchSize);
         tcnn::GPUMatrix<__half> outputMatrix(static_cast<__half*>(outputs_), mlpOutputDims_, rayBatchSize);
+#ifdef PROFILE_KERNELS
+        neuralRayCalls_ += static_cast<uint64_t>(activeCount);
+#endif
         PROF_BEGIN(KID_neuralForward);
         network_->inference_mixed_precision(/*stream=*/nullptr, inputMatrix, outputMatrix);
         PROF_END();  // KID_neuralForward
@@ -2094,6 +2097,7 @@ void RendererNeural::render(const Vec3& camPos) {
 
 #ifdef PROFILE_KERNELS
     profilePoolUsed_ = 0;
+    neuralRayCalls_  = 0;
 #endif
 
     // Hardware RT (OptiX) is only valid for the original mesh GAS.
@@ -2734,7 +2738,8 @@ void RendererNeural::render(const Vec3& camPos) {
     checkCuda(cudaDeviceSynchronize(), "profile end sync");
     {
         KernelTimings t;
-        t.rayCount = width_ * height_ * samplesPerPixel;
+        t.rayCount       = width_ * height_ * samplesPerPixel;
+        t.neuralRayCalls = neuralRayCalls_;
         for (int i = 0; i < profilePoolUsed_; ++i) {
             if (profilePool_[i].kid >= 0 && profilePool_[i].kid < KID_COUNT) {
                 float ms = 0.0f;

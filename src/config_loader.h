@@ -23,6 +23,8 @@ struct CameraConfig {
 struct RenderingConfig {
     int total_samples = 2048;
     int bounce_count = 3;
+    int width = 1920;
+    int height = 1080;
 };
 
 struct MaterialConfig {

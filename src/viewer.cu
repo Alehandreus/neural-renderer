@@ -46,6 +46,20 @@ int main(int argc, char** argv) {
         return 1;
     }
 
+    // Load configuration early to get the window resolution
+    const char* kDefaultConfigPath = "configs/chess.json";
+    const char* configPath = (argc > 1) ? argv[1] : kDefaultConfigPath;
+
+    RendererConfig config;
+    {
+        std::string configError;
+        if (!LoadConfigFromFile(configPath, &config, &configError)) {
+            std::fprintf(stderr, "Failed to load config: %s\n", configError.c_str());
+            glfwTerminate();
+            return 1;
+        }
+    }
+
     glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
     glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 3);
     glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
@@ -54,9 +68,7 @@ int main(int argc, char** argv) {
 #endif
     glfwWindowHint(GLFW_RESIZABLE, GLFW_TRUE);
 
-    const int startWidth = 1920;
-    const int startHeight = 1080;
-    GLFWwindow* window = glfwCreateWindow(startWidth, startHeight, "Neural Renderer", nullptr, nullptr);
+    GLFWwindow* window = glfwCreateWindow(config.rendering.width, config.rendering.height, "Neural Renderer", nullptr, nullptr);
     if (!window) {
         std::fprintf(stderr, "Failed to create GLFW window.\n");
         glfwTerminate();
@@ -84,22 +96,6 @@ int main(int argc, char** argv) {
     }
 
     InputController input(window);
-
-    // Load configuration
-    const char* kDefaultConfigPath = "configs/chess.json";
-    const char* configPath = (argc > 1) ? argv[1] : kDefaultConfigPath;
-
-    RendererConfig config;
-    std::string configError;
-    if (!LoadConfigFromFile(configPath, &config, &configError)) {
-        std::fprintf(stderr, "Failed to load config: %s\n", configError.c_str());
-        ImGui_ImplOpenGL3_Shutdown();
-        ImGui_ImplGlfw_Shutdown();
-        ImGui::DestroyContext();
-        glfwDestroyWindow(window);
-        glfwTerminate();
-        return 1;
-    }
 
     const int kSamplesPerPixel = 1;
 
@@ -584,6 +580,11 @@ int main(int argc, char** argv) {
 
             ImGui::Text("Rays: %d  (%.2f Mrays)", kt.rayCount,
                         static_cast<double>(kt.rayCount) / 1.0e6);
+            if (kt.neuralRayCalls > 0 && kt.rayCount > 0) {
+                ImGui::Text("Avg neural calls/ray: %.2f",
+                            static_cast<double>(kt.neuralRayCalls) /
+                            static_cast<double>(kt.rayCount));
+            }
             ImGui::End();
         }
 #endif  // PROFILE_KERNELS

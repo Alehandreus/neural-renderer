@@ -331,7 +331,9 @@ cmake --build build --target viewer
   },
   "rendering": {
     "total_samples": 2048,
-    "bounce_count": 3
+    "bounce_count": 3,
+    "width": 1920,    // initial window width in pixels
+    "height": 1080    // initial window height in pixels
   },
   "material": { /* optional overrides */ }
 }
