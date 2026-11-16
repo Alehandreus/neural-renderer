@@ -1,3 +1,5 @@
+#include <unordered_set>
+#include <cstring>
 #include "mesh.h"
 
 #include <cfloat>
@@ -349,6 +351,12 @@ bool Mesh::buildGAS(OptixDeviceContext ctx) {
             if (ok) ok = (cudaDeviceSynchronize() == cudaSuccess);
         }
     }
+    // Logged so benchmark render logs record the real acceleration-structure memory.
+    if (ok)
+        std::fprintf(stderr, "[OptiX GAS] tris=%d verts=%d compacted_bytes=%llu uncompacted_bytes=%llu (%.1f B/tri compacted)\n",
+                     numTriangles(), numVertices(), (unsigned long long)gasBufferSize_,
+                     (unsigned long long)sizes.outputSizeInBytes,
+                     numTriangles() > 0 ? double(gasBufferSize_) / numTriangles() : 0.0);
 
     cuMemFree(dTemp);
     cuMemFree(dOut);
@@ -362,3 +370,17 @@ void Mesh::releaseGAS() {
     gasHandle_     = 0;
 }
 #endif
+
+size_t Mesh::weldedVertexCount() const {
+    std::unordered_set<uint64_t> seen;
+    seen.reserve(vertices_.size());
+    size_t unique = 0;
+    // hash the exact bit patterns of the three coordinates
+    for (const Vec3& v : vertices_) {
+        uint32_t b[3];
+        std::memcpy(&b[0], &v.x, 4); std::memcpy(&b[1], &v.y, 4); std::memcpy(&b[2], &v.z, 4);
+        uint64_t h = (uint64_t(b[0]) * 0x9E3779B185EBCA87ull) ^ (uint64_t(b[1]) * 0xC2B2AE3D27D4EB4Full) ^ (uint64_t(b[2]) * 0x165667B19E3779F9ull);
+        if (seen.insert(h).second) ++unique;
+    }
+    return unique;
+}

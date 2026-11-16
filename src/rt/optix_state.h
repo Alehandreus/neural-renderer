@@ -47,10 +47,11 @@ enum class RaygenIndex : unsigned int {
     BounceGT           = 1,
     ShellEntry         = 2,
     ShellEntryFromRays = 3,
-    ShellExit          = 4,
-    AdditionalPrimary  = 5,
-    AdditionalBounce   = 6,
-    EarlyTermination   = 7,
+    ShellOuterExit     = 4,
+    ShellInnerEnter    = 5,
+    AdditionalPrimary  = 6,
+    AdditionalBounce   = 7,
+    EarlyTermination   = 8,
 };
 
 // ---------------------------------------------------------------------------

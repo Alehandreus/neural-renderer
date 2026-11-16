@@ -146,7 +146,7 @@ extern "C" __global__ void __raygen__primaryGT() {
     for (int s = 0; s < rp.samplesPerPixel; ++s) {
         int sampleIdx = pixelIdx + s * rp.pixelCount;
         uint32_t rng  = initRng(pixelIdx, rp.sampleOffset, s);
-        Ray ray       = generatePrimaryRay(x, y, rp, rng);
+        Ray ray       = generatePrimaryRay(x, y, rp, rng, s);
 
         uint32_t primIdx; float t, u, v;
         bool hit = traceMeshOptiX(launchParams.gas, ray, 1e-6f, 1e30f,
@@ -231,7 +231,7 @@ extern "C" __global__ void __raygen__shellEntry() {
         int sampleIdx = pixelIdx + s * rp.pixelCount;
         int base      = sampleIdx * 3;
         uint32_t rng  = initRng(pixelIdx, rp.sampleOffset, s);
-        Ray ray       = generatePrimaryRay(x, y, rp, rng);
+        Ray ray       = generatePrimaryRay(x, y, rp, rng, s);
 
         // Store ray direction
         launchParams.storedRayDirections[base + 0] = ray.direction.x;
@@ -344,51 +344,57 @@ extern "C" __global__ void __raygen__shellEntryFromRays() {
 }
 
 // ===========================================================================
-// __raygen__shellExit
-// Replaces traceSegmentExitsKernel — 1D launch over compacted hit list.
-// Traces outer shell backward (exit) and inner shell (any), picks closest.
+// __raygen__shellOuterExit / __raygen__shellInnerEnter
+// Replace traceOuterExitKernel / traceInnerEnterKernel — 1D launches over the
+// compacted hit list. Split in two so outer and inner traversal can be timed
+// separately; the inner pass reads outerExitT and picks the closer exit.
 // ===========================================================================
-extern "C" __global__ void __raygen__shellExit() {
+static __forceinline__ __device__ Ray shellSegmentRay(int base) {
     const float kEps = 1e-8f;
-    int idx = static_cast<int>(optixGetLaunchIndex().x);
-    if (idx >= launchParams.hitCount) return;
-
-    int sampleIdx = launchParams.hitIndices[idx];
-    int base      = sampleIdx * 3;
-
     Vec3 entryPos(launchParams.entryPositions[base+0],
                   launchParams.entryPositions[base+1],
                   launchParams.entryPositions[base+2]);
     Vec3 dir(launchParams.storedRayDirections[base+0],
              launchParams.storedRayDirections[base+1],
              launchParams.storedRayDirections[base+2]);
+    return Ray(entryPos + dir * kEps, dir);
+}
 
-    Vec3 shiftedEntry = entryPos + dir * kEps;
-    Ray  ray(shiftedEntry, dir);
+extern "C" __global__ void __raygen__shellOuterExit() {
+    const float kEps = 1e-8f;
+    int idx = static_cast<int>(optixGetLaunchIndex().x);
+    if (idx >= launchParams.hitCount) return;
+
+    int sampleIdx = launchParams.hitIndices[idx];
+    Ray ray = shellSegmentRay(sampleIdx * 3);
 
     // Outer exit (backward)
     uint32_t ep; float exitT, eu, ev;
     bool hitOuterExit = traceMeshOptiX(launchParams.gas, ray, 1e-6f, 1e30f,
                                        TraceMode::BACKWARD_ONLY, ep, exitT, eu, ev);
-    if (!hitOuterExit) exitT = kEps;
-    launchParams.outerExitT[sampleIdx] = exitT;
+    launchParams.outerExitT[sampleIdx] = hitOuterExit ? exitT : kEps;
+}
+
+extern "C" __global__ void __raygen__shellInnerEnter() {
+    int idx = static_cast<int>(optixGetLaunchIndex().x);
+    if (idx >= launchParams.hitCount) return;
+
+    int sampleIdx = launchParams.hitIndices[idx];
+    int base      = sampleIdx * 3;
+    Ray ray = shellSegmentRay(base);
 
     // Inner shell (any mode, gas2)
     uint32_t ip; float innerT, iu, iv;
     bool hitInner = traceMeshOptiX(launchParams.gas2, ray, 1e-6f, 1e30f,
                                    TraceMode::ANY, ip, innerT, iu, iv);
-    if (hitInner) {
-        launchParams.innerEnterT[sampleIdx]  = innerT;
-        launchParams.innerHitFlags[sampleIdx] = 1;
-    } else {
-        innerT = 1e30f;
-        launchParams.innerEnterT[sampleIdx]  = innerT;
-        launchParams.innerHitFlags[sampleIdx] = 0;
-    }
+    if (!hitInner) innerT = 1e30f;
+    launchParams.innerEnterT[sampleIdx]   = innerT;
+    launchParams.innerHitFlags[sampleIdx] = hitInner ? 1 : 0;
 
     // Exit position = nearer of outer_exit or inner_enter
+    float exitT = launchParams.outerExitT[sampleIdx];
     bool innerBeforeOuter = hitInner && (innerT < exitT);
-    Vec3 exitPos = shiftedEntry + dir * (innerBeforeOuter ? innerT : exitT);
+    Vec3 exitPos = ray.at(innerBeforeOuter ? innerT : exitT);
 
     // Reuse hitPositions to store exit positions (same as segmentExitPos_ in SW path)
     launchParams.hitPositions[base+0] = exitPos.x;
@@ -417,7 +423,7 @@ extern "C" __global__ void __raygen__additionalPrimary() {
         }
 
         uint32_t rng = initRng(pixelIdx, rp.sampleOffset, s);
-        Ray ray      = generatePrimaryRay(x, y, rp, rng);
+        Ray ray      = generatePrimaryRay(x, y, rp, rng, s);
 
         uint32_t primIdx; float t, u, v;
         bool hit = traceMeshOptiX(launchParams.gas, ray, 1e-6f, 1e30f,

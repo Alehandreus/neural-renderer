@@ -134,7 +134,12 @@ public:
     bool buildGAS(OptixDeviceContext ctx);
     void releaseGAS();
     OptixTraversableHandle gasHandle() const { return gasHandle_; }
+    size_t gasBufferSize() const { return gasBufferSize_; }   // compacted GAS bytes, 0 if not built
 #endif
+
+    // Number of distinct vertex positions (meshes may be loaded unwelded, one
+    // vertex per triangle corner).
+    size_t weldedVertexCount() const;
 
     // Clear all data
     void clear();

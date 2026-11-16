@@ -8,6 +8,7 @@
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
 
+#include "render_params.h"
 #include "renderer.h"
 
 // ---------------------------------------------------------------------------
@@ -19,7 +20,8 @@ enum KernelId {
     KID_primaryTrace,           // intersectGroundTruth / OptiX primaryGT
     KID_bounceTrace,            // traceGroundTruthBounces / OptiX bounceGT (×bounces)
     // Neural mode (zero in GT mode)
-    KID_shellTrace,             // all shell BVH traversals: outer entry + segment exits (×iters×calls)
+    KID_outerShell,             // outer shell: entry + segment exit + re-entry (×iters×calls)
+    KID_innerShell,             // inner shell: segment inner-enter (×iters×calls)
     KID_neuralForward,          // network_->inference_mixed_precision (×iters×calls)
     // Shared (both modes)
     KID_additionalMeshPrimary,  // traceAdditionalMeshPrimaryRays / OptiX additional primary
@@ -36,14 +38,16 @@ enum KernelId {
 
 struct KernelTimings {
     double   ms[KID_COUNT]   = {};
-    int      rayCount        = 0;  // width * height * samplesPerPixel
+    double   frameMs         = 0.0;  // whole render() call, incl. untimed kernels and host syncs
+    uint64_t rayCount        = 0;  // width * height * samplesPerPixel
     uint64_t neuralRayCalls  = 0;  // sum of active-ray counts across all neural forward passes
 
     static const char* name(int kid) {
         static const char* kNames[KID_COUNT] = {
             "GT primary intersect",
             "GT bounce intersect",
-            "Shell intersection",
+            "Outer shell intersection",
+            "Inner shell intersection",
             "Neural forward pass",
             "Additional mesh (primary)",
             "Select closest (primary)",
@@ -56,6 +60,35 @@ struct KernelTimings {
             "Finalize / lambert",
         };
         return (kid >= 0 && kid < KID_COUNT) ? kNames[kid] : "?";
+    }
+
+    // Identifier-safe names for machine-readable output (evaluate's blk line).
+    static const char* key(int kid) {
+        static const char* kKeys[KID_COUNT] = {
+            "gt_primary",
+            "gt_bounce",
+            "outer_shell",
+            "inner_shell",
+            "neural",
+            "additional_primary",
+            "select_closest_primary",
+            "init_path_state",
+            "sample_bounce",
+            "early_termination",
+            "additional_bounce",
+            "select_closest_bounce",
+            "integrate_bounce",
+            "finalize",
+        };
+        return (kid >= 0 && kid < KID_COUNT) ? kKeys[kid] : "unknown";
+    }
+
+    KernelTimings& operator+=(const KernelTimings& o) {
+        for (int i = 0; i < KID_COUNT; ++i) ms[i] += o.ms[i];
+        frameMs        += o.frameMs;
+        rayCount       += o.rayCount;
+        neuralRayCalls += o.neuralRayCalls;
+        return *this;
     }
 
     double totalMs() const {
@@ -104,6 +137,11 @@ class RendererNeural final {
     void setSamplesPerPixel(int samples) { samplesPerPixel_ = samples; }
     void setBounceCount(int count) { bounceCount_ = count; }
     void setLambertView(bool enabled) { lambertView_ = enabled; }
+    void setLambertSettings(const LambertSettings& s) { lambertSettings_ = s; resetAccum(); }
+    void setCenterRays(bool v) { if (v != centerRays_) { centerRays_ = v; resetAccum(); } }
+    void setStrataPerAxis(int n) { if (n != strataPerAxis_) { strataPerAxis_ = n; resetAccum(); } }
+    bool centerRays() const { return centerRays_; }
+    const LambertSettings& lambertSettings() const { return lambertSettings_; }
     void setClassicMeshIndex(int index) { classicMeshIndex_ = index; }
     int classicMeshIndex() const { return classicMeshIndex_; }
     void setEnvmapRotation(float degrees) { envmapRotation_ = degrees; }
@@ -231,6 +269,9 @@ class RendererNeural final {
     Vec3* accum_ = nullptr;
 
     bool lambertView_ = false;
+    LambertSettings lambertSettings_{};
+    bool centerRays_ = false;
+    int strataPerAxis_ = 0;
     bool useNeuralQuery_ = false;
     bool swapParamOrder_ = true;  // checkpoint has [hg | mlp] instead of [mlp | hg]
     int samplesPerPixel_ = 1;
@@ -259,6 +300,8 @@ class RendererNeural final {
     };
     ProfileSlot   profilePool_[kProfilePoolSize];
     int           profilePoolUsed_ = 0;
+    cudaEvent_t   frameStart_      = nullptr;
+    cudaEvent_t   frameStop_       = nullptr;
     uint64_t      neuralRayCalls_  = 0;
     KernelTimings lastFrameTimings_;
 #endif

@@ -37,9 +37,28 @@ __device__ inline float rand01(uint32_t& state) {
 // Primary ray generation
 // ===========================================================================
 
-__device__ inline Ray generatePrimaryRay(int x, int y, const RenderParams& params, uint32_t& rng) {
-    float jitterX = rand01(rng);
-    float jitterY = rand01(rng);
+__device__ inline Ray generatePrimaryRay(int x, int y, const RenderParams& params, uint32_t& rng,
+                                         int sampleIdx = 0) {
+    float jitterX, jitterY;
+    if (params.centerRays) {
+        // Deterministic sub-pixel positions instead of random jitter, for renders
+        // that must be pixel-comparable with LiteRT's reference.
+        // With strataPerAxis = n, sample k of the whole accumulation lands on cell
+        // (k / n, k % n) of an n x n grid, exactly like LiteRT's RAY_GEN_MODE_REGULAR
+        // (MultiRenderer.cpp initEyeRay).  n = 0 keeps the old pixel-centre behaviour.
+        int n = params.strataPerAxis;
+        if (n > 0) {
+            int k = static_cast<int>((params.sampleOffset + static_cast<uint32_t>(sampleIdx)) % static_cast<uint32_t>(n * n));
+            jitterX = (static_cast<float>(k / n) + 0.5f) / static_cast<float>(n);
+            jitterY = (static_cast<float>(k % n) + 0.5f) / static_cast<float>(n);
+        } else {
+            jitterX = 0.5f;
+            jitterY = 0.5f;
+        }
+    } else {
+        jitterX = rand01(rng);
+        jitterY = rand01(rng);
+    }
     float aspect = static_cast<float>(params.width) / static_cast<float>(params.height);
     float u = (static_cast<float>(x) + jitterX) / static_cast<float>(params.width);
     float v = 1.0f - (static_cast<float>(y) + jitterY) / static_cast<float>(params.height);

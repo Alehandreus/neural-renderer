@@ -239,7 +239,7 @@ int main(int argc, char** argv) {
     }
 
     double lastTime = glfwGetTime();
-    bool lambertView = false;
+    bool lambertView = config.shading.lambert;
     bool useNeuralQuery = config.neural_network.use_neural_query;
 #ifdef USE_OPTIX
     bool useHardwareRT = true;
@@ -253,7 +253,11 @@ int main(int argc, char** argv) {
     bool useDirectEnvColor = false;
     float directEnvColor[3] = {0.0f, 0.0f, 0.0f};
     bool useAdditionalMesh = additionalMesh.numTriangles() > 0;
+    bool litertLambert = config.shading.litert_mode;
     bool uiWantsMouse = false;
+
+    renderer.setLambertSettings(ToLambertSettings(config.shading));
+    renderer.setCenterRays(config.rendering.center_rays);
 
     while (!glfwWindowShouldClose(window)) {
         double now = glfwGetTime();
@@ -269,6 +273,11 @@ int main(int argc, char** argv) {
         if (samplesPerPixel < 1) samplesPerPixel = 1;
 
         renderer.setLambertView(lambertView);
+        if (litertLambert != renderer.lambertSettings().litertMode) {
+            LambertSettings s = renderer.lambertSettings();
+            s.litertMode = litertLambert;
+            renderer.setLambertSettings(s);
+        }
         renderer.setUseNeuralQuery(useNeuralQuery);
 #ifdef USE_OPTIX
         renderer.setUseHardwareRT(useHardwareRT);
@@ -350,6 +359,10 @@ int main(int argc, char** argv) {
         ImGui::Checkbox("Hardware RT (OptiX)", &useHardwareRT);
 #endif
         ImGui::Checkbox("Lambert shading", &lambertView);
+        if (lambertView) {
+            ImGui::SameLine();
+            ImGui::Checkbox("LiteRT-compatible", &litertLambert);
+        }
         ImGui::InputInt("Max bounces", &bounceCount);
         ImGui::InputInt("Samples per pixel", &samplesPerPixel);
         const char* meshNames[] = {"Original", "Inner shell", "Outer shell"};
@@ -578,7 +591,7 @@ int main(int argc, char** argv) {
                 ImGui::EndTable();
             }
 
-            ImGui::Text("Rays: %d  (%.2f Mrays)", kt.rayCount,
+            ImGui::Text("Rays: %llu  (%.2f Mrays)", static_cast<unsigned long long>(kt.rayCount),
                         static_cast<double>(kt.rayCount) / 1.0e6);
             if (kt.neuralRayCalls > 0 && kt.rayCount > 0) {
                 ImGui::Text("Avg neural calls/ray: %.2f",

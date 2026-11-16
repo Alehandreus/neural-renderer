@@ -59,12 +59,13 @@ static const char* kRaygenNames[] = {
     "__raygen__bounceGT",
     "__raygen__shellEntry",
     "__raygen__shellEntryFromRays",
-    "__raygen__shellExit",
+    "__raygen__shellOuterExit",
+    "__raygen__shellInnerEnter",
     "__raygen__additionalPrimary",
     "__raygen__additionalBounce",
     "__raygen__earlyTermination",
 };
-static constexpr int kNumRaygen = 8;
+static constexpr int kNumRaygen = 9;
 
 // ---------------------------------------------------------------------------
 // optixCreateState
@@ -108,7 +109,7 @@ OptixState* optixCreateState(const char* ptxSource) {
     }
 
     // --- Program groups ---
-    // 8 raygen + 1 miss + 1 closesthit
+    // 9 raygen + 1 miss + 1 closesthit
     std::vector<OptixProgramGroup> programGroups;
     programGroups.reserve(kNumRaygen + 2);
 

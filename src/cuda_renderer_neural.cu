@@ -259,7 +259,7 @@ __global__ void intersectGroundTruthKernel(float* hitPositions,
         int sampleIdx = pixelIdx + s * params.pixelCount;
         int base = sampleIdx * 3;
         uint32_t rng = initRng(pixelIdx, params.sampleOffset, s);
-        Ray ray = generatePrimaryRay(x, y, params, rng);
+        Ray ray = generatePrimaryRay(x, y, params, rng, s);
 
         HitData hit = traceRayGT(ray, mesh, params.material);
 
@@ -318,7 +318,7 @@ __global__ void initializePathStateKernel(Vec3* throughput,
     for (int s = 0; s < params.samplesPerPixel; ++s) {
         int sampleIdx = pixelIdx + s * params.pixelCount;
         uint32_t rng = initRng(pixelIdx, params.sampleOffset, s);
-        Ray primaryRay = generatePrimaryRay(x, y, params, rng);
+        Ray primaryRay = generatePrimaryRay(x, y, params, rng, s);
 
         Vec3 sampleRadiance(0.0f, 0.0f, 0.0f);
         Vec3 sampleThroughput(1.0f, 1.0f, 1.0f);
@@ -415,7 +415,7 @@ __global__ void sampleBounceDirectionsKernel(const float* hitPositions,
         if (incomingDirections) {
             incomingDir = Vec3(incomingDirections[base + 0], incomingDirections[base + 1], incomingDirections[base + 2]);
         } else {
-            Ray primaryRay = generatePrimaryRay(x, y, params, rng);
+            Ray primaryRay = generatePrimaryRay(x, y, params, rng, s);
             incomingDir = primaryRay.direction;
         }
 
@@ -736,7 +736,7 @@ __global__ void traceOuterShellEntryKernel(
         int sampleIdx = pixelIdx + s * params.pixelCount;
         int base = sampleIdx * 3;
         uint32_t rng = initRng(pixelIdx, params.sampleOffset, s);
-        Ray ray = generatePrimaryRay(x, y, params, rng);
+        Ray ray = generatePrimaryRay(x, y, params, rng, s);
 
         // Store ray direction
         rayDirections[base + 0] = ray.direction.x;
@@ -852,19 +852,56 @@ __global__ void traceOuterShellEntryFromRaysKernel(
 }
 
 // ---------------------------------------------------------------------------
-// Trace segment exits: outer shell backward and inner shell forward.
-// Computes exit position as min(outer_exit, inner_enter).
+// Trace segment exits, split into two launches so outer and inner shell
+// traversal can be timed separately:
+//   1. traceOuterExitKernel   — outer shell backward, writes outerExitT.
+//   2. traceInnerEnterKernel  — inner shell (any), then exit position as
+//                               min(outer_exit, inner_enter).
 // ---------------------------------------------------------------------------
-__global__ void traceSegmentExitsKernel(
+__device__ inline Ray segmentRay(const float* entryPositions, const float* rayDirections, int base) {
+    Vec3 entryPos(entryPositions[base + 0],
+                  entryPositions[base + 1],
+                  entryPositions[base + 2]);
+    Vec3 dir(rayDirections[base + 0],
+             rayDirections[base + 1],
+             rayDirections[base + 2]);
+    // Shift entry point into shell by epsilon (matching Python: x_outer_enter + ds_left * eps)
+    return Ray(entryPos + dir * kSegmentEpsilon, dir);
+}
+
+__global__ void traceOuterExitKernel(
         const float* entryPositions,
         const float* rayDirections,
         const int* hitIndices,
         int hitCount,
         MeshDeviceView outerShell,
+        Material material,
+        float* outerExitT) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= hitCount) {
+        return;
+    }
+
+    int sampleIdx = hitIndices[idx];
+    Ray ray = segmentRay(entryPositions, rayDirections, sampleIdx * 3);
+
+    // Trace outer shell EXIT (BACKWARD_ONLY: allow_backward=true, allow_forward=false)
+    HitInfo outerExit;
+    bool hitOuterExit = traceMeshWithMode(ray, outerShell, &outerExit, TraceMode::BACKWARD_ONLY, false, material);
+
+    // Fallback: minimal segment (matching Python: x_outer_exit_t[~mask] = 1e-8)
+    outerExitT[sampleIdx] = hitOuterExit ? outerExit.t : kSegmentEpsilon;
+}
+
+__global__ void traceInnerEnterKernel(
+        const float* entryPositions,
+        const float* rayDirections,
+        const int* hitIndices,
+        int hitCount,
         MeshDeviceView innerShell,
         Material material,
+        const float* outerExitT,
         float* exitPositions,
-        float* outerExitT,
         float* innerEnterT,
         int* innerHitFlags) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
@@ -874,55 +911,22 @@ __global__ void traceSegmentExitsKernel(
 
     int sampleIdx = hitIndices[idx];
     int base = sampleIdx * 3;
-
-    Vec3 entryPos(entryPositions[base + 0],
-                  entryPositions[base + 1],
-                  entryPositions[base + 2]);
-    Vec3 dir(rayDirections[base + 0],
-             rayDirections[base + 1],
-             rayDirections[base + 2]);
-
-    // Shift entry point into shell by epsilon (matching Python: x_outer_enter + ds_left * eps)
-    Vec3 shiftedEntry = entryPos + dir * kSegmentEpsilon;
-    Ray ray(shiftedEntry, dir);
-
-    // Trace outer shell EXIT (BACKWARD_ONLY: allow_backward=true, allow_forward=false)
-    HitInfo outerExit;
-    bool hitOuterExit = traceMeshWithMode(ray, outerShell, &outerExit, TraceMode::BACKWARD_ONLY, false, material);
-
-    float exitT;
-    if (hitOuterExit) {
-        exitT = outerExit.t;
-    } else {
-        // Fallback: minimal segment (matching Python: x_outer_exit_t[~mask] = 1e-8)
-        exitT = kSegmentEpsilon;
-    }
-    outerExitT[sampleIdx] = exitT;
+    Ray ray = segmentRay(entryPositions, rayDirections, base);
 
     // Trace inner shell (ANY mode, allow_negative=True as in Python)
     HitInfo innerHit;
     bool hitInner = traceMeshWithMode(ray, innerShell, &innerHit, TraceMode::ANY, false, material);
 
-    float innerT;
-    if (hitInner) {
-        innerT = innerHit.t;
-        innerHitFlags[sampleIdx] = 1;
-    } else {
-        innerT = 1e30f;  // No inner hit
-        innerHitFlags[sampleIdx] = 0;
-    }
+    float innerT = hitInner ? innerHit.t : 1e30f;  // 1e30 = no inner hit
+    innerHitFlags[sampleIdx] = hitInner ? 1 : 0;
     innerEnterT[sampleIdx] = innerT;
 
     // Exit position is the nearer of outer_exit or inner_enter
     // (matching Python: inner_apply = x_inner_mask & (x_inner_t < x_outer_exit_t))
     // Note: Python allows negative inner_t (allow_negative=True) so we don't check > 0
+    float exitT = outerExitT[sampleIdx];
     bool innerBeforeOuter = hitInner && (innerT < exitT);
-    Vec3 exitPos;
-    if (innerBeforeOuter) {
-        exitPos = shiftedEntry + dir * innerT;
-    } else {
-        exitPos = shiftedEntry + dir * exitT;
-    }
+    Vec3 exitPos = ray.at(innerBeforeOuter ? innerT : exitT);
 
     exitPositions[base + 0] = exitPos.x;
     exitPositions[base + 1] = exitPos.y;
@@ -1148,7 +1152,7 @@ __global__ void traceAdditionalMeshPrimaryRaysKernel(
 
         // Reconstruct primary ray (same as shell tracing)
         uint32_t rng = initRng(pixelIdx, params.sampleOffset, s);
-        Ray ray = generatePrimaryRay(x, y, params, rng);
+        Ray ray = generatePrimaryRay(x, y, params, rng, s);
 
         // Trace against additional mesh
         HitInfo hit;
@@ -1545,6 +1549,7 @@ __global__ void compactInputsKernel(const int* flags,
 // Lambert shading (no bounces).
 // ---------------------------------------------------------------------------
 __global__ void lambertKernel(uchar4* output,
+                              Vec3* accum,
                               const float* hitNormals,
                               const float* hitColors,
                               const int* hitFlags,
@@ -1565,7 +1570,7 @@ __global__ void lambertKernel(uchar4* output,
     for (int s = 0; s < params.samplesPerPixel; ++s) {
         int sampleIdx = pixelIdx + s * params.pixelCount;
         uint32_t rng = initRng(pixelIdx, params.sampleOffset, s);
-        Ray primaryRay = generatePrimaryRay(x, y, params, rng);
+        Ray primaryRay = generatePrimaryRay(x, y, params, rng, s);
 
         Vec3 color(0.0f, 0.0f, 0.0f);
         if (hitFlags[sampleIdx]) {
@@ -1573,31 +1578,53 @@ __global__ void lambertKernel(uchar4* output,
                     hitNormals[sampleIdx * 3 + 0],
                     hitNormals[sampleIdx * 3 + 1],
                     hitNormals[sampleIdx * 3 + 2]);
-            Vec3 baseColor(
-                    hitColors[sampleIdx * 3 + 0],
-                    hitColors[sampleIdx * 3 + 1],
-                    hitColors[sampleIdx * 3 + 2]);
+            Vec3 baseColor = params.lambert.whiteBaseColor
+                    ? Vec3(1.0f, 1.0f, 1.0f)
+                    : Vec3(hitColors[sampleIdx * 3 + 0],
+                           hitColors[sampleIdx * 3 + 1],
+                           hitColors[sampleIdx * 3 + 2]);
             float nlen = length(normal);
             if (nlen > 0.0f) {
                 normal = normal / nlen;
             } else {
                 normal = Vec3(0.0f, 1.0f, 0.0f);
             }
-            // Flip normal to face viewer (match NBVH's shading_frame)
+            // Flip normal to face viewer (match NBVH's shading_frame, and
+            // LiteRT's norm_sign in loadNormalTcFromGbuffer)
             if (dot(normal, primaryRay.direction) > 0.0f) {
                 normal = normal * -1.0f;
             }
-            float ndotl = fmaxf(0.0f, dot(normal, -primaryRay.direction));
-            color = baseColor * ndotl;
+            if (params.lambert.litertMode) {
+                // LiteRT MULTI_RENDER_MODE_LAMBERT_NO_TEX: one direct light plus
+                // an ambient term, no shadows.
+                float ndotl = fmaxf(0.0f, dot(normal, params.lambert.lightDir));
+                color = baseColor * (params.lambert.dirIntensity * ndotl +
+                                     params.lambert.ambient);
+            } else {
+                float ndotl = fmaxf(0.0f, dot(normal, -primaryRay.direction));
+                color = baseColor * ndotl;
+            }
         } else {
-            color = sampleEnvironment(env, primaryRay.direction);
+            color = params.lambert.litertMode
+                    ? params.lambert.background
+                    : sampleEnvironment(env, primaryRay.direction);
         }
 
         sum += color;
     }
 
-    Vec3 color = sum * (1.0f / static_cast<float>(params.samplesPerPixel));
-    color = encodeSrgb(color);
+    // Accumulate across render() calls like the path tracer does; previously each
+    // call overwrote the image, so a batched render kept only its last batch.
+    Vec3 total = params.sampleOffset > 0 ? accum[pixelIdx] + sum : sum;
+    accum[pixelIdx] = total;
+    Vec3 color = total * (1.0f / static_cast<float>(params.sampleOffset + params.samplesPerPixel));
+    if (params.lambert.encodeSrgb) {
+        color = encodeSrgb(color);
+    } else {
+        color = Vec3(clampf(color.x, 0.0f, 1.0f),
+                     clampf(color.y, 0.0f, 1.0f),
+                     clampf(color.z, 0.0f, 1.0f));
+    }
 
     output[pixelIdx] = make_uchar4(
             static_cast<unsigned char>(color.x * 255.0f),
@@ -1623,6 +1650,17 @@ void checkCuda(cudaError_t result, const char* context) {
     }
 }
 
+// Error check after a launch.  Everything runs in order on the legacy default
+// stream, so no device sync is needed for correctness; build with
+// -DDBRT_SYNC_CHECKS to sync anyway and attribute async errors to their launch.
+void checkLaunch(const char* context) {
+#ifdef DBRT_SYNC_CHECKS
+    checkCuda(cudaDeviceSynchronize(), context);
+#else
+    checkCuda(cudaGetLastError(), context);
+#endif
+}
+
 }  // namespace
 
 // ===========================================================================
@@ -1634,9 +1672,17 @@ RendererNeural::RendererNeural(Scene& scene, const NeuralNetworkConfig* nnConfig
           lightDir_(normalize(Vec3(1.0f, 1.5f, -1.0f))) {
     int log2HashmapSize = 14;
     int baseResolution = 16;
+    int nNeurons = 128;
+    int nHiddenLayers = 4;
+    int nLevels = 8;
+    std::string mlpOtype = "FullyFusedMLP";
     if (nnConfig != nullptr) {
         log2HashmapSize = nnConfig->log2_hashmap_size;
         baseResolution = nnConfig->base_resolution;
+        nNeurons = nnConfig->n_neurons;
+        nHiddenLayers = nnConfig->n_hidden_layers;
+        nLevels = nnConfig->n_levels;
+        mlpOtype = nnConfig->mlp_otype;
     }
 
     pointCount_ = 3u;
@@ -1647,7 +1693,7 @@ RendererNeural::RendererNeural(Scene& scene, const NeuralNetworkConfig* nnConfig
     tcnn::json hashgridConfig = {
         {"otype", "HashGrid"},
         {"n_dims_to_encode", 3},
-        {"n_levels", 8},
+        {"n_levels", nLevels},
         {"n_features_per_level", 4},
         {"log2_hashmap_size", log2HashmapSize},
         {"base_resolution", baseResolution},
@@ -1675,11 +1721,11 @@ RendererNeural::RendererNeural(Scene& scene, const NeuralNetworkConfig* nnConfig
     };
 
     tcnn::json mlpConfig = {
-        {"otype", "FullyFusedMLP"},
+        {"otype", mlpOtype},
         {"activation", "LeakyReLU"},
         {"output_activation", "None"},
-        {"n_neurons", 128},
-        {"n_hidden_layers", 4},
+        {"n_neurons", nNeurons},
+        {"n_hidden_layers", nHiddenLayers},
     };
 
     network_ = std::make_shared<tcnn::NetworkWithInputEncoding<__half>>(
@@ -1714,6 +1760,8 @@ RendererNeural::RendererNeural(Scene& scene, const NeuralNetworkConfig* nnConfig
         cudaEventCreate(&profilePool_[i].start);
         cudaEventCreate(&profilePool_[i].stop);
     }
+    cudaEventCreate(&frameStart_);
+    cudaEventCreate(&frameStop_);
 #endif
 }
 
@@ -1730,6 +1778,8 @@ RendererNeural::~RendererNeural() {
         if (profilePool_[i].start) { cudaEventDestroy(profilePool_[i].start); profilePool_[i].start = nullptr; }
         if (profilePool_[i].stop)  { cudaEventDestroy(profilePool_[i].stop);  profilePool_[i].stop  = nullptr; }
     }
+    if (frameStart_) { cudaEventDestroy(frameStart_); frameStart_ = nullptr; }
+    if (frameStop_)  { cudaEventDestroy(frameStop_);  frameStop_  = nullptr; }
 #endif
 }
 
@@ -1851,7 +1901,7 @@ void RendererNeural::traceNeuralSegmentsForRays(bool useCameraRays,
     }
 
     const float* segmentRayDirections = nullptr;
-    PROF_BEGIN(KID_shellTrace);
+    PROF_BEGIN(KID_outerShell);
     if (useCameraRays) {
 #ifdef USE_OPTIX
         if (useHardwareRT_ && optixState_ && optixState_->gasOuter.handle) {
@@ -1872,7 +1922,7 @@ void RendererNeural::traceNeuralSegmentsForRays(bool useCameraRays,
                         &optixState_->sbt,
                         static_cast<unsigned int>(params.width),
                         static_cast<unsigned int>(params.height), 1);
-            checkCuda(cudaDeviceSynchronize(), "optixLaunch shellEntry");
+            checkLaunch("optixLaunch shellEntry");
         } else
 #endif
         {
@@ -1913,7 +1963,7 @@ void RendererNeural::traceNeuralSegmentsForRays(bool useCameraRays,
                         &optixState_->sbt,
                         static_cast<unsigned int>(params.width),
                         static_cast<unsigned int>(params.height), 1);
-            checkCuda(cudaDeviceSynchronize(), "optixLaunch shellEntryFromRays");
+            checkLaunch("optixLaunch shellEntryFromRays");
         } else
 #endif
         {
@@ -1932,7 +1982,7 @@ void RendererNeural::traceNeuralSegmentsForRays(bool useCameraRays,
         }
         segmentRayDirections = rayDirections;
     }
-    PROF_END();  // KID_shellTrace (outer entry)
+    PROF_END();  // KID_outerShell (entry)
 
     checkCuda(cudaMemset(hitCount_, 0, sizeof(int)), "cudaMemset hitCount");
     compactInputsKernel<<<compactGrid, compactBlock>>>(
@@ -1954,7 +2004,8 @@ void RendererNeural::traceNeuralSegmentsForRays(bool useCameraRays,
         const int buildBlock = 256;
         int buildGrid = (activeCount + buildBlock - 1) / buildBlock;
 
-        PROF_BEGIN(KID_shellTrace);
+        // Segment exits: outer and inner shells are traced in separate launches
+        // so each can be timed on its own.
 #ifdef USE_OPTIX
         if (useHardwareRT_ && optixState_ &&
             optixState_->gasOuter.handle && optixState_->gasInner.handle) {
@@ -1973,31 +2024,51 @@ void RendererNeural::traceNeuralSegmentsForRays(bool useCameraRays,
             lp.innerHitFlags      = innerHitFlags_;
             lp.hitPositions       = segmentExitPos_;  // reused as exit positions
             cuMemcpyHtoD(optixState_->dLaunchParams, &lp, sizeof(lp));
-            optixState_->sbt.raygenRecord = optixState_->dRaygenRecordsBase +
-                static_cast<unsigned int>(RaygenIndex::ShellExit) * sizeof(RaygenRecord);
-            optixLaunch(optixState_->pipeline, nullptr,
-                        optixState_->dLaunchParams, sizeof(OptixLaunchParams),
-                        &optixState_->sbt,
-                        static_cast<unsigned int>(activeCount), 1, 1);
-            checkCuda(cudaDeviceSynchronize(), "optixLaunch shellExit");
+            auto launchExit = [&](RaygenIndex raygen, const char* what) {
+                optixState_->sbt.raygenRecord = optixState_->dRaygenRecordsBase +
+                    static_cast<unsigned int>(raygen) * sizeof(RaygenRecord);
+                optixLaunch(optixState_->pipeline, nullptr,
+                            optixState_->dLaunchParams, sizeof(OptixLaunchParams),
+                            &optixState_->sbt,
+                            static_cast<unsigned int>(activeCount), 1, 1);
+                checkLaunch(what);
+            };
+            PROF_BEGIN(KID_outerShell);
+            launchExit(RaygenIndex::ShellOuterExit, "optixLaunch shellOuterExit");
+            PROF_END();  // KID_outerShell (segment exit)
+            PROF_BEGIN(KID_innerShell);
+            launchExit(RaygenIndex::ShellInnerEnter, "optixLaunch shellInnerEnter");
+            PROF_END();  // KID_innerShell
         } else
 #endif
         {
-        traceSegmentExitsKernel<<<buildGrid, buildBlock>>>(
+        PROF_BEGIN(KID_outerShell);
+        traceOuterExitKernel<<<buildGrid, buildBlock>>>(
                 currentEntryPos_,
                 segmentRayDirections,
                 hitIndices_,
                 activeCount,
                 outerView,
+                params.material,
+                outerExitT_);
+        checkCuda(cudaGetLastError(), "traceOuterExitKernel launch");
+        PROF_END();  // KID_outerShell (segment exit)
+
+        PROF_BEGIN(KID_innerShell);
+        traceInnerEnterKernel<<<buildGrid, buildBlock>>>(
+                currentEntryPos_,
+                segmentRayDirections,
+                hitIndices_,
+                activeCount,
                 innerView,
                 params.material,
-                segmentExitPos_,
                 outerExitT_,
+                segmentExitPos_,
                 innerEnterT_,
                 innerHitFlags_);
-        checkCuda(cudaGetLastError(), "traceSegmentExitsKernel launch");
+        checkCuda(cudaGetLastError(), "traceInnerEnterKernel launch");
+        PROF_END();  // KID_innerShell
         }
-        PROF_END();  // KID_shellTrace (segment exits)
 
         uint32_t rayBatchSize = static_cast<uint32_t>(paddedActiveCount);
 
@@ -2054,6 +2125,9 @@ void RendererNeural::traceNeuralSegmentsForRays(bool useCameraRays,
                 params.constantNeuralColor);
         checkCuda(cudaGetLastError(), "applySegmentNeuralOutputKernel launch");
 
+        // Dominated by the outer-shell re-entry traversal; the bookkeeping around
+        // it is a handful of loads/stores, so the whole launch counts as outer.
+        PROF_BEGIN(KID_outerShell);
         prepareNextIterationKernel<<<buildGrid, buildBlock>>>(
                 segmentExitPos_,
                 outerExitT_,
@@ -2068,6 +2142,7 @@ void RendererNeural::traceNeuralSegmentsForRays(bool useCameraRays,
                 accumT_,
                 innerEnterT_);
         checkCuda(cudaGetLastError(), "prepareNextIterationKernel launch");
+        PROF_END();  // KID_outerShell (re-entry)
 
         checkCuda(cudaMemset(hitCount_, 0, sizeof(int)), "cudaMemset hitCount");
         compactInputsKernel<<<compactGrid, compactBlock>>>(
@@ -2098,6 +2173,7 @@ void RendererNeural::render(const Vec3& camPos) {
 #ifdef PROFILE_KERNELS
     profilePoolUsed_ = 0;
     neuralRayCalls_  = 0;
+    cudaEventRecord(frameStart_, 0);
 #endif
 
     // Hardware RT (OptiX) is only valid for the original mesh GAS.
@@ -2242,6 +2318,10 @@ void RendererNeural::render(const Vec3& camPos) {
     params.constantNeuralColor = constantNeuralColor_;
     params.useDirectEnvColor = useDirectEnvColor_;
     params.directEnvColor = directEnvColor_;
+    params.centerRays = centerRays_;
+    params.strataPerAxis = strataPerAxis_;
+    params.lambert = lambertSettings_;
+    params.lambert.lightDir = normalize(lambertSettings_.lightDir);
     params.fovY = basis_.fovY;
     params.maxRadiance = 100.0f;
     params.sceneScale = sceneScale_;
@@ -2303,11 +2383,11 @@ void RendererNeural::render(const Vec3& camPos) {
                         &optixState_->sbt,
                         static_cast<unsigned int>(params.width),
                         static_cast<unsigned int>(params.height), 1);
-            checkCuda(cudaDeviceSynchronize(), "optixLaunch additionalPrimary");
+            checkLaunch("optixLaunch additionalPrimary");
             resolveHitColorsKernel<<<grid, block>>>(
                     additionalHitColors_, additionalHitMaterialParams_, additionalHitFlags_, params, additionalView);
             checkCuda(cudaGetLastError(), "resolveHitColorsKernel additionalPrimary launch");
-            checkCuda(cudaDeviceSynchronize(), "resolveHitColorsKernel additionalPrimary sync");
+            checkLaunch("resolveHitColorsKernel additionalPrimary sync");
         } else
 #endif
         {
@@ -2320,7 +2400,7 @@ void RendererNeural::render(const Vec3& camPos) {
                 params,
                 additionalView);
         checkCuda(cudaGetLastError(), "traceAdditionalMeshPrimaryRaysKernel launch");
-        checkCuda(cudaDeviceSynchronize(), "traceAdditionalMeshPrimaryRaysKernel sync");
+        checkLaunch("traceAdditionalMeshPrimaryRaysKernel sync");
         }
         PROF_END();  // KID_additionalMeshPrimary
 
@@ -2339,7 +2419,7 @@ void RendererNeural::render(const Vec3& camPos) {
                 additionalHitFlags_,
                 params);
         checkCuda(cudaGetLastError(), "selectClosestPrimaryHitKernel launch");
-        checkCuda(cudaDeviceSynchronize(), "selectClosestPrimaryHitKernel sync");
+        checkLaunch("selectClosestPrimaryHitKernel sync");
         PROF_END();  // KID_selectClosestPrimary
 
         // 4. Path trace from neural hits using wavefront architecture.
@@ -2447,11 +2527,11 @@ void RendererNeural::render(const Vec3& camPos) {
                                 &optixState_->sbt,
                                 static_cast<unsigned int>(params.width),
                                 static_cast<unsigned int>(params.height), 1);
-                    checkCuda(cudaDeviceSynchronize(), "optixLaunch additionalBounce");
+                    checkLaunch("optixLaunch additionalBounce");
                     resolveHitColorsKernel<<<grid, block>>>(
                             additionalHitColors_, additionalHitMaterialParams_, additionalHitFlags_, params, additionalView);
                     checkCuda(cudaGetLastError(), "resolveHitColorsKernel additionalBounce launch");
-                    checkCuda(cudaDeviceSynchronize(), "resolveHitColorsKernel additionalBounce sync");
+                    checkLaunch("resolveHitColorsKernel additionalBounce sync");
                 } else
 #endif
                 {
@@ -2533,6 +2613,7 @@ void RendererNeural::render(const Vec3& camPos) {
             PROF_BEGIN(KID_finalize);
             lambertKernel<<<grid, block>>>(
                     devicePixels_,
+                    accum_,
                     hitNormals_,
                     hitColors_,
                     hitFlags_,
@@ -2540,7 +2621,7 @@ void RendererNeural::render(const Vec3& camPos) {
                     envView);
             checkCuda(cudaGetLastError(), "lambertKernel launch");
             PROF_END();  // KID_finalize
-            accumSampleCount_ = 0;
+            accumSampleCount_ += static_cast<uint32_t>(samplesPerPixel);
         }
     } else {
         // --- Ground truth mesh path tracing (wavefront architecture) ---
@@ -2566,11 +2647,11 @@ void RendererNeural::render(const Vec3& camPos) {
                         &optixState_->sbt,
                         static_cast<unsigned int>(params.width),
                         static_cast<unsigned int>(params.height), 1);
-            checkCuda(cudaDeviceSynchronize(), "optixLaunch primaryGT");
+            checkLaunch("optixLaunch primaryGT");
             resolveHitColorsKernel<<<grid, block>>>(
                     hitColors_, hitMaterialParams_, hitFlags_, params, classicView);
             checkCuda(cudaGetLastError(), "resolveHitColorsKernel launch");
-            checkCuda(cudaDeviceSynchronize(), "resolveHitColorsKernel sync");
+            checkLaunch("resolveHitColorsKernel sync");
         } else
 #endif
         {
@@ -2583,7 +2664,7 @@ void RendererNeural::render(const Vec3& camPos) {
                 params,
                 classicView);
         checkCuda(cudaGetLastError(), "intersectGroundTruthKernel launch");
-        checkCuda(cudaDeviceSynchronize(), "intersectGroundTruthKernel sync");
+        checkLaunch("intersectGroundTruthKernel sync");
         }
         PROF_END();  // KID_primaryTrace
 
@@ -2591,6 +2672,7 @@ void RendererNeural::render(const Vec3& camPos) {
             PROF_BEGIN(KID_finalize);
             lambertKernel<<<grid, block>>>(
                     devicePixels_,
+                    accum_,
                     hitNormals_,
                     hitColors_,
                     hitFlags_,
@@ -2598,7 +2680,7 @@ void RendererNeural::render(const Vec3& camPos) {
                     envView);
             checkCuda(cudaGetLastError(), "lambertKernel launch");
             PROF_END();  // KID_finalize
-            accumSampleCount_ = 0;
+            accumSampleCount_ += static_cast<uint32_t>(samplesPerPixel);
         } else {
             // 2. Initialize path state
             PROF_BEGIN(KID_initPathState);
@@ -2668,11 +2750,11 @@ void RendererNeural::render(const Vec3& camPos) {
                                 &optixState_->sbt,
                                 static_cast<unsigned int>(params.width),
                                 static_cast<unsigned int>(params.height), 1);
-                    checkCuda(cudaDeviceSynchronize(), "optixLaunch bounceGT");
+                    checkLaunch("optixLaunch bounceGT");
                     resolveHitColorsKernel<<<grid, block>>>(
                             bounceColors_, bounceMaterialParams_, bounceHitFlags_, params, classicView);
                     checkCuda(cudaGetLastError(), "resolveHitColorsKernel bounceGT launch");
-                    checkCuda(cudaDeviceSynchronize(), "resolveHitColorsKernel bounceGT sync");
+                    checkLaunch("resolveHitColorsKernel bounceGT sync");
                 } else
 #endif
                 {
@@ -2735,10 +2817,18 @@ void RendererNeural::render(const Vec3& camPos) {
 
 #ifdef PROFILE_KERNELS
     // Synchronize and collect all timing events recorded this frame.
+    cudaEventRecord(frameStop_, 0);
     checkCuda(cudaDeviceSynchronize(), "profile end sync");
+    if (profilePoolUsed_ >= kProfilePoolSize) {
+        std::fprintf(stderr, "[PROFILE] event pool exhausted (%d slots), timings are incomplete\n",
+                     kProfilePoolSize);
+    }
     {
         KernelTimings t;
-        t.rayCount       = width_ * height_ * samplesPerPixel;
+        float frameMs = 0.0f;
+        cudaEventElapsedTime(&frameMs, frameStart_, frameStop_);
+        t.frameMs = static_cast<double>(frameMs);
+        t.rayCount       = static_cast<uint64_t>(width_) * height_ * samplesPerPixel;
         t.neuralRayCalls = neuralRayCalls_;
         for (int i = 0; i < profilePoolUsed_; ++i) {
             if (profilePool_[i].kid >= 0 && profilePool_[i].kid < KID_COUNT) {

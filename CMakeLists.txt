@@ -219,10 +219,6 @@ if(USE_OPTIX)
 endif()
 
 # Kernel profiling option (viewer only; zero overhead when OFF)
-option(PROFILE_KERNELS "Enable per-kernel GPU timing in the viewer" OFF)
-if(PROFILE_KERNELS)
-    target_compile_definitions(viewer PRIVATE PROFILE_KERNELS)
-endif()
 
 # Evaluation tool (ground truth vs neural comparison with PSNR and FLIP)
 add_executable(evaluate
@@ -260,6 +256,29 @@ if (TARGET assimp::assimp)
     target_link_libraries(evaluate PRIVATE assimp::assimp)
 else()
     target_link_libraries(evaluate PRIVATE assimp)
+endif()
+
+option(PROFILE_KERNELS "Enable per-kernel GPU timing in the viewer and evaluate" OFF)
+if(PROFILE_KERNELS)
+    target_compile_definitions(viewer PRIVATE PROFILE_KERNELS)
+    target_compile_definitions(evaluate PRIVATE PROFILE_KERNELS)
+endif()
+
+# OptiX for evaluate too (same wiring as the viewer above). Without this the LiteRT
+# benchmark, which renders through evaluate, always used the software BVH.
+if(USE_OPTIX)
+    target_sources(evaluate PRIVATE
+        src/rt/optix_state.cu
+        src/rt/optix_state.h
+        src/rt/optix_launch_params.h
+    )
+    add_dependencies(evaluate optix_ptx_header)
+    target_include_directories(evaluate PRIVATE
+        ${OPTIX_INCLUDE_DIR}
+        ${CMAKE_CURRENT_BINARY_DIR}   # for optix_programs_ptx.h
+    )
+    target_compile_definitions(evaluate PRIVATE USE_OPTIX)
+    target_link_libraries(evaluate PRIVATE CUDA::cuda_driver)
 endif()
 
 # Image comparison tool (PSNR and FLIP between two existing images)

@@ -94,9 +94,13 @@ bool LoadConfigFromFile(const char* configPath, RendererConfig* config, std::str
         if (j.contains("rendering")) {
             auto& render = j["rendering"];
             config->rendering.total_samples = render.value("total_samples", 2048);
+            config->rendering.center_rays = render.value("center_rays", false);
+            config->rendering.use_hardware_rt = render.value("use_hardware_rt", true);
             config->rendering.bounce_count = render.value("bounce_count", 3);
             config->rendering.width = render.value("width", 1920);
             config->rendering.height = render.value("height", 1080);
+            config->rendering.output_path = resolvePath(render.value("output_path", std::string()));
+            config->rendering.render_ground_truth = render.value("render_ground_truth", true);
         }
 
         // Parse material settings
@@ -127,12 +131,40 @@ bool LoadConfigFromFile(const char* configPath, RendererConfig* config, std::str
             }
         }
 
+        // Parse shading settings
+        if (j.contains("shading")) {
+            auto& sh = j["shading"];
+
+            config->shading.lambert = sh.value("lambert", false);
+            config->shading.litert_mode = sh.value("litert_mode", true);
+            config->shading.dir_intensity = sh.value("dir_intensity", 2.0f / 3.0f);
+            config->shading.ambient = sh.value("ambient", 0.25f);
+            config->shading.white_base_color = sh.value("white_base_color", true);
+            config->shading.encode_srgb = sh.value("encode_srgb", false);
+
+            if (sh.contains("light_dir") && sh["light_dir"].is_array() && sh["light_dir"].size() == 3) {
+                config->shading.light_dir.x = sh["light_dir"][0].get<float>();
+                config->shading.light_dir.y = sh["light_dir"][1].get<float>();
+                config->shading.light_dir.z = sh["light_dir"][2].get<float>();
+            }
+
+            if (sh.contains("background") && sh["background"].is_array() && sh["background"].size() >= 3) {
+                config->shading.background.x = sh["background"][0].get<float>();
+                config->shading.background.y = sh["background"][1].get<float>();
+                config->shading.background.z = sh["background"][2].get<float>();
+            }
+        }
+
         // Parse neural network settings
         if (j.contains("neural_network")) {
             auto& nn = j["neural_network"];
             config->neural_network.log2_hashmap_size = nn.value("log2_hashmap_size", 14);
             config->neural_network.base_resolution = nn.value("base_resolution", 16);
             config->neural_network.use_neural_query = nn.value("use_neural_query", false);
+            config->neural_network.n_neurons = nn.value("n_neurons", 128);
+            config->neural_network.n_hidden_layers = nn.value("n_hidden_layers", 4);
+            config->neural_network.n_levels = nn.value("n_levels", 8);
+            config->neural_network.mlp_otype = nn.value("mlp_otype", std::string("FullyFusedMLP"));
         }
 
     } catch (const std::exception& e) {

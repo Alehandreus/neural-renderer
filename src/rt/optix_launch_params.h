@@ -29,7 +29,7 @@ struct RayPayload {
 struct OptixLaunchParams {
     // Which GAS to trace against (mesh-specific handles)
     OptixTraversableHandle gas;   // Primary mesh for this launch
-    OptixTraversableHandle gas2;  // Secondary mesh (shellExit needs outer+inner)
+    OptixTraversableHandle gas2;  // Secondary mesh (inner shell for shellInnerEnter)
 
     RenderParams renderParams;
 
